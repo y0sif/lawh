@@ -5,6 +5,8 @@
 
 mod common;
 
+use std::time::{Duration, Instant};
+
 use kurbo::{Point, Rect};
 use lawh_core::{Board, Object, ObjectId, Shape};
 use lawh_render::{BASE_PX_PER_UNIT, RenderError, Renderer, TEXT_SIZE_UNITS, Viewport};
@@ -191,6 +193,39 @@ fn failed_math_shows_its_source_in_red() {
     let red = red_pixels(buf);
     assert!(red > 50, "expected red error text, found {red} red pixels");
     assert_eq!(grey_pixels(buf), 0);
+    assert_eq!(renderer.math_pending(), 0);
+}
+
+#[test]
+fn a_formula_too_large_to_draw_is_red_and_fast_at_every_zoom() {
+    // The verifier's repro: zoomed in, this circle made the renderer flatten an
+    // arc 2e21 pixels long, about 51 GB.
+    let board = common::board("lawh version=1\nmath id=m1 x=0 y=0 \"#circle(radius: 1e18pt)\"\n");
+    let mut renderer = Renderer::new();
+    renderer.resolve_math(&board);
+    let bounds = renderer.board_bounds(&board).unwrap();
+    // Laid out as its source text, not as a circle 2e18 pt across.
+    assert!(bounds.width() < 20.0 && bounds.height() < 1.0, "{bounds:?}");
+
+    let fit = Viewport::fit(bounds, 800, 600, 2.0);
+    let mut viewports = vec![fit];
+    // Zoomed in on the start of the text, where the circle's arc would be.
+    for zoom in [0.3, 1.0, 3.0, 12.0, 20.0] {
+        viewports.push(Viewport::new(Point::new(0.4, 0.3), zoom, 800, 600, 2.0));
+    }
+    for vp in viewports {
+        let started = Instant::now();
+        let buf = renderer.render(&board, &vp);
+        let took = started.elapsed();
+        assert!(
+            took < Duration::from_millis(500),
+            "zoom {} took {took:?}",
+            vp.zoom
+        );
+        let red = red_pixels(buf);
+        assert!(red > 20, "zoom {}: {red} red pixels", vp.zoom);
+        assert_eq!(ink_pixels(buf), 0, "zoom {}", vp.zoom);
+    }
     assert_eq!(renderer.math_pending(), 0);
 }
 

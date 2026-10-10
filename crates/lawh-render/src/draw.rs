@@ -1,12 +1,17 @@
-//! Shape geometry in screen pixels: outlines, arrowheads and the dot grid.
+//! Shape geometry in screen pixels: outlines, arrowheads, the dot grid and math paths.
 //!
 //! Every outline is cut down to `clip`, a rectangle a little larger than the image, in `f64`
 //! before `vello_cpu` sees it. Shapes can be millions of pixels across at high zoom; cut down,
 //! they cost the same as small ones, and `vello_cpu`'s `f32` coordinates stay precise.
+//! `vello_cpu` flattens every curve that reaches into the image whole, so an uncut curve
+//! billions of pixels long would take gigabytes.
 
 use std::f64::consts::{PI, TAU};
 
-use kurbo::{Arc, BezPath, Circle, Ellipse, Point, Rect, Shape as _, Vec2};
+use kurbo::{
+    Arc, BezPath, Circle, CubicBez, Ellipse, Line, ParamCurve as _, PathEl, PathSeg, Point,
+    QuadBez, Rect, Shape as _, Vec2,
+};
 
 use crate::Viewport;
 
@@ -36,11 +41,27 @@ const GRID_MAX_DOTS_PER_AXIS: f64 = 4096.0;
 /// cut to their visible arcs first.
 const WHOLE_ELLIPSE_REACH_PX: f64 = 65_536.0;
 
+/// How far past the clip a piece of a cut path may reach and still be drawn as a curve: a
+/// piece that big flattens into at most a few hundred lines.
+const CUT_REACH_PX: f64 = 1024.0;
+
+/// Most halvings while cutting one path. Each halving brings a piece crossing the clip's edge
+/// to half the size, so about 60 per crossing take a curve 1e21 pixels across down to
+/// [`CUT_REACH_PX`]. Past the budget, pieces are drawn as straight lines, so the cost of a
+/// path stays bounded whatever it holds.
+const MAX_HALVINGS: u32 = 1 << 16;
+
 /// Room around the image for strokes and arrowheads, in physical pixels: an object is drawn
 /// when its bounds reach into the image grown by this much, and outlines are cut at that
 /// border, where a stroke's caps and joins can't be seen.
 pub(crate) fn cull_padding_px(vp: &Viewport) -> f64 {
     (ARROW_HEAD_MAX_PX + STROKE_PX) * vp.scale_factor
+}
+
+/// The screen rectangle objects are cut to: the image grown by [`cull_padding_px`].
+pub(crate) fn clip_rect(vp: &Viewport) -> Rect {
+    let pad = cull_padding_px(vp);
+    Rect::new(0.0, 0.0, f64::from(vp.width), f64::from(vp.height)).inflate(pad, pad)
 }
 
 pub(crate) fn stroke_width_px(vp: &Viewport) -> f64 {
@@ -168,6 +189,146 @@ pub(crate) fn arrow(
     let tip = tip.bounding_box().overlaps(clip).then_some(tip);
     let shaft = clip_segment(a, b - along * (head * 0.5), clip).map(|(a, b)| segment(a, b));
     (shaft, tip)
+}
+
+/// `path`, in screen pixels, with everything far from `clip` straightened, so `vello_cpu`
+/// never flattens more of a curve than reaches near `clip`. Fill it, or stroke it when `clip`
+/// has been grown by the stroke width; inside `clip` the result is the same as for `path`.
+///
+/// A curve or line that reaches into `clip` and more than [`CUT_REACH_PX`] past it is halved
+/// until each piece either stays within that reach or lies outside `clip`. A piece outside
+/// becomes a straight line between its ends, both moved to within the reach. Two rectangles
+/// that don't overlap are apart along one axis, so the piece and its line lie beyond the same
+/// edge of `clip`, and they wind the same way around every point inside it: the fill there is
+/// unchanged, and neither one's stroke reaches in. `vello_cpu` then sees curves no larger than
+/// `clip` plus the reach, and lines, which cost the same at any length.
+///
+/// With `close`, an open subpath gets its closing line here, as a fill would close it, so that
+/// line is cut down too. A path that doesn't start with a move is malformed and comes back
+/// empty.
+pub(crate) fn cut_path(path: &BezPath, clip: Rect, close: bool) -> BezPath {
+    let Some(PathEl::MoveTo(first)) = path.elements().first() else {
+        return BezPath::new();
+    };
+    let near = clip.inflate(CUT_REACH_PX, CUT_REACH_PX);
+    if near.contains_rect(path.control_box()) {
+        return path.clone();
+    }
+    let mut cut = Cut {
+        clip,
+        near,
+        out: BezPath::new(),
+        pieces: Vec::new(),
+        halvings_left: MAX_HALVINGS,
+    };
+    let (mut start, mut last) = (*first, *first);
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if close && last != start {
+                    cut.segment(PathSeg::Line(Line::new(last, start)));
+                }
+                cut.out.move_to(cut.moved_near(p));
+                (start, last) = (p, p);
+            }
+            PathEl::LineTo(p) => {
+                cut.segment(PathSeg::Line(Line::new(last, p)));
+                last = p;
+            }
+            PathEl::QuadTo(a, p) => {
+                cut.segment(PathSeg::Quad(QuadBez::new(last, a, p)));
+                last = p;
+            }
+            PathEl::CurveTo(a, b, p) => {
+                cut.segment(PathSeg::Cubic(CubicBez::new(last, a, b, p)));
+                last = p;
+            }
+            PathEl::ClosePath => {
+                if last != start {
+                    cut.segment(PathSeg::Line(Line::new(last, start)));
+                }
+                cut.out.close_path();
+                last = start;
+            }
+        }
+    }
+    if close && last != start {
+        cut.segment(PathSeg::Line(Line::new(last, start)));
+    }
+    cut.out
+}
+
+/// The state of one [`cut_path`].
+struct Cut {
+    clip: Rect,
+    /// `clip` grown by [`CUT_REACH_PX`]: pieces inside it are kept as they are.
+    near: Rect,
+    out: BezPath,
+    /// Pieces of the current segment still to look at, the next one last.
+    pieces: Vec<PathSeg>,
+    halvings_left: u32,
+}
+
+impl Cut {
+    /// Appends `segment`, whose start is the end of what `out` holds, cut down.
+    fn segment(&mut self, segment: PathSeg) {
+        self.pieces.push(segment);
+        while let Some(piece) = self.pieces.pop() {
+            let bounds = control_box(piece);
+            if self.near.contains_rect(bounds) {
+                // Its ends are inside `near`, so the line before it, if any, ended exactly
+                // where it starts.
+                self.out.push(piece.as_path_el());
+            } else if bounds.overlaps(self.clip) && self.halvings_left > 0 {
+                self.halvings_left -= 1;
+                let (a, b) = halves(piece);
+                self.pieces.extend([b, a]);
+            } else {
+                // Outside `clip`, or out of budget.
+                let end = self.moved_near(piece.end());
+                self.out.line_to(end);
+            }
+        }
+    }
+
+    /// `p` moved to the nearest point of `near`. Never panics, unlike `f64::clamp`.
+    fn moved_near(&self, p: Point) -> Point {
+        Point::new(
+            p.x.max(self.near.x0).min(self.near.x1),
+            p.y.max(self.near.y0).min(self.near.y1),
+        )
+    }
+}
+
+/// The smallest rectangle holding a segment's points, control points included; the segment
+/// lies inside it.
+fn control_box(segment: PathSeg) -> Rect {
+    match segment {
+        PathSeg::Line(l) => Rect::from_points(l.p0, l.p1),
+        PathSeg::Quad(q) => Rect::from_points(q.p0, q.p1).union_pt(q.p2),
+        PathSeg::Cubic(c) => Rect::from_points(c.p0, c.p1).union_pt(c.p2).union_pt(c.p3),
+    }
+}
+
+/// A segment split in two at its parameter midpoint; the ends stay exactly where they were.
+fn halves(segment: PathSeg) -> (PathSeg, PathSeg) {
+    match segment {
+        PathSeg::Line(l) => {
+            let mid = l.p0.midpoint(l.p1);
+            (
+                PathSeg::Line(Line::new(l.p0, mid)),
+                PathSeg::Line(Line::new(mid, l.p1)),
+            )
+        }
+        PathSeg::Quad(q) => {
+            let (a, b) = q.subdivide();
+            (PathSeg::Quad(a), PathSeg::Quad(b))
+        }
+        PathSeg::Cubic(c) => {
+            let (a, b) = c.subdivide();
+            (PathSeg::Cubic(a), PathSeg::Cubic(b))
+        }
+    }
 }
 
 /// One path holding a dot at every grid point on screen, or `None` when zoomed out too far for
@@ -315,6 +476,102 @@ mod tests {
         let radii = Vec2::new(1e6, 1e6);
         assert!(visible_arcs(Point::new(50.0, 25.0), radii, CLIP).is_none());
         assert!(visible_arcs(Point::new(5e6, 25.0), radii, CLIP).is_none());
+    }
+
+    /// `path` and `cut` wind the same way around points spread over `CLIP`, and `cut` stays
+    /// near `CLIP`.
+    fn assert_cut_matches(path: &BezPath, cut: &BezPath) {
+        let near = CLIP.inflate(CUT_REACH_PX, CUT_REACH_PX);
+        assert!(
+            near.contains_rect(cut.control_box()),
+            "{:?}",
+            cut.control_box()
+        );
+        let mut inside = 0;
+        for i in 0..100 {
+            for j in 0..50 {
+                let p = Point::new(f64::from(i) + 0.37, f64::from(j) + 0.61);
+                let winding = path.winding(p);
+                assert_eq!(cut.winding(p), winding, "at {p:?}");
+                inside += usize::from(winding != 0);
+            }
+        }
+        // Each test path crosses the clip, so some points are inside and some aren't, apart
+        // from the one around the whole clip.
+        assert!(inside > 0, "no point inside");
+    }
+
+    #[test]
+    fn small_paths_are_not_cut() {
+        let path = Circle::new((50.0, 25.0), 500.0).to_path(0.1);
+        assert_eq!(cut_path(&path, CLIP, true), path);
+        assert_eq!(cut_path(&BezPath::new(), CLIP, true), BezPath::new());
+    }
+
+    #[test]
+    fn cut_paths_fill_the_same_inside_the_clip() {
+        // A circle 1.6e9 px in radius whose edge passes through the clip.
+        let circle = Circle::new((50.0 - 1.6e9, 25.0), 1.6e9).to_path(0.1);
+        let cut = cut_path(&circle, CLIP, true);
+        assert!(cut.elements().len() < circle.elements().len() + 200);
+        assert_cut_matches(&circle, &cut);
+
+        // The same circle twice, so the inside winds twice, and a square around the whole clip.
+        let mut twice = circle.clone();
+        twice.extend(circle.iter());
+        assert_cut_matches(&twice, &cut_path(&twice, CLIP, true));
+        let around = Rect::new(-1e12, -1e12, 1e12, 1e12).to_path(0.0);
+        assert_cut_matches(&around, &cut_path(&around, CLIP, true));
+
+        // A loop crossing itself inside the clip.
+        let mut knot = BezPath::new();
+        knot.move_to((-1e10, -1e10));
+        knot.curve_to((1e11, 3e10), (-1e11, 3e10), (1e10, -1e10));
+        knot.close_path();
+        assert_cut_matches(&knot, &cut_path(&knot, CLIP, true));
+    }
+
+    #[test]
+    fn open_paths_are_closed_before_the_cut_when_filled() {
+        // A triangle open on its long side, x + y = 60, which crosses the clip diagonally.
+        // Closing it after the cut, between its corners moved near the clip, would close it
+        // along another diagonal.
+        let mut open = BezPath::new();
+        open.move_to((-1e9, 1e9 + 60.0));
+        open.line_to((-1e9, -1e9));
+        open.line_to((1e9 + 60.0, -1e9));
+        let mut closed = open.clone();
+        closed.close_path();
+        assert_cut_matches(&closed, &cut_path(&open, CLIP, true));
+
+        // A stroke keeps it open: nothing but the lines outside the clip.
+        let stroked = cut_path(&open, CLIP, false);
+        let near = CLIP.inflate(CUT_REACH_PX, CUT_REACH_PX);
+        assert!(stroked.segments().all(|seg| {
+            let bounds = seg.bounding_box();
+            near.contains_rect(bounds) && !bounds.overlaps(CLIP)
+        }));
+    }
+
+    #[test]
+    fn curves_far_too_big_for_vello_are_cut_to_a_few_pieces() {
+        // The verifier's repro as a 2e21 px arc (35 elements cut to 153), and one near the
+        // largest float, which takes about a thousand halvings per crossing.
+        for (radius, most_added) in [(2e21, 200), (1e300, 2 * MAX_HALVINGS as usize)] {
+            let circle = Circle::new((50.0 - radius, 25.0), radius).to_path(radius * 1e-9);
+            let cut = cut_path(&circle, CLIP, true);
+            let near = CLIP.inflate(CUT_REACH_PX, CUT_REACH_PX);
+            assert!(near.contains_rect(cut.control_box()), "{radius}");
+            let added = cut.elements().len() - circle.elements().len();
+            assert!(added < most_added, "{radius}: {added} elements added");
+            // The visible arc survives as curves crossing the clip.
+            assert!(
+                cut.segments().any(
+                    |seg| matches!(seg, PathSeg::Cubic(_)) && seg.bounding_box().overlaps(CLIP)
+                ),
+                "{radius}"
+            );
+        }
     }
 
     #[test]

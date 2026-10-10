@@ -1,7 +1,7 @@
 //! Typst frame → [`MathLayout`]: absolute glyph positions and vector paths in
 //! pt, y down, origin at the top-left of the formula box.
 
-use kurbo::{Affine, BezPath, Shape as _};
+use kurbo::{Affine, BezPath, PathEl, Point, Shape as _};
 use typst::foundations::Value;
 use typst::introspection::{MetadataElem, Tag};
 use typst::layout::{Abs, Frame, FrameItem, Transform};
@@ -10,7 +10,7 @@ use typst::visualize::{Color, CurveItem, FixedStroke, Geometry, Paint, Shape};
 
 use crate::fonts::asset_index;
 use crate::world::BASELINE_MARKER;
-use crate::{MathError, MathGlyph, MathItem, MathLayout};
+use crate::{MAX_LAYOUT_EXTENT_PT, MathError, MathGlyph, MathItem, MathLayout};
 
 /// Fallback colour for gradients and tilings, which a layout can't carry.
 const BLACK: [u8; 4] = [0, 0, 0, 255];
@@ -25,6 +25,46 @@ pub(crate) fn convert(page: &Frame) -> Result<MathLayout, MathError> {
         baseline: first_baseline(page, Affine::IDENTITY).unwrap_or_else(|| page.height().to_pt()),
         items,
     })
+}
+
+/// [`MathError::TooLarge`] unless every number in `layout` is within
+/// [`MAX_LAYOUT_EXTENT_PT`] of zero (which also rules out NaN and infinity).
+///
+/// Both [`crate::compile::compile`] (in process and in the worker) and the
+/// parent's decoding of a worker's reply run this, so no layout reaches the
+/// renderer without it.
+pub(crate) fn check_extent(layout: &MathLayout) -> Result<(), MathError> {
+    let box_fits = [layout.width, layout.height, layout.baseline]
+        .into_iter()
+        .all(fits);
+    let items_fit = layout.items.iter().all(|item| match item {
+        MathItem::Glyphs { size, glyphs, .. } => {
+            fits(*size) && glyphs.iter().all(|glyph| fits(glyph.x) && fits(glyph.y))
+        }
+        MathItem::Path { path, stroke, .. } => {
+            stroke.is_none_or(|(width, _)| fits(width))
+                && path.elements().iter().all(|el| match *el {
+                    PathEl::MoveTo(p) | PathEl::LineTo(p) => point_fits(p),
+                    PathEl::QuadTo(a, p) => point_fits(a) && point_fits(p),
+                    PathEl::CurveTo(a, b, p) => point_fits(a) && point_fits(b) && point_fits(p),
+                    PathEl::ClosePath => true,
+                })
+        }
+    });
+    if box_fits && items_fit {
+        Ok(())
+    } else {
+        Err(MathError::TooLarge)
+    }
+}
+
+/// False for NaN too.
+fn fits(v: f64) -> bool {
+    v.abs() <= MAX_LAYOUT_EXTENT_PT
+}
+
+fn point_fits(p: Point) -> bool {
+    fits(p.x) && fits(p.y)
 }
 
 /// The baseline of the first line: where the [`BASELINE_MARKER`] tag sits.
@@ -272,6 +312,94 @@ mod tests {
             panic!("expected the glyph a first");
         };
         assert!((two_lines.baseline - glyphs[0].y).abs() < 1e-9);
+    }
+
+    fn small() -> MathLayout {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        path.curve_to((1.0, 2.0), (3.0, 4.0), (5.0, 6.0));
+        MathLayout {
+            width: 10.0,
+            height: 10.0,
+            baseline: 8.0,
+            items: vec![
+                MathItem::Glyphs {
+                    font: 0,
+                    size: 20.0,
+                    fill: BLACK,
+                    glyphs: vec![MathGlyph {
+                        id: 1,
+                        x: 0.0,
+                        y: 8.0,
+                    }],
+                },
+                MathItem::Path {
+                    path,
+                    fill: None,
+                    stroke: Some((1.0, BLACK)),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn every_number_counts_for_the_extent() {
+        type Edit = fn(&mut MathLayout, f64);
+        assert_eq!(check_extent(&small()), Ok(()));
+        let at_cap = MAX_LAYOUT_EXTENT_PT;
+        let past_cap = MAX_LAYOUT_EXTENT_PT.next_up();
+        let edits: [(&str, Edit); 9] = [
+            ("width", |l, v| l.width = v),
+            ("height", |l, v| l.height = -v),
+            ("baseline", |l, v| l.baseline = v),
+            ("glyph size", |l, v| {
+                if let MathItem::Glyphs { size, .. } = &mut l.items[0] {
+                    *size = v;
+                }
+            }),
+            ("glyph x", |l, v| {
+                if let MathItem::Glyphs { glyphs, .. } = &mut l.items[0] {
+                    glyphs[0].x = -v;
+                }
+            }),
+            ("glyph y", |l, v| {
+                if let MathItem::Glyphs { glyphs, .. } = &mut l.items[0] {
+                    glyphs[0].y = v;
+                }
+            }),
+            ("stroke width", |l, v| {
+                if let MathItem::Path { stroke, .. } = &mut l.items[1] {
+                    *stroke = Some((v, BLACK));
+                }
+            }),
+            ("control point", |l, v| {
+                if let MathItem::Path { path, .. } = &mut l.items[1] {
+                    let mut els = path.elements().to_vec();
+                    els[1] =
+                        PathEl::CurveTo((1.0, -v).into(), (3.0, 4.0).into(), (5.0, 6.0).into());
+                    *path = BezPath::from_vec(els);
+                }
+            }),
+            ("end point", |l, v| {
+                if let MathItem::Path { path, .. } = &mut l.items[1] {
+                    path.line_to((v, 0.0));
+                }
+            }),
+        ];
+        for (name, edit) in edits {
+            let mut layout = small();
+            edit(&mut layout, at_cap);
+            assert_eq!(check_extent(&layout), Ok(()), "{name} at the cap");
+            for bad in [past_cap, f64::NAN, f64::INFINITY] {
+                let mut layout = small();
+                edit(&mut layout, bad);
+                assert_eq!(
+                    check_extent(&layout),
+                    Err(MathError::TooLarge),
+                    "{name} = {bad}"
+                );
+            }
+        }
     }
 
     #[test]

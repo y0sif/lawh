@@ -5,9 +5,32 @@
 
 use std::fmt::Write as _;
 use std::sync::{Arc, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use lawh_math::{MathEngine, MathItem, MathLayout, MathStatus, fonts};
+use lawh_math::{
+    MAX_LAYOUT_EXTENT_PT, MathEngine, MathError, MathItem, MathLayout, MathStatus, fonts,
+};
+
+/// Formulas built to be huge: each reaches far past [`MAX_LAYOUT_EXTENT_PT`].
+/// The circle is the verifier's repro: zoomed in, it made the renderer
+/// flatten an arc 2e21 pixels long.
+const TOO_LARGE: [&str; 4] = [
+    "#circle(radius: 1e18pt)",
+    "#box(width: 1e9pt)",
+    "#h(1e9pt)",
+    "#line(length: 1e12pt)",
+];
+
+/// An `n` x `n` matrix of subscripted entries.
+fn matrix(n: usize) -> String {
+    let rows: Vec<String> = (1..=n)
+        .map(|i| {
+            let row: Vec<String> = (1..=n).map(|j| format!("a_({i},{j})")).collect();
+            row.join(", ")
+        })
+        .collect();
+    format!("mat({})", rows.join("; "))
+}
 
 /// Size, baseline (2 decimals) and the item list as kinds and counts, which
 /// stays stable across small layout tweaks that don't matter.
@@ -130,4 +153,36 @@ fn request_works_in_process_too() {
         &layout,
         &engine.layout_blocking("x^2").unwrap()
     ));
+}
+
+#[test]
+fn huge_layouts_are_too_large_and_cached() {
+    let engine = MathEngine::new();
+    for src in TOO_LARGE {
+        assert_eq!(engine.layout(src), Err(MathError::TooLarge), "{src}");
+        let started = Instant::now();
+        assert_eq!(
+            engine.request(src),
+            MathStatus::Failed(MathError::TooLarge),
+            "{src}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(50), "{src}");
+    }
+}
+
+#[test]
+fn big_real_formulas_stay_well_under_the_extent_cap() {
+    // Generous: a big matrix compiles in well under a second, but debug builds on a busy
+    // machine are slow.
+    let engine = MathEngine::new().with_timeout(Duration::from_secs(30));
+    let sums = format!("{}0", "sum_(i=1)^n i + ".repeat(100));
+    for src in [matrix(30), "sum_(i=1)^n".to_owned(), sums] {
+        let layout = engine.layout(&src).unwrap();
+        let extent = layout.width.max(layout.height);
+        assert!(
+            extent < MAX_LAYOUT_EXTENT_PT / 10.0,
+            "{extent} pt: {}",
+            &src[..40.min(src.len())]
+        );
+    }
 }

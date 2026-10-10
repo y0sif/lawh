@@ -200,6 +200,57 @@ fn worker_layouts_match_in_process_layouts_exactly() {
 }
 
 #[test]
+fn huge_layouts_are_too_large_in_the_worker_too() {
+    let in_process = MathEngine::new();
+    let worker = engine();
+    for src in [
+        "#circle(radius: 1e18pt)",
+        "#box(width: 1e9pt)",
+        "#h(1e9pt)",
+        "#line(length: 1e12pt)",
+    ] {
+        let started = Instant::now();
+        assert_eq!(
+            worker.layout_blocking(src),
+            Err(MathError::TooLarge),
+            "{src}"
+        );
+        assert!(started.elapsed() < FAIL_WITHIN, "{src}");
+        assert_eq!(in_process.layout(src), Err(MathError::TooLarge), "{src}");
+        // Cached like any failure.
+        let started = Instant::now();
+        assert_eq!(
+            worker.request(src),
+            MathStatus::Failed(MathError::TooLarge),
+            "{src}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(50), "{src}");
+    }
+    // The worker is still the same healthy one.
+    assert!(worker.layout_blocking("A = pi r^2").is_ok());
+}
+
+#[test]
+fn big_real_formulas_lay_out_in_the_worker() {
+    let rows: Vec<String> = (1..=30)
+        .map(|i| {
+            let row: Vec<String> = (1..=30).map(|j| format!("a_({i},{j})")).collect();
+            row.join(", ")
+        })
+        .collect();
+    let matrix = format!("mat({})", rows.join("; "));
+    // Generous: a debug worker on a busy machine is slow.
+    let timeout = Duration::from_secs(30);
+    let in_process = MathEngine::new().with_timeout(timeout);
+    let worker = MathEngine::with_worker(worker()).with_timeout(timeout);
+    for src in [matrix.as_str(), "sum_(i=1)^n"] {
+        let layout = worker.layout_blocking(src);
+        assert!(layout.is_ok(), "{layout:?}");
+        assert_eq!(layout, in_process.layout(src));
+    }
+}
+
+#[test]
 fn layout_in_worker_mode_goes_through_the_worker() {
     let engine = engine();
     let first = engine.layout("A = pi r^2").unwrap();

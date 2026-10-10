@@ -10,6 +10,7 @@
 //! ```text
 //! request   u32 timeout_ms, then the formula as UTF-8 (the rest of the frame)
 //! response  u8 0, layout | u8 1, UTF-8 compile error message | u8 2 (panicked)
+//!           | u8 3 (too large)
 //! layout    f64 width, f64 height, f64 baseline, u32 item count, items
 //! glyphs    u8 0, u32 font, f64 size, rgba, u32 count, count x (u32 id, f64 x, f64 y)
 //! path      u8 1, u8 flags (1 fill, 2 stroke), [rgba fill], [f64 width, rgba stroke],
@@ -22,7 +23,9 @@
 //! The parent treats everything the worker sends as untrusted: frames are
 //! capped at [`MAX_FRAME_BYTES`], counts must fit in the bytes left, numbers
 //! must be finite, fonts must be bundled, glyph ids must exist in their font,
-//! paths must start with a move, and nothing may follow the payload.
+//! paths must start with a move, and nothing may follow the payload. A
+//! well-formed layout past [`crate::MAX_LAYOUT_EXTENT_PT`] becomes
+//! [`MathError::TooLarge`], as it would in process.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -33,6 +36,7 @@ use kurbo::{BezPath, PathEl, Point};
 
 use crate::compile::Outcome;
 use crate::fonts::glyph_count;
+use crate::layout::check_extent;
 use crate::{MathError, MathGlyph, MathItem, MathLayout};
 
 /// Version of this format. The parent refuses a worker that announces any
@@ -48,6 +52,7 @@ const MAX_HANDSHAKE_BYTES: usize = 64;
 const RESPONSE_LAYOUT: u8 = 0;
 const RESPONSE_COMPILE_ERROR: u8 = 1;
 const RESPONSE_PANICKED: u8 = 2;
+const RESPONSE_TOO_LARGE: u8 = 3;
 
 const ITEM_GLYPHS: u8 = 0;
 const ITEM_PATH: u8 = 1;
@@ -176,6 +181,7 @@ pub(crate) fn encode_response(outcome: &Outcome) -> Vec<u8> {
             )));
         }
         Err(MathError::Panicked) => out.push(RESPONSE_PANICKED),
+        Err(MathError::TooLarge) => out.push(RESPONSE_TOO_LARGE),
         Err(MathError::Compile(message)) => {
             out.push(RESPONSE_COMPILE_ERROR);
             out.extend_from_slice(message.as_bytes());
@@ -203,17 +209,22 @@ fn is_char_boundary(utf8: &[u8], at: usize) -> bool {
         .is_none_or(|b| (*b & 0b1100_0000) != 0b1000_0000)
 }
 
-/// The parent's side of [`encode_response`], checking everything.
+/// The parent's side of [`encode_response`], checking everything, the
+/// layout's extent included.
 pub(crate) fn decode_response(payload: &[u8]) -> Result<Outcome, ProtocolError> {
     let mut input = Cursor(payload);
     let outcome = match input.u8()? {
-        RESPONSE_LAYOUT => Ok(Arc::new(decode_layout(&mut input)?)),
+        RESPONSE_LAYOUT => {
+            let layout = decode_layout(&mut input)?;
+            check_extent(&layout).map(|()| Arc::new(layout))
+        }
         RESPONSE_COMPILE_ERROR => {
             let message = std::str::from_utf8(input.rest())
                 .map_err(|_| ProtocolError("error message not UTF-8"))?;
             Err(MathError::Compile(message.to_owned()))
         }
         RESPONSE_PANICKED => Err(MathError::Panicked),
+        RESPONSE_TOO_LARGE => Err(MathError::TooLarge),
         _ => return Err(ProtocolError("unknown response")),
     };
     input.finish()?;
@@ -506,6 +517,7 @@ mod tests {
         for err in [
             MathError::Compile("unknown variable: é".into()),
             MathError::Panicked,
+            MathError::TooLarge,
         ] {
             let frame = encode_response(&Err(err.clone()));
             assert_eq!(decode_response(&frame), Ok(Err(err)));
@@ -549,6 +561,23 @@ mod tests {
             glyphs[1].y = bad;
             assert!(decode_response(&layout_frame(&layout)).is_err());
         }
+    }
+
+    #[test]
+    fn layouts_past_the_extent_cap_are_too_large() {
+        let mut layout = sample();
+        layout.width = crate::MAX_LAYOUT_EXTENT_PT;
+        assert!(matches!(decode_response(&layout_frame(&layout)), Ok(Ok(_))));
+
+        let mut layout = sample();
+        let MathItem::Path { path, .. } = &mut layout.items[1] else {
+            unreachable!()
+        };
+        path.curve_to((0.0, -1e18), (1.0, 1.0), (2.0, 2.0));
+        assert_eq!(
+            decode_response(&layout_frame(&layout)),
+            Ok(Err(MathError::TooLarge))
+        );
     }
 
     #[test]
@@ -611,6 +640,7 @@ mod tests {
         assert!(decode_response(&[]).is_err());
         assert!(decode_response(&[RESPONSE_COMPILE_ERROR, 0xff]).is_err());
         assert!(decode_response(&[RESPONSE_PANICKED, 0]).is_err());
+        assert!(decode_response(&[RESPONSE_TOO_LARGE, 0]).is_err());
     }
 
     #[test]

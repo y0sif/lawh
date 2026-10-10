@@ -14,6 +14,10 @@
 //! long or restarts it when it crashes. [`MathEngine::new`] compiles in this
 //! process, for trusted input only. Either way [`MathEngine`] caches every
 //! outcome.
+//!
+//! A layout that reaches past [`MAX_LAYOUT_EXTENT_PT`] is refused as
+//! [`MathError::TooLarge`], so a formula can't hand the renderer geometry
+//! billions of pixels across.
 
 mod compile;
 mod engine;
@@ -32,6 +36,21 @@ pub use worker::{WORKER_MEMORY_LIMIT_BYTES, worker_main};
 /// Font size of math, in Typst pt. [`MathLayout`] coordinates are at this
 /// size; the renderer scales them to the board's text size.
 pub const MATH_FONT_SIZE_PT: f64 = 20.0;
+
+/// Largest absolute value, in pt, that any number in a [`MathLayout`] may
+/// have: the box size, the baseline, glyph sizes and positions, path points
+/// (control points included) and stroke widths. A layout with a larger
+/// number, or one that isn't finite, is [`MathError::TooLarge`], in process
+/// and from the worker alike.
+///
+/// 100,000 pt is about 35 m on paper, or 2,500 grid units (5,000 text ems)
+/// on a board. Real formulas are far smaller: a 30x30 matrix is about 1,500
+/// pt wide and a chain of a hundred sums about 5,500 (see `tests/layout.rs`).
+/// Only a formula built to be huge, such as `#circle(radius: 1e18pt)`, gets
+/// near it; drawing that one zoomed in would mean flattening curves billions
+/// of pixels long. Under the cap, glyph positions also keep `f32` precision
+/// to a hundredth of a pt.
+pub const MAX_LAYOUT_EXTENT_PT: f64 = 100_000.0;
 
 /// A laid-out formula in pt at [`MATH_FONT_SIZE_PT`], origin at the top-left
 /// of the formula box, y down.
@@ -106,4 +125,8 @@ pub enum MathError {
     /// The worker process can't be started; the message says why.
     #[error("math is unavailable: {0}")]
     Unavailable(String),
+    /// The layout reaches past [`MAX_LAYOUT_EXTENT_PT`] or holds a number
+    /// that isn't finite.
+    #[error("math is too large to draw")]
+    TooLarge,
 }
