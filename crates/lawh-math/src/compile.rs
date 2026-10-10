@@ -15,8 +15,9 @@ const COMEMO_MAX_AGE: usize = 10;
 /// What one compile produced.
 pub(crate) type Outcome = Result<Arc<MathLayout>, MathError>;
 
-/// Compiles and converts one formula, refusing a layout past
-/// [`crate::MAX_LAYOUT_EXTENT_PT`].
+/// Compiles and converts one formula, refusing a layout past the limits
+/// ([`crate::MAX_LAYOUT_EXTENT_PT`], [`crate::MAX_LAYOUT_GLYPHS`],
+/// [`crate::MAX_LAYOUT_PATH_ELEMENTS`]).
 pub(crate) fn compile(src: &str) -> Outcome {
     let world = SandboxWorld::new(src);
     let compiled = typst::compile::<PagedDocument>(&world).output;
@@ -30,7 +31,7 @@ pub(crate) fn compile(src: &str) -> Outcome {
         .first()
         .ok_or_else(|| MathError::Compile("the formula produced no page".to_owned()))?;
     let layout = layout::convert(&page.frame)?;
-    layout::check_extent(&layout)?;
+    layout::check_limits(&layout)?;
     Ok(Arc::new(layout))
 }
 

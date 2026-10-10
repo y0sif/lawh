@@ -5,6 +5,7 @@ expression: a/b
 width: 13.08
 height: 34.58
 baseline: 20.38
+ink: 1.35, 0.00 to 11.73, 34.58
 items: 3
 - glyphs: 1 x Libertinus Math 20.0pt
 - glyphs: 1 x Libertinus Math 20.0pt

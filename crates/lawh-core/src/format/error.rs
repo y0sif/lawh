@@ -1,7 +1,7 @@
 //! Errors from reading a `.lawh` file.
 
 use super::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
-use crate::board::{MAX_COORDINATE, MAX_SIZE, MAX_TEXT_CHARS};
+use crate::board::{MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS};
 
 /// Why a `.lawh` file could not be read.
 ///
@@ -181,6 +181,10 @@ pub enum FormatError {
         column: usize,
         kind: String,
     },
+
+    /// More than [`MAX_OBJECTS`] objects. Points at the first object over the limit.
+    #[error("{line}:{column}: too many objects; a board holds at most {MAX_OBJECTS}")]
+    TooManyObjects { line: usize, column: usize },
 }
 
 impl FormatError {
@@ -213,6 +217,7 @@ impl FormatError {
             | Self::ExtraArgument { line, column, .. }
             | Self::TypeAnnotation { line, column }
             | Self::CommentTooDeep { line, column }
+            | Self::TooManyObjects { line, column }
             | Self::CoordinateOutOfRange { line, column, .. }
             | Self::InvalidSize { line, column, .. }
             | Self::TextTooLong { line, column, .. } => (*line, *column),

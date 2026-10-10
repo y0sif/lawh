@@ -18,7 +18,8 @@ fn compile_error(src: &str) -> String {
 fn reading_a_file_is_denied() {
     for src in [
         r#"#include "/etc/passwd""#,
-        r#"#raw("x", lang: "rust", theme: "/etc/passwd")"#,
+        // `raw` is gone by name, but its element function is reachable from raw content.
+        r#"#let f = [`x`].func(); #f("y", lang: "rust", theme: "/etc/passwd")"#,
     ] {
         let message = compile_error(src);
         assert!(message.contains("access denied"), "{src}: {message}");
@@ -38,7 +39,7 @@ fn importing_a_package_fails_without_network() {
 }
 
 #[test]
-fn file_reading_data_loading_and_images_are_not_in_the_library() {
+fn file_reading_data_loading_images_and_raw_are_not_in_the_library() {
     for (name, src) in [
         ("read", r#"#read("/etc/passwd")"#),
         ("image", r#"#image("x.png")"#),
@@ -52,6 +53,8 @@ fn file_reading_data_loading_and_images_are_not_in_the_library() {
             "xml",
             r#"#xml(bytes("<a>" * 200000 + "</a>" * 200000)).len()"#,
         ),
+        ("raw", r#"#raw("x", theme: bytes("<plist/>"))"#),
+        ("raw", r#"#raw("x", syntaxes: bytes("name: x"))"#),
     ] {
         let message = compile_error(src);
         assert!(
@@ -62,6 +65,18 @@ fn file_reading_data_loading_and_images_are_not_in_the_library() {
         assert!(
             message.contains(&format!("does not contain `{name}`")),
             "std.{name}: {message}"
+        );
+    }
+}
+
+#[test]
+fn raw_text_never_draws() {
+    // No bundled monospace font, so raw text made without the name fails too.
+    for src in ["x + #[`code`]", r#"#eval("[`code`]")"#] {
+        let message = compile_error(src);
+        assert!(
+            message.contains("no font could be found"),
+            "{src}: {message}"
         );
     }
 }

@@ -1,6 +1,6 @@
 //! The Typst sandbox: one in-memory source, bundled fonts, no files, no
-//! packages, no clock, no WebAssembly plugins, no image decoding and no data
-//! loading.
+//! packages, no clock, no WebAssembly plugins, no image decoding, no data
+//! loading and no `raw` by name.
 
 use std::sync::OnceLock;
 
@@ -27,6 +27,16 @@ use crate::fonts::{MATH_FAMILY, TEXT_FAMILY, typst_fonts};
 /// - `read` and the data loaders `json`, `yaml`, `toml`, `cbor`, `csv` and
 ///   `xml` read files (denied anyway) or parse inline bytes; deep XML
 ///   overflows the stack and a CBOR header can claim a huge array.
+/// - `raw` parses a `theme` given as inline bytes as a plist (XML, through
+///   quick-xml) and `syntaxes` as YAML (yaml-rust). It never draws in lawh
+///   anyway: there is no bundled monospace font, so any raw text fails with
+///   "no font could be found".
+///
+///   This only narrows the way in. The element function is still reachable
+///   from raw content, which backticks in a content block or `eval` make
+///   without naming it (`` #let f = [`x`].func(); #f("y", theme: bytes(..)) ``),
+///   so those parsers can still run. They run in the worker process, under
+///   its memory cap and timeout, like the rest of Typst.
 const DENIED: &[&str] = &[
     "plugin",
     "cite",
@@ -39,6 +49,7 @@ const DENIED: &[&str] = &[
     "cbor",
     "csv",
     "xml",
+    "raw",
 ];
 
 /// Value of the metadata element that marks the first line's baseline.

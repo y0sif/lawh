@@ -5,6 +5,7 @@ expression: A = pi r^2
 width: 65.85
 height: 17.50
 baseline: 17.26
+ink: 0.40, 0.00 to 64.14, 17.50
 items: 5
 - glyphs: 1 x Libertinus Math 20.0pt
 - glyphs: 1 x Libertinus Math 20.0pt

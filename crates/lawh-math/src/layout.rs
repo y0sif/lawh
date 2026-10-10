@@ -1,16 +1,22 @@
 //! Typst frame → [`MathLayout`]: absolute glyph positions and vector paths in
-//! pt, y down, origin at the top-left of the formula box.
+//! pt, y down, origin at the top-left of the formula box, and the checks every
+//! layout passes before it reaches the renderer.
 
-use kurbo::{Affine, BezPath, PathEl, Point, Shape as _};
+use std::collections::HashMap;
+
+use kurbo::{Affine, BezPath, ParamCurveExtrema, PathEl, Point, Rect, Shape as _};
 use typst::foundations::Value;
 use typst::introspection::{MetadataElem, Tag};
 use typst::layout::{Abs, Frame, FrameItem, Transform};
 use typst::text::TextItem;
 use typst::visualize::{Color, CurveItem, FixedStroke, Geometry, Paint, Shape};
 
-use crate::fonts::asset_index;
+use crate::fonts::{asset_index, glyph_box};
 use crate::world::BASELINE_MARKER;
-use crate::{MAX_LAYOUT_EXTENT_PT, MathError, MathGlyph, MathItem, MathLayout};
+use crate::{
+    MAX_LAYOUT_EXTENT_PT, MAX_LAYOUT_GLYPHS, MAX_LAYOUT_PATH_ELEMENTS, MathError, MathGlyph,
+    MathItem, MathLayout,
+};
 
 /// Fallback colour for gradients and tilings, which a layout can't carry.
 const BLACK: [u8; 4] = [0, 0, 0, 255];
@@ -23,20 +29,135 @@ pub(crate) fn convert(page: &Frame) -> Result<MathLayout, MathError> {
         width: page.width().to_pt(),
         height: page.height().to_pt(),
         baseline: first_baseline(page, Affine::IDENTITY).unwrap_or_else(|| page.height().to_pt()),
+        ink: ink(&items),
         items,
     })
 }
 
-/// [`MathError::TooLarge`] unless every number in `layout` is within
-/// [`MAX_LAYOUT_EXTENT_PT`] of zero (which also rules out NaN and infinity).
+/// [`MathError::TooLarge`] unless `layout` is within every limit: each
+/// number within [`MAX_LAYOUT_EXTENT_PT`] of zero (which also rules out NaN
+/// and infinity), the ink bounds included, at most [`MAX_LAYOUT_GLYPHS`]
+/// glyphs and at most [`MAX_LAYOUT_PATH_ELEMENTS`] path elements, counted as
+/// the constants say.
 ///
 /// Both [`crate::compile::compile`] (in process and in the worker) and the
 /// parent's decoding of a worker's reply run this, so no layout reaches the
 /// renderer without it.
-pub(crate) fn check_extent(layout: &MathLayout) -> Result<(), MathError> {
-    let box_fits = [layout.width, layout.height, layout.baseline]
-        .into_iter()
-        .all(fits);
+pub(crate) fn check_limits(layout: &MathLayout) -> Result<(), MathError> {
+    let counts = Counts::of(layout);
+    if counts.glyphs > MAX_LAYOUT_GLYPHS || counts.weighted_elements > MAX_LAYOUT_PATH_ELEMENTS {
+        return Err(MathError::TooLarge);
+    }
+    check_extent(layout)
+}
+
+/// What [`check_limits`] counts, and what [`approx_bytes`] needs.
+struct Counts {
+    /// Glyphs, an empty run counting as one.
+    glyphs: usize,
+    /// Path elements as [`MAX_LAYOUT_PATH_ELEMENTS`] counts them.
+    weighted_elements: usize,
+    /// Path elements, each once.
+    elements: usize,
+}
+
+impl Counts {
+    fn of(layout: &MathLayout) -> Self {
+        let mut counts = Self {
+            glyphs: 0,
+            weighted_elements: 0,
+            elements: 0,
+        };
+        for item in &layout.items {
+            match item {
+                MathItem::Glyphs { glyphs, .. } => {
+                    counts.glyphs = counts.glyphs.saturating_add(glyphs.len().max(1));
+                }
+                MathItem::Path { path, stroke, .. } => {
+                    let elements = path.elements().len();
+                    let weight = if stroke.is_some() { 2 } else { 1 };
+                    counts.elements = counts.elements.saturating_add(elements);
+                    counts.weighted_elements = counts
+                        .weighted_elements
+                        .saturating_add(elements.max(1).saturating_mul(weight));
+                }
+            }
+        }
+        counts
+    }
+}
+
+/// About how many bytes `layout` takes in memory, for the engine's cache.
+pub(crate) fn approx_bytes(layout: &MathLayout) -> usize {
+    let counts = Counts::of(layout);
+    size_of::<MathLayout>()
+        .saturating_add(layout.items.len().saturating_mul(size_of::<MathItem>()))
+        .saturating_add(counts.glyphs.saturating_mul(size_of::<MathGlyph>()))
+        .saturating_add(counts.elements.saturating_mul(size_of::<PathEl>()))
+}
+
+/// The union of what every item draws, or [`Rect::ZERO`] if nothing is.
+fn ink(items: &[MathItem]) -> Rect {
+    // The math font is CFF, where a glyph's bounds mean outlining it, so each
+    // glyph is looked up once.
+    let mut boxes: HashMap<(usize, u32), Option<Rect>> = HashMap::new();
+    let mut ink: Option<Rect> = None;
+    let mut add = |rect: Rect| {
+        let rect = rect.abs();
+        ink = Some(ink.map_or(rect, |ink| ink.union(rect)));
+    };
+    for item in items {
+        match item {
+            MathItem::Glyphs {
+                font, size, glyphs, ..
+            } => {
+                for glyph in glyphs {
+                    let em = *boxes
+                        .entry((*font, glyph.id))
+                        .or_insert_with(|| glyph_box(*font, glyph.id));
+                    // Font units are y up; the layout is y down.
+                    if let Some(em) = em {
+                        add(Rect::new(
+                            glyph.x + em.x0 * size,
+                            glyph.y - em.y1 * size,
+                            glyph.x + em.x1 * size,
+                            glyph.y - em.y0 * size,
+                        ));
+                    }
+                }
+            }
+            MathItem::Path { path, fill, stroke } => {
+                if fill.is_none() && stroke.is_none() {
+                    continue;
+                }
+                let half = stroke.map_or(0.0, |(width, _)| width.abs() / 2.0);
+                let bounds = path
+                    .segments()
+                    .map(|seg| ParamCurveExtrema::bounding_box(&seg));
+                if let Some(bounds) = bounds.reduce(|a, b| a.union(b)) {
+                    add(bounds.inflate(half, half));
+                }
+            }
+        }
+    }
+    ink.unwrap_or(Rect::ZERO)
+}
+
+/// [`MathError::TooLarge`] unless every number in `layout` is within
+/// [`MAX_LAYOUT_EXTENT_PT`] of zero.
+fn check_extent(layout: &MathLayout) -> Result<(), MathError> {
+    let ink = layout.ink;
+    let box_fits = [
+        layout.width,
+        layout.height,
+        layout.baseline,
+        ink.x0,
+        ink.y0,
+        ink.x1,
+        ink.y1,
+    ]
+    .into_iter()
+    .all(fits);
     let items_fit = layout.items.iter().all(|item| match item {
         MathItem::Glyphs { size, glyphs, .. } => {
             fits(*size) && glyphs.iter().all(|glyph| fits(glyph.x) && fits(glyph.y))
@@ -168,7 +289,7 @@ fn shape_item(shape: &Shape, at: Affine) -> MathItem {
             path.line_to((to.x.to_pt(), to.y.to_pt()));
         }
         Geometry::Rect(size) => {
-            path = kurbo::Rect::new(0.0, 0.0, size.x.to_pt(), size.y.to_pt()).to_path(0.0);
+            path = Rect::new(0.0, 0.0, size.x.to_pt(), size.y.to_pt()).to_path(0.0);
         }
         Geometry::Curve(curve) => {
             for item in &curve.0 {
@@ -322,6 +443,7 @@ mod tests {
             width: 10.0,
             height: 10.0,
             baseline: 8.0,
+            ink: Rect::new(-0.5, -0.5, 10.0, 10.0),
             items: vec![
                 MathItem::Glyphs {
                     font: 0,
@@ -345,13 +467,15 @@ mod tests {
     #[test]
     fn every_number_counts_for_the_extent() {
         type Edit = fn(&mut MathLayout, f64);
-        assert_eq!(check_extent(&small()), Ok(()));
+        assert_eq!(check_limits(&small()), Ok(()));
         let at_cap = MAX_LAYOUT_EXTENT_PT;
         let past_cap = MAX_LAYOUT_EXTENT_PT.next_up();
-        let edits: [(&str, Edit); 9] = [
+        let edits: [(&str, Edit); 11] = [
             ("width", |l, v| l.width = v),
             ("height", |l, v| l.height = -v),
             ("baseline", |l, v| l.baseline = v),
+            ("ink left", |l, v| l.ink.x0 = -v),
+            ("ink bottom", |l, v| l.ink.y1 = v),
             ("glyph size", |l, v| {
                 if let MathItem::Glyphs { size, .. } = &mut l.items[0] {
                     *size = v;
@@ -389,17 +513,151 @@ mod tests {
         for (name, edit) in edits {
             let mut layout = small();
             edit(&mut layout, at_cap);
-            assert_eq!(check_extent(&layout), Ok(()), "{name} at the cap");
+            assert_eq!(check_limits(&layout), Ok(()), "{name} at the cap");
             for bad in [past_cap, f64::NAN, f64::INFINITY] {
                 let mut layout = small();
                 edit(&mut layout, bad);
                 assert_eq!(
-                    check_extent(&layout),
+                    check_limits(&layout),
                     Err(MathError::TooLarge),
                     "{name} = {bad}"
                 );
             }
         }
+    }
+
+    fn glyphs(n: usize) -> MathItem {
+        MathItem::Glyphs {
+            font: 1,
+            size: 20.0,
+            fill: BLACK,
+            glyphs: vec![
+                MathGlyph {
+                    id: 1,
+                    x: 0.0,
+                    y: 0.0
+                };
+                n
+            ],
+        }
+    }
+
+    fn polyline(elements: usize, stroked: bool) -> MathItem {
+        let mut path = BezPath::new();
+        path.move_to((0.0, 0.0));
+        for i in 1..elements {
+            path.line_to((f64::from(u32::try_from(i % 2).unwrap()), 1.0));
+        }
+        MathItem::Path {
+            path,
+            fill: (!stroked).then_some(BLACK),
+            stroke: stroked.then_some((1.0, BLACK)),
+        }
+    }
+
+    fn with_items(items: Vec<MathItem>) -> MathLayout {
+        MathLayout { items, ..small() }
+    }
+
+    #[test]
+    fn glyphs_count_across_runs_up_to_the_cap() {
+        let half = MAX_LAYOUT_GLYPHS / 2;
+        let at_cap = with_items(vec![glyphs(half), glyphs(MAX_LAYOUT_GLYPHS - half)]);
+        assert_eq!(check_limits(&at_cap), Ok(()));
+        let over = with_items(vec![glyphs(half), glyphs(MAX_LAYOUT_GLYPHS - half + 1)]);
+        assert_eq!(check_limits(&over), Err(MathError::TooLarge));
+        // Empty runs count as one glyph each.
+        let mut empty_runs = vec![glyphs(0); 2];
+        empty_runs.push(glyphs(MAX_LAYOUT_GLYPHS - 1));
+        assert_eq!(
+            check_limits(&with_items(empty_runs)),
+            Err(MathError::TooLarge)
+        );
+    }
+
+    #[test]
+    fn stroked_path_elements_count_twice() {
+        let max = MAX_LAYOUT_PATH_ELEMENTS;
+        let filled = with_items(vec![polyline(max, false)]);
+        assert_eq!(check_limits(&filled), Ok(()));
+        let filled_over = with_items(vec![polyline(max - 10, false), polyline(11, false)]);
+        assert_eq!(check_limits(&filled_over), Err(MathError::TooLarge));
+        let stroked = with_items(vec![polyline(max / 2, true)]);
+        assert_eq!(check_limits(&stroked), Ok(()));
+        let stroked_over = with_items(vec![polyline(max / 2 + 1, true)]);
+        assert_eq!(check_limits(&stroked_over), Err(MathError::TooLarge));
+        // An empty path counts as one element.
+        let empty = MathItem::Path {
+            path: BezPath::new(),
+            fill: None,
+            stroke: None,
+        };
+        let empties = with_items(vec![polyline(max, false), empty]);
+        assert_eq!(check_limits(&empties), Err(MathError::TooLarge));
+    }
+
+    #[test]
+    fn cache_size_grows_with_glyphs_and_elements() {
+        let empty = approx_bytes(&with_items(Vec::new()));
+        let glyph_bytes = approx_bytes(&with_items(vec![glyphs(1000)])) - empty;
+        assert!(
+            glyph_bytes >= 1000 * size_of::<MathGlyph>(),
+            "{glyph_bytes}"
+        );
+        let path_bytes = approx_bytes(&with_items(vec![polyline(1000, true)])) - empty;
+        assert!(path_bytes >= 1000 * size_of::<PathEl>(), "{path_bytes}");
+    }
+
+    /// `layout`'s ink, rounded to a hundredth of a pt.
+    fn ink_of(src: &str) -> Rect {
+        let ink = layout_of(&SandboxWorld::new(src)).ink;
+        let round = |v: f64| (v * 100.0).round() / 100.0;
+        Rect::new(round(ink.x0), round(ink.y0), round(ink.x1), round(ink.y1))
+    }
+
+    #[test]
+    fn ink_holds_glyph_outlines_not_their_advances() {
+        let layout = layout_of(&SandboxWorld::new("x"));
+        let ink = layout.ink;
+        // An italic x: its outline sits on the baseline, inside the box, less tall than an em.
+        assert!(ink.x0 >= 0.0 && ink.x1 <= layout.width + 1.0, "{ink:?}");
+        assert!((ink.y1 - layout.baseline).abs() < 0.5, "{ink:?}");
+        assert!(ink.height() > 5.0 && ink.height() < 20.0, "{ink:?}");
+        // Nothing drawn, no ink.
+        assert_eq!(ink_of("#h(1em)"), Rect::ZERO);
+    }
+
+    #[test]
+    fn ink_reaches_items_outside_the_box() {
+        // Placed and moved content overhangs the formula box.
+        let box_only = layout_of(&SandboxWorld::new("x"));
+        let placed = layout_of(&SandboxWorld::new("x #place(dx: 300pt, dy: -200pt)[y]"));
+        assert!(
+            (placed.width - box_only.width).abs() < 1.0,
+            "{}",
+            placed.width
+        );
+        assert!(
+            placed.ink.x1 > 300.0 && placed.ink.y0 < -190.0,
+            "{:?}",
+            placed.ink
+        );
+        let moved = ink_of("#move(dx: -50pt)[$x$]");
+        assert!(moved.x0 < -40.0, "{moved:?}");
+    }
+
+    #[test]
+    fn ink_holds_half_the_stroke_width() {
+        // A 100 pt line stroked 10 pt wide: 5 pt more on every side, round caps included.
+        let line = ink_of("#line(length: 100pt, stroke: 10pt)");
+        assert_eq!((line.width(), line.height()), (110.0, 10.0), "{line:?}");
+        // Curves count by their extrema, not their control points.
+        let circle = ink_of("#circle(radius: 10pt, stroke: 2pt)");
+        assert_eq!(
+            (circle.width(), circle.height()),
+            (22.0, 22.0),
+            "{circle:?}"
+        );
     }
 
     #[test]

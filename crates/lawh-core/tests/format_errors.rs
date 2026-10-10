@@ -5,8 +5,10 @@
 // Lets the helpers below unwrap and panic like test functions (see clippy.toml).
 #![cfg(test)]
 
+use std::fmt::Write as _;
+
 use insta::assert_snapshot;
-use lawh_core::board::MAX_TEXT_CHARS;
+use lawh_core::board::{MAX_OBJECTS, MAX_TEXT_CHARS};
 use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
 use lawh_core::{FormatError, from_lawh};
 
@@ -444,6 +446,54 @@ fn text_over_the_length_limit() {
         "x".repeat(MAX_TEXT_CHARS + 1)
     ));
     assert_snapshot!(e.to_string());
+}
+
+/// `n` circles, one per line, with ids `c0`, `c1`, ...
+fn circles(n: usize) -> String {
+    let mut out = String::new();
+    for i in 0..n {
+        writeln!(out, "circle id=c{i} x=0 y=0 r=1").unwrap();
+    }
+    out
+}
+
+#[test]
+fn objects_at_the_limit_are_read() {
+    let board = from_lawh(&format!("{HEADER}{}", circles(MAX_OBJECTS))).unwrap();
+    assert_eq!(board.len(), MAX_OBJECTS);
+    assert!(board.is_full());
+}
+
+#[test]
+fn too_many_objects() {
+    // Comments, blank lines and slashdashed nodes don't count; the error points at the first
+    // object over the limit, not at the later invalid one.
+    let src = format!(
+        "{HEADER}// many\n\n/-circle id=x x=0 y=0 r=1\n{}  rect id=over x=0 y=0 w=1 h=1\n\
+         circle id=bad x=0 y=0 r=-1\n",
+        circles(MAX_OBJECTS)
+    );
+    let e = err(&src);
+    assert_eq!(
+        e,
+        FormatError::TooManyObjects {
+            line: MAX_OBJECTS + 5,
+            column: 3
+        }
+    );
+    assert_snapshot!(e.to_string());
+}
+
+#[test]
+fn errors_before_the_object_limit_come_first() {
+    let src = format!(
+        "{HEADER}circle id=c0 x=0 y=0 r=0\n{}",
+        circles(MAX_OBJECTS + 1)
+    );
+    assert!(
+        matches!(err(&src), FormatError::InvalidSize { line: 2, .. }),
+        "{src:.80}"
+    );
 }
 
 // --- Positions and wording of syntax errors ---

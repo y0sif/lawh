@@ -11,7 +11,8 @@
 //! request   u32 timeout_ms, then the formula as UTF-8 (the rest of the frame)
 //! response  u8 0, layout | u8 1, UTF-8 compile error message | u8 2 (panicked)
 //!           | u8 3 (too large)
-//! layout    f64 width, f64 height, f64 baseline, u32 item count, items
+//! layout    f64 width, f64 height, f64 baseline, ink, u32 item count, items
+//! ink       f64 x0, f64 y0, f64 x1, f64 y1 (x0 <= x1, y0 <= y1)
 //! glyphs    u8 0, u32 font, f64 size, rgba, u32 count, count x (u32 id, f64 x, f64 y)
 //! path      u8 1, u8 flags (1 fill, 2 stroke), [rgba fill], [f64 width, rgba stroke],
 //!           u32 count, count x element
@@ -23,20 +24,26 @@
 //! The parent treats everything the worker sends as untrusted: frames are
 //! capped at [`MAX_FRAME_BYTES`], counts must fit in the bytes left, numbers
 //! must be finite, fonts must be bundled, glyph ids must exist in their font,
-//! paths must start with a move, and nothing may follow the payload. A
-//! well-formed layout past [`crate::MAX_LAYOUT_EXTENT_PT`] becomes
-//! [`MathError::TooLarge`], as it would in process.
+//! paths must start with a move, the ink bounds must be in order, and nothing
+//! may follow the payload. A well-formed layout past the limits
+//! ([`crate::MAX_LAYOUT_EXTENT_PT`], [`crate::MAX_LAYOUT_GLYPHS`],
+//! [`crate::MAX_LAYOUT_PATH_ELEMENTS`]) becomes [`MathError::TooLarge`], as it
+//! would in process.
+//!
+//! The parent takes the ink bounds as the worker reports them, checked only
+//! for order and extent: wrong bounds could only make the renderer cull or fit
+//! a formula wrongly, never draw more than the limits allow.
 
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurbo::{BezPath, PathEl, Point};
+use kurbo::{BezPath, PathEl, Point, Rect};
 
 use crate::compile::Outcome;
 use crate::fonts::glyph_count;
-use crate::layout::check_extent;
+use crate::layout::check_limits;
 use crate::{MathError, MathGlyph, MathItem, MathLayout};
 
 /// Version of this format. The parent refuses a worker that announces any
@@ -210,13 +217,13 @@ fn is_char_boundary(utf8: &[u8], at: usize) -> bool {
 }
 
 /// The parent's side of [`encode_response`], checking everything, the
-/// layout's extent included.
+/// layout's limits included.
 pub(crate) fn decode_response(payload: &[u8]) -> Result<Outcome, ProtocolError> {
     let mut input = Cursor(payload);
     let outcome = match input.u8()? {
         RESPONSE_LAYOUT => {
             let layout = decode_layout(&mut input)?;
-            check_extent(&layout).map(|()| Arc::new(layout))
+            check_limits(&layout).map(|()| Arc::new(layout))
         }
         RESPONSE_COMPILE_ERROR => {
             let message = std::str::from_utf8(input.rest())
@@ -235,6 +242,9 @@ fn encode_layout(layout: &MathLayout, out: &mut Vec<u8>) -> Option<()> {
     put_f64(out, layout.width);
     put_f64(out, layout.height);
     put_f64(out, layout.baseline);
+    for v in [layout.ink.x0, layout.ink.y0, layout.ink.x1, layout.ink.y1] {
+        put_f64(out, v);
+    }
     put_len(out, layout.items.len())?;
     for item in &layout.items {
         match item {
@@ -301,6 +311,10 @@ fn decode_layout(input: &mut Cursor<'_>) -> Result<MathLayout, ProtocolError> {
     let width = input.f64()?;
     let height = input.f64()?;
     let baseline = input.f64()?;
+    let ink = Rect::new(input.f64()?, input.f64()?, input.f64()?, input.f64()?);
+    if ink.x0 > ink.x1 || ink.y0 > ink.y1 {
+        return Err(ProtocolError("ink bounds out of order"));
+    }
     let count = input.count(MIN_ITEM_BYTES)?;
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
@@ -314,6 +328,7 @@ fn decode_layout(input: &mut Cursor<'_>) -> Result<MathLayout, ProtocolError> {
         width,
         height,
         baseline,
+        ink,
         items,
     })
 }
@@ -471,6 +486,7 @@ mod tests {
             width: 80.9,
             height: 42.4,
             baseline: 23.8,
+            ink: Rect::new(-0.5, -1e-300, 80.25, 42.0),
             items: vec![
                 MathItem::Glyphs {
                     font: 1,
@@ -564,10 +580,84 @@ mod tests {
     }
 
     #[test]
+    fn ink_bounds_round_trip_and_must_be_in_order() {
+        let mut layout = sample();
+        layout.ink = Rect::ZERO;
+        assert_eq!(
+            decode_response(&layout_frame(&layout)),
+            Ok(Ok(Arc::new(layout)))
+        );
+        for ink in [Rect::new(1.0, 0.0, 0.0, 1.0), Rect::new(0.0, 1.0, 1.0, 0.0)] {
+            let mut layout = sample();
+            layout.ink = ink;
+            assert_eq!(
+                decode_response(&layout_frame(&layout)),
+                Err(ProtocolError("ink bounds out of order")),
+                "{ink:?}"
+            );
+        }
+        let mut layout = sample();
+        layout.ink.x1 = f64::NAN;
+        assert_eq!(
+            decode_response(&layout_frame(&layout)),
+            Err(ProtocolError("number not finite"))
+        );
+    }
+
+    #[test]
+    fn layouts_past_the_complexity_caps_are_too_large() {
+        let glyph = MathGlyph {
+            id: 3,
+            x: 0.0,
+            y: 0.0,
+        };
+        let mut layout = sample();
+        let MathItem::Glyphs { glyphs, .. } = &mut layout.items[0] else {
+            unreachable!()
+        };
+        // The sample has two glyphs.
+        glyphs.resize(crate::MAX_LAYOUT_GLYPHS, glyph);
+        assert!(matches!(decode_response(&layout_frame(&layout)), Ok(Ok(_))));
+        let MathItem::Glyphs { glyphs, .. } = &mut layout.items[0] else {
+            unreachable!()
+        };
+        glyphs.push(glyph);
+        assert_eq!(
+            decode_response(&layout_frame(&layout)),
+            Ok(Err(MathError::TooLarge))
+        );
+
+        // The stroked sample path has 5 elements, counted twice; the empty one counts as one.
+        let mut layout = sample();
+        let MathItem::Path { path, .. } = &mut layout.items[1] else {
+            unreachable!()
+        };
+        for _ in 0..(crate::MAX_LAYOUT_PATH_ELEMENTS - 11) / 2 {
+            path.line_to((1.0, 1.0));
+        }
+        assert!(matches!(decode_response(&layout_frame(&layout)), Ok(Ok(_))));
+        let MathItem::Path { path, .. } = &mut layout.items[1] else {
+            unreachable!()
+        };
+        path.line_to((1.0, 1.0));
+        assert_eq!(
+            decode_response(&layout_frame(&layout)),
+            Ok(Err(MathError::TooLarge))
+        );
+    }
+
+    #[test]
     fn layouts_past_the_extent_cap_are_too_large() {
         let mut layout = sample();
         layout.width = crate::MAX_LAYOUT_EXTENT_PT;
         assert!(matches!(decode_response(&layout_frame(&layout)), Ok(Ok(_))));
+
+        let mut layout = sample();
+        layout.ink.y0 = -crate::MAX_LAYOUT_EXTENT_PT.next_up();
+        assert_eq!(
+            decode_response(&layout_frame(&layout)),
+            Ok(Err(MathError::TooLarge))
+        );
 
         let mut layout = sample();
         let MathItem::Path { path, .. } = &mut layout.items[1] else {
@@ -606,7 +696,7 @@ mod tests {
     #[test]
     fn lying_counts_are_rejected_before_allocating() {
         let mut frame = vec![RESPONSE_LAYOUT];
-        for v in [1.0, 1.0, 1.0] {
+        for v in [1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0] {
             put_f64(&mut frame, v);
         }
         frame.extend_from_slice(&u32::MAX.to_le_bytes());
@@ -619,7 +709,7 @@ mod tests {
     #[test]
     fn paths_must_start_with_a_move() {
         let mut frame = vec![RESPONSE_LAYOUT];
-        for v in [1.0, 1.0, 1.0] {
+        for v in [1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0] {
             put_f64(&mut frame, v);
         }
         frame.extend_from_slice(&1u32.to_le_bytes());

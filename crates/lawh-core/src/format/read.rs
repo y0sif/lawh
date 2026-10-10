@@ -16,7 +16,9 @@ const VERSION: i128 = 1;
 
 /// Reads a `.lawh` file. Accepts LF and CRLF line endings.
 ///
-/// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed.
+/// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed, and a file with
+/// more than [`MAX_OBJECTS`](crate::board::MAX_OBJECTS) objects at its first object over the
+/// limit.
 pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     if src.len() > MAX_FILE_BYTES {
         return Err(FormatError::FileTooLarge { bytes: src.len() });
@@ -50,6 +52,10 @@ pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     reader.header(header, owner_brace(objects.is_empty()))?;
     let mut board = Board::new();
     for (i, node) in objects.iter().enumerate() {
+        if board.is_full() {
+            let (line, column) = line_column(src, node.span().offset());
+            return Err(FormatError::TooManyObjects { line, column });
+        }
         let object = reader.object(node, &board, owner_brace(i + 1 == objects.len()))?;
         board.push_checked(object);
     }

@@ -5,6 +5,7 @@ expression: x^2
 width: 19.12
 height: 17.46
 baseline: 17.26
+ink: 0.40, 0.00 to 17.41, 17.46
 items: 2
 - glyphs: 1 x Libertinus Math 20.0pt
 - glyphs: 1 x Libertinus Math 16.0pt

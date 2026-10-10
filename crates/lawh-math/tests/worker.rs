@@ -193,6 +193,7 @@ fn worker_layouts_match_in_process_layouts_exactly() {
         "integral_0^infinity e^(-x^2) dif x = sqrt(pi)/2",
         "#rotate(45deg, $x$)",
         "#text(fill: red)[y] + #line(length: 1em)",
+        "x #place(dx: 300pt, dy: -200pt)[y]",
         "#nope",
     ] {
         assert_eq!(worker.layout_blocking(src), in_process.layout(src), "{src}");
@@ -228,6 +229,48 @@ fn huge_layouts_are_too_large_in_the_worker_too() {
     }
     // The worker is still the same healthy one.
     assert!(worker.layout_blocking("A = pi r^2").is_ok());
+}
+
+#[test]
+fn too_complex_layouts_are_too_large_in_the_worker_too() {
+    // Generous: the review's 490,000 glyphs take about a second to lay out in
+    // release, longer in a debug worker on a busy machine.
+    let worker = MathEngine::with_worker(worker()).with_timeout(Duration::from_secs(60));
+    for src in [
+        r#"#range(700).map(_ => "x" * 700).join(linebreak())"#,
+        "#polygon(stroke: 100pt, ..range(100000).map(i => (calc.rem(i, 2) * 300pt, calc.rem(i, 3) * 300pt)))",
+    ] {
+        assert_eq!(
+            worker.layout_blocking(src),
+            Err(MathError::TooLarge),
+            "{src}"
+        );
+        assert_eq!(
+            worker.request(src),
+            MathStatus::Failed(MathError::TooLarge),
+            "{src}"
+        );
+    }
+    assert!(worker.layout_blocking("A = pi r^2").is_ok());
+}
+
+#[test]
+fn ink_survives_the_trip_from_the_worker() {
+    let in_process = MathEngine::new();
+    let worker = engine();
+    for src in [
+        "x #place(dx: 300pt, dy: -200pt)[y]",
+        "#move(dx: -50pt)[$x$]",
+        "#line(length: 100pt, stroke: 10pt)",
+        "#h(1em)",
+    ] {
+        let from_worker = worker.layout_blocking(src).unwrap();
+        assert_eq!(
+            from_worker.ink,
+            in_process.layout(src).unwrap().ink,
+            "{src}"
+        );
+    }
 }
 
 #[test]

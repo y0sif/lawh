@@ -18,9 +18,10 @@
 //! Before kdl sees a file, a linear scan checks its structure (see `scan.rs`): kdl's parser
 //! recurses on nested blocks, nested comments and error recovery, so hostile files could
 //! otherwise overflow the stack. Files are limited to [`MAX_FILE_BYTES`], block comments to
-//! [`MAX_COMMENT_DEPTH`] levels, and numbers and texts to the board's limits
+//! [`MAX_COMMENT_DEPTH`] levels, and numbers, texts and the object count to the board's limits
 //! ([`MAX_COORDINATE`](crate::board::MAX_COORDINATE), [`MAX_SIZE`](crate::board::MAX_SIZE),
-//! [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS)).
+//! [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS),
+//! [`MAX_OBJECTS`](crate::board::MAX_OBJECTS)).
 
 mod error;
 mod read;

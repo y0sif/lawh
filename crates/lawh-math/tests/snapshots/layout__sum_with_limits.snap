@@ -5,6 +5,7 @@ expression: sum_(i=1)^n i
 width: 32.77
 height: 52.13
 baseline: 30.75
+ink: 1.80, 0.00 to 32.39, 52.13
 items: 6
 - glyphs: 1 x Libertinus Math 20.0pt
 - glyphs: 1 x Libertinus Math 16.0pt

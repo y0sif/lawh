@@ -556,6 +556,8 @@ mod tests {
             width: MAX,
             height: MAX,
             baseline: MAX,
+            // The line's stroke reaches half its width past it.
+            ink: Rect::new(-1.5 * MAX, -1.5 * MAX, 1.5 * MAX, MAX),
             items: vec![
                 MathItem::Path {
                     path: circle,
@@ -676,6 +678,7 @@ mod tests {
             width: 2.0 * r,
             height: 2.0 * r,
             baseline: r,
+            ink: Rect::new(-0.5, -0.5, 2.0 * r + 0.5, 2.0 * r + 0.5),
             items: vec![MathItem::Path {
                 path: typst_circle(r),
                 fill: None,

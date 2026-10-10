@@ -81,24 +81,44 @@ pub(crate) fn asset_index(font: &Font) -> Option<usize> {
         .position(|asset| std::ptr::eq(asset.data.as_ptr(), data) && asset.index == font.index())
 }
 
+/// The bundled fonts parsed by ttf-parser, by [`fonts`] index, parsed once
+/// per process; `None` for a font that fails to parse.
+fn faces() -> &'static [Option<ttf_parser::Face<'static>>] {
+    static FACES: OnceLock<Vec<Option<ttf_parser::Face<'static>>>> = OnceLock::new();
+    FACES.get_or_init(|| {
+        fonts()
+            .iter()
+            .map(|asset| ttf_parser::Face::parse(asset.data, asset.index).ok())
+            .collect()
+    })
+}
+
+fn face(index: usize) -> Option<&'static ttf_parser::Face<'static>> {
+    faces().get(index)?.as_ref()
+}
+
 /// Number of glyphs in the bundled font at `index` into [`fonts`], or `None`
 /// if there is no such font.
 pub(crate) fn glyph_count(index: usize) -> Option<u16> {
-    static COUNTS: OnceLock<Vec<Option<u16>>> = OnceLock::new();
-    COUNTS
-        .get_or_init(|| {
-            fonts()
-                .iter()
-                .map(|asset| {
-                    ttf_parser::Face::parse(asset.data, asset.index)
-                        .ok()
-                        .map(|face| face.number_of_glyphs())
-                })
-                .collect()
-        })
-        .get(index)
-        .copied()
-        .flatten()
+    face(index).map(ttf_parser::Face::number_of_glyphs)
+}
+
+/// The bounds of glyph `id`'s outline in the bundled font at `index` into
+/// [`fonts`], in ems, y up, from the glyph origin. `None` for a glyph with no
+/// outline (a space), or no such font or glyph.
+///
+/// For the CFF math font this outlines the glyph, so callers look each glyph
+/// up once.
+pub(crate) fn glyph_box(index: usize, id: u32) -> Option<kurbo::Rect> {
+    let face = face(index)?;
+    let bounds = face.glyph_bounding_box(ttf_parser::GlyphId(u16::try_from(id).ok()?))?;
+    let em = f64::from(face.units_per_em());
+    Some(kurbo::Rect::new(
+        f64::from(bounds.x_min) / em,
+        f64::from(bounds.y_min) / em,
+        f64::from(bounds.x_max) / em,
+        f64::from(bounds.y_max) / em,
+    ))
 }
 
 #[cfg(test)]
@@ -116,6 +136,20 @@ mod tests {
             assert!(glyph_count(i).is_some_and(|n| n > 0));
         }
         assert_eq!(glyph_count(fonts().len()), None);
+    }
+
+    #[test]
+    fn glyph_boxes_are_in_ems_and_spaces_have_none() {
+        for i in 0..fonts().len() {
+            let id = |c: char| u32::from(face(i).unwrap().glyph_index(c).unwrap().0);
+            // Capital H: on the baseline, under an em tall.
+            let h = glyph_box(i, id('H')).unwrap();
+            assert!(h.y0.abs() < 0.02 && (0.5..1.0).contains(&h.y1), "{h:?}");
+            assert!(h.x0 >= 0.0 && h.x1 < 1.0, "{h:?}");
+            assert_eq!(glyph_box(i, id(' ')), None);
+        }
+        assert_eq!(glyph_box(fonts().len(), 1), None);
+        assert_eq!(glyph_box(0, u32::from(u16::MAX) + 1), None);
     }
 
     #[test]

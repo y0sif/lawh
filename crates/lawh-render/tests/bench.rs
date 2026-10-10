@@ -120,3 +120,226 @@ fn limits_frame_time() {
         );
     }
 }
+
+/// Median of `frames` renders of `board` through `vp`, after one warm-up render, and the first.
+fn frame_time(
+    renderer: &mut Renderer,
+    board: &lawh_core::Board,
+    vp: &Viewport,
+    frames: usize,
+) -> (Duration, Duration) {
+    let t = Instant::now();
+    black_box(renderer.render(board, vp));
+    let first = t.elapsed();
+    let mut times: Vec<Duration> = (0..frames)
+        .map(|_| {
+            let t = Instant::now();
+            black_box(renderer.render(board, vp));
+            t.elapsed()
+        })
+        .collect();
+    times.sort();
+    (first, times[frames / 2])
+}
+
+/// Formulas of about `n` glyphs or path elements, laid out normally, stacked on one spot, or
+/// crossing the whole formula box.
+fn math_cases(n: usize) -> [(&'static str, String); 7] {
+    let side = if n.isqrt().pow(2) == n {
+        n.isqrt()
+    } else {
+        n.isqrt() + 1
+    };
+    [
+        (
+            "glyph grid",
+            format!(r#"#range({side}).map(_ => "x" * {side}).join(linebreak())"#),
+        ),
+        (
+            "glyphs overlapping, one run",
+            format!(r#"#text(tracking: -0.45em, "x" * {n})"#),
+        ),
+        (
+            "glyphs stacked, own runs",
+            format!("#for i in range({n}) {{ box(width: 0pt)[x] }}"),
+        ),
+        (
+            "polygon stroke 100pt",
+            format!(
+                "#polygon(stroke: 100pt, ..range({n}).map(i => (calc.rem(i, 2) * 300pt, calc.rem(i, 3) * 300pt)))"
+            ),
+        ),
+        (
+            "polygon stroke 1pt",
+            format!(
+                "#polygon(stroke: 1pt, ..range({n}).map(i => (calc.rem(i, 2) * 300pt, calc.rem(i, 3) * 300pt)))"
+            ),
+        ),
+        (
+            "polygon fill",
+            format!(
+                "#polygon(fill: black, ..range({n}).map(i => (calc.rem(i, 2) * 300pt, calc.rem(i, 3) * 300pt)))"
+            ),
+        ),
+        (
+            "lines stacked, stroke 100pt",
+            format!(
+                "#for i in range({}) {{ box(width: 0pt, line(length: 300pt, angle: 45deg, stroke: 100pt)) }}",
+                n / 2
+            ),
+        ),
+    ]
+}
+
+/// Frame times of single formulas of growing complexity, which the math complexity caps
+/// (`lawh_math::MAX_LAYOUT_GLYPHS`, `lawh_math::MAX_LAYOUT_PATH_ELEMENTS`) are chosen from:
+/// fitted to 1920x1080, and at the app's highest zoom (20) at scale factors 1 and 2. Formulas
+/// over the caps print `TooLarge`. `LAWH_BENCH_KINDS` picks cases by name prefix.
+/// `LAWH_BENCH_SIZES=1000,10000 cargo test --release -p lawh-render --test bench -- --ignored --nocapture math_complexity`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn math_complexity_frame_time() {
+    use std::fmt::Write as _;
+
+    use lawh_core::{Board, Object, ObjectId, Point, Shape};
+    use lawh_math::{MathEngine, MathItem};
+
+    let sizes: Vec<usize> = std::env::var("LAWH_BENCH_SIZES")
+        .unwrap_or_else(|_| "1000,10000".to_owned())
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect();
+    let kinds = std::env::var("LAWH_BENCH_KINDS").unwrap_or_default();
+    for n in sizes {
+        for (name, src) in math_cases(n) {
+            if !kinds.is_empty() && !kinds.split(',').any(|k| name.starts_with(k)) {
+                continue;
+            }
+            let mut board = Board::new();
+            board
+                .insert(Object::new(
+                    ObjectId::new("m1").unwrap(),
+                    Shape::Math {
+                        at: Point::ZERO,
+                        src: src.clone(),
+                    },
+                ))
+                .unwrap();
+            let mut renderer =
+                Renderer::with_math(MathEngine::new().with_timeout(Duration::from_secs(120)));
+            renderer.resolve_math(&board);
+            let math = MathEngine::new().with_timeout(Duration::from_secs(120));
+            let layout = match math.layout(&src) {
+                Ok(layout) => layout,
+                Err(err) => {
+                    println!("{name} n={n}: {err:?}");
+                    continue;
+                }
+            };
+            // Counted as the caps count them: stroked elements twice.
+            let (mut glyphs, mut elements) = (0, 0);
+            for item in &layout.items {
+                match item {
+                    MathItem::Glyphs { glyphs: run, .. } => glyphs += run.len(),
+                    MathItem::Path { path, stroke, .. } => {
+                        let weight = if stroke.is_some() { 2 } else { 1 };
+                        elements += path.elements().len() * weight;
+                    }
+                }
+            }
+            let bounds = renderer.board_bounds(&board).unwrap();
+            let fit = Viewport::fit(bounds, 1920, 1080, 1.0);
+            let center = bounds.center();
+            let zoom1 = Viewport::new(center, 20.0, 1920, 1080, 1.0);
+            let zoom2 = Viewport::new(center, 20.0, 2560, 1600, 2.0);
+            let mut line =
+                format!("{name:<28} n={n:>6}: {glyphs:>6} glyphs {elements:>6} elements |");
+            for (label, vp) in [("fit", fit), ("zoom20", zoom1), ("zoom20@2x", zoom2)] {
+                let (first, median) = frame_time(&mut renderer, &board, &vp, 3);
+                write!(line, " {label} {:.1}/{:.1} ms", ms(first), ms(median)).unwrap();
+            }
+            println!("{line}");
+        }
+    }
+}
+
+/// Frame times of boards of `n` cheap objects that all reach the screen, which
+/// `lawh_core::board::MAX_OBJECTS` is chosen from: fitted at 1920x1080 and scale factor 1, the
+/// way the app first shows a board. Sizes over the cap are skipped. `LAWH_BENCH_KINDS` picks
+/// cases by name prefix.
+/// `LAWH_BENCH_SIZES=400,500 cargo test --release -p lawh-render --test bench -- --ignored --nocapture board_objects`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn board_objects_frame_time() {
+    use std::fmt::Write as _;
+
+    let sizes: Vec<usize> = std::env::var("LAWH_BENCH_SIZES")
+        .unwrap_or_else(|_| "400,500".to_owned())
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect();
+    let kinds = std::env::var("LAWH_BENCH_KINDS").unwrap_or_default();
+    let line = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor";
+    let cases: [(&str, String); 9] = [
+        (
+            "circle r=1, stacked",
+            "circle id=o{i} x=0 y=0 r=1".to_owned(),
+        ),
+        (
+            "circle r=100, stacked",
+            "circle id=o{i} x=0 y=0 r=100".to_owned(),
+        ),
+        (
+            "rect 48x27, stacked",
+            "rect id=o{i} x=0 y=0 w=48 h=27".to_owned(),
+        ),
+        (
+            "rect 48x27 + 1 offset",
+            "rect id=o{i} x=0 y=0 w=48 h=27\ncircle id=p{i} x=24 y=13 r=0.1".to_owned(),
+        ),
+        (
+            "line diagonal, stacked",
+            "line id=o{i} x1=0 y1=0 x2=48 y2=27".to_owned(),
+        ),
+        (
+            "arrow diagonal, stacked",
+            "arrow id=o{i} x1=0 y1=0 x2=48 y2=27".to_owned(),
+        ),
+        ("text x, stacked", "text id=o{i} x=0 y=0 \"x\"".to_owned()),
+        (
+            "text line, stacked",
+            format!("text id=o{{i}} x=0 y=0 \"{line}\""),
+        ),
+        ("math x, stacked", "math id=o{i} x=0 y=0 \"x\"".to_owned()),
+    ];
+    for n in sizes {
+        if n > lawh_core::board::MAX_OBJECTS {
+            println!("n={n}: over MAX_OBJECTS, skipped");
+            continue;
+        }
+        for (name, template) in &cases {
+            if !kinds.is_empty() && !kinds.split(',').any(|k| name.starts_with(k)) {
+                continue;
+            }
+            let mut src = "lawh version=1\n".to_owned();
+            // Each template line is one object; the offset case has two per i.
+            let per = template.lines().count();
+            for i in 0..n / per {
+                writeln!(src, "{}", template.replace("{i}", &i.to_string())).unwrap();
+            }
+            let board = common::board(&src);
+            let mut renderer = Renderer::new();
+            renderer.resolve_math(&board);
+            let bounds = renderer.board_bounds(&board).unwrap();
+            let fit = Viewport::fit(bounds, 1920, 1080, 1.0);
+            let (first, median) = frame_time(&mut renderer, &board, &fit, 15);
+            println!(
+                "{name:<26} n={:>6} ({:>7} bytes): fitted 1920x1080 first {:.1} ms, median {:.1} ms",
+                board.len(),
+                src.len(),
+                ms(first),
+                ms(median)
+            );
+        }
+    }
+}

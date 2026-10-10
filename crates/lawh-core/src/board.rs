@@ -2,9 +2,10 @@
 //!
 //! Coordinates are grid units (`f64`) with y growing down, like a screen.
 //!
-//! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`]) and every
-//! text within [`MAX_TEXT_CHARS`], so bounds, zoom-to-fit and rendering never meet values that
-//! overflow or allocate without limit. The file reader enforces the same limits.
+//! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`]), every
+//! text within [`MAX_TEXT_CHARS`] and the number of objects within [`MAX_OBJECTS`], so bounds,
+//! zoom-to-fit and rendering never meet values that overflow or allocate without limit. The file
+//! reader enforces the same limits.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -75,6 +76,24 @@ pub const MAX_SIZE: f64 = 1_000_000.0;
 
 /// Most characters (Unicode scalar values) in the content of a text or math object.
 pub const MAX_TEXT_CHARS: usize = 100_000;
+
+/// Most objects a board holds.
+///
+/// Every object on screen costs drawing time, so a board of many objects that all reach the screen
+/// is slow to draw. Measured with `board_objects_frame_time` in lawh-render's `tests/bench.rs`
+/// (Linux `x86_64`, release, fitted at 1920x1080, 2026-10-10), median frames of the worst boards
+/// that are cheap to write:
+///
+/// | objects | full-screen rects | screen-filling circles | `r=1` circles, stacked |
+/// |---|---|---|---|
+/// | 400 | 54 ms | 56 ms | 22 ms |
+/// | 500 | 65 ms | 79 ms | 28 ms |
+/// | 1,000 (before the cap) | 130 ms | 141 ms | 49 ms |
+///
+/// The renderer has a frame budget on top of this, so the cap errs on the generous side of a
+/// 50 ms frame. Real boards hold tens to hundreds of objects. Text is bounded per object by
+/// [`MAX_TEXT_CHARS`], not by this: a 75-character line costs about 0.4 ms to draw fitted.
+pub const MAX_OBJECTS: usize = 500;
 
 /// True when `v` is a coordinate the board accepts. False for NaN.
 pub(crate) fn is_valid_coordinate(v: f64) -> bool {
@@ -200,6 +219,8 @@ pub enum BoardError {
     InvalidSize(ObjectId),
     #[error("object `{0}` has more than {max} characters of text", max = MAX_TEXT_CHARS)]
     TextTooLong(ObjectId),
+    #[error("object `{0}` would be one too many: a board holds at most {max} objects", max = MAX_OBJECTS)]
+    TooManyObjects(ObjectId),
 }
 
 /// The whiteboard: objects in z-order, back to front.
@@ -239,10 +260,13 @@ impl Board {
     /// Adds `object` on top of the others.
     ///
     /// Fails if its id is already used, any of its numbers is not finite or outside the limits
-    /// ([`MAX_COORDINATE`], [`MAX_SIZE`]), or its text is longer than [`MAX_TEXT_CHARS`].
+    /// ([`MAX_COORDINATE`], [`MAX_SIZE`]), its text is longer than [`MAX_TEXT_CHARS`], or the
+    /// board already holds [`MAX_OBJECTS`] objects.
     pub fn insert(&mut self, object: Object) -> Result<(), BoardError> {
         let shape = &object.shape;
-        let problem: Option<fn(ObjectId) -> BoardError> = if self.contains(&object.id) {
+        let problem: Option<fn(ObjectId) -> BoardError> = if self.is_full() {
+            Some(BoardError::TooManyObjects)
+        } else if self.contains(&object.id) {
             Some(BoardError::DuplicateId)
         } else if !shape.is_finite() {
             Some(BoardError::NonFinite)
@@ -262,7 +286,13 @@ impl Board {
         Ok(())
     }
 
-    /// Adds an object the caller has already checked as [`Board::insert`] does.
+    /// True when the board holds [`MAX_OBJECTS`] objects, so [`Board::insert`] refuses another.
+    pub fn is_full(&self) -> bool {
+        self.objects.len() >= MAX_OBJECTS
+    }
+
+    /// Adds an object the caller has already checked as [`Board::insert`] does, the object
+    /// count included.
     pub(crate) fn push_checked(&mut self, object: Object) {
         self.index.insert(object.id.clone(), self.objects.len());
         self.objects.push(object);
@@ -503,6 +533,25 @@ mod tests {
     }
 
     #[test]
+    fn insert_stops_at_the_object_limit() {
+        let mut board = Board::new();
+        for i in 0..MAX_OBJECTS {
+            board.insert(circle(&format!("c{i}"), 1.0)).unwrap();
+        }
+        assert!(board.is_full());
+        assert_eq!(
+            board.insert(circle("extra", 1.0)),
+            Err(BoardError::TooManyObjects(id("extra")))
+        );
+        // A full board refuses before looking at the object: even a duplicate id.
+        assert_eq!(
+            board.insert(circle("c0", 1.0)),
+            Err(BoardError::TooManyObjects(id("c0")))
+        );
+        assert_eq!(board.len(), MAX_OBJECTS);
+    }
+
+    #[test]
     fn limit_errors_name_the_limits() {
         assert_eq!(
             BoardError::CoordinateOutOfRange(id("c1")).to_string(),
@@ -515,6 +564,10 @@ mod tests {
         assert_eq!(
             BoardError::TextTooLong(id("t1")).to_string(),
             "object `t1` has more than 100000 characters of text"
+        );
+        assert_eq!(
+            BoardError::TooManyObjects(id("c1")).to_string(),
+            "object `c1` would be one too many: a board holds at most 500 objects"
         );
     }
 
