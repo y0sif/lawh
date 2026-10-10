@@ -2,11 +2,17 @@
 //! spend, so no board can make a frame slow.
 //!
 //! Costs are estimated nanoseconds of `vello_cpu` work, calibrated in release on Linux `x86_64`
-//! (`calibrate_costs` in `renderer.rs` and `frame_budget_worst_cases` in `tests/bench.rs`). They
-//! follow what `vello_cpu` does with a path: it flattens curves into lines, walks every line
-//! across the 4x4-pixel tiles it touches, and paints the area between. So a path costs per line,
-//! per pixel of outline on screen (measured along x plus along y, which is what tiles follow) and
-//! per pixel of area covered, and a glyph the same for its outline from the font.
+//! (the `calibrate_*` tests in `renderer/calibrate.rs`, which assert that nothing takes more than
+//! 1.2 times its estimate, and `frame_budget_worst_cases` in `tests/bench.rs`). They follow what
+//! `vello_cpu` does with a path: it flattens curves into lines, walks every line across the
+//! 4x4-pixel tiles it touches, and paints the area between. So a path costs per line, per pixel
+//! of outline on screen (measured along x plus along y, which is what tiles follow) and per pixel
+//! of area covered, and a glyph the same for its outline from the font.
+//!
+//! Text adds parley's own work: laying a text out costs per character, per change of script or
+//! direction and per line ([`layout`]), charged to the frame that lays it out; drawing a laid-out
+//! text walks every glyph run of each line drawn ([`Estimate::text_line`]). A text's cost comes
+//! from the plan made when it was laid out (`crate::text::Plan`), never from walking it.
 //!
 //! The estimates lean high: a frame that spends its whole budget takes less than the budget.
 
@@ -18,8 +24,9 @@ use crate::glyphs::GlyphStats;
 
 /// What a window frame may spend drawing objects and the grid. With the outline budget and a
 /// frame's fixed cost (the paper and the final render: 1 ms at 1920x1080, 3 ms at 2880x1800)
-/// it keeps a frame under about 33 ms, two refreshes at 60 Hz: the worst boards measured take
-/// 28 ms at most (`frame_budget_worst_cases` in `tests/bench.rs`).
+/// it keeps a frame under about 33 ms, two refreshes at 60 Hz: the worst boards measured,
+/// text at lawh-core's caps included, take 25 ms at most (`frame_budget_worst_cases` in
+/// `tests/bench.rs`, 2026-10-11).
 pub(crate) const FRAME_BUDGET_NS: f64 = 18e6;
 
 /// What a window frame may spend right after the image changed size. Resizing costs `vello_cpu`
@@ -58,8 +65,28 @@ const GLYPH_FLATTEN_PX: f64 = 0.25;
 const GLYPH_NS_PER_OUTLINE_PX: f64 = 18.0;
 /// Each pixel of a glyph's bounding box on screen.
 const GLYPH_NS_PER_AREA_PX: f64 = 0.1;
-/// Each glyph looked at to estimate a frame, drawn or not.
+/// Each math glyph looked at to estimate a frame, drawn or not.
 const NS_PER_EXAMINED_GLYPH: f64 = 15.0;
+/// Each line of text walked: finding it and starting on its glyph runs (`calibrate_text_drawing`).
+const NS_PER_TEXT_LINE: f64 = 150.0;
+/// Each glyph and each glyph run on the lines of text walked, drawn or not: parley hands out a
+/// line's glyph runs only by walking every glyph in them, and the renderer walks the glyphs of
+/// the runs it keeps again to cull them.
+const NS_PER_WALKED_GLYPH: f64 = 15.0;
+const NS_PER_WALKED_RUN: f64 = 100.0;
+/// Each chunk of a text's plan looked at to estimate it (`crate::text::Plan`).
+const NS_PER_EXAMINED_CHUNK: f64 = 10.0;
+/// Laying out one text with parley and planning it (`calibrate_text_layout`): per text, per
+/// ASCII character (0.9 us for digits and punctuation, 0.5 us for words), per other character,
+/// per change of Unicode block (`crate::text::Facts::changes`: a text whose direction or script
+/// changes at every character took 1.8 us a character) and per line.
+const NS_PER_LAYOUT: f64 = 5_000.0;
+const NS_PER_LAYOUT_ASCII_CHAR: f64 = 950.0;
+const NS_PER_LAYOUT_OTHER_CHAR: f64 = 800.0;
+const NS_PER_LAYOUT_CHANGE: f64 = 1_100.0;
+const NS_PER_LAYOUT_LINE: f64 = 600.0;
+/// Each byte of text hashed to look it up in the text cache.
+const NS_PER_HASHED_BYTE: f64 = 1.0;
 /// Each path element looked at to estimate a frame.
 const NS_PER_EXAMINED_ELEMENT: f64 = 70.0;
 /// Each grid dot, at scale factor 1.
@@ -199,6 +226,13 @@ impl Estimate {
         }
     }
 
+    /// The part of the estimate that went into looking at the object: what it costs when it
+    /// isn't drawn.
+    #[cfg(test)]
+    pub(crate) fn examined(&self) -> f64 {
+        self.examined
+    }
+
     /// Adds going over `path` for its bounds.
     pub(crate) fn bound(&mut self, path: &BezPath) {
         self.add(0.0, NS_PER_BOUNDED_ELEMENT * path.elements().len() as f64);
@@ -233,6 +267,32 @@ impl Estimate {
     /// Adds setting up a glyph run.
     pub(crate) fn run(&mut self) {
         self.add(NS_PER_DRAW, 0.0);
+    }
+
+    /// Adds walking a line of text that holds `glyphs` glyphs in `runs` glyph runs, drawn or
+    /// not.
+    pub(crate) fn text_line(&mut self, glyphs: f64, runs: f64) {
+        self.add(
+            NS_PER_TEXT_LINE + NS_PER_WALKED_GLYPH * glyphs + NS_PER_WALKED_RUN * runs,
+            0.0,
+        );
+    }
+
+    /// Adds looking at one chunk of a text's plan.
+    pub(crate) fn chunk(&mut self) {
+        self.add(0.0, NS_PER_EXAMINED_CHUNK);
+    }
+
+    /// Adds drawing glyphs whose outlines add up to `drawn`, and glyphs that add up to `culled`
+    /// whose ink can't reach the image, `em_px` pixels to the em, in `runs` glyph runs.
+    /// `vello_cpu` still flattens the outlines of culled glyphs, but no tiles or pixels.
+    pub(crate) fn glyphs(&mut self, drawn: &GlyphSums, culled: &GlyphSums, runs: f64, em_px: f64) {
+        self.add(
+            NS_PER_DRAW * runs
+                + glyph_sums(drawn, em_px, self.width, self.height)
+                + glyph_sums_flattened(culled, em_px),
+            0.0,
+        );
     }
 
     /// Adds filling `path`, given in screen pixels.
@@ -352,6 +412,119 @@ pub(crate) fn glyph(stats: GlyphStats, em_px: f64, width: f64, height: f64) -> f
         + GLYPH_NS_PER_AREA_PX * area
 }
 
+/// The outline statistics of many glyphs added up, so what drawing them costs can be estimated
+/// at any size without going over them again ([`Estimate::glyphs`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct GlyphSums {
+    count: f32,
+    lines: f32,
+    curves: f32,
+    /// Each glyph's curves times the square root of its outline per element over
+    /// [`GLYPH_FLATTEN_PX`]: times the square root of the em in pixels, the lines its curves
+    /// flatten into past the first ([`glyph`]).
+    flatten: f32,
+    outline: f32,
+    elements: f32,
+    area: f32,
+}
+
+impl GlyphSums {
+    pub(crate) fn add(&mut self, stats: GlyphStats) {
+        let elements = stats.elements();
+        let flatten = if stats.curves > 0.0 {
+            stats.curves * (stats.outline_em / elements.max(1.0) / GLYPH_FLATTEN_PX).sqrt()
+        } else {
+            0.0
+        };
+        self.count += 1.0;
+        self.lines += to_f32(stats.lines);
+        self.curves += to_f32(stats.curves);
+        self.flatten += to_f32(flatten);
+        self.outline += to_f32(stats.outline_em);
+        self.elements += to_f32(elements);
+        self.area += to_f32(stats.area_em);
+    }
+
+    /// How many glyphs were added.
+    pub(crate) fn count(&self) -> f64 {
+        f64::from(self.count)
+    }
+
+    pub(crate) fn merge(&mut self, other: &Self) {
+        self.count += other.count;
+        self.lines += other.lines;
+        self.curves += other.curves;
+        self.flatten += other.flatten;
+        self.outline += other.outline;
+        self.elements += other.elements;
+        self.area += other.area;
+    }
+}
+
+/// No less than the sum of [`glyph`] over every glyph in `sums`, drawn `em_px` pixels to the em
+/// into an image of `width` x `height` pixels: each term of [`glyph`] adds up over the glyphs,
+/// and the limits it puts on a glyph's outline and area are applied to the totals.
+fn glyph_sums(sums: &GlyphSums, em_px: f64, width: f64, height: f64) -> f64 {
+    let em = em_px.abs();
+    let count = f64::from(sums.count);
+    let on_screen =
+        (f64::from(sums.outline) * em).min(f64::from(sums.elements) * 3.0 * (width + height));
+    let area = (f64::from(sums.area) * em * em).min(count * width * height);
+    glyph_sums_flattened(sums, em_px)
+        + GLYPH_NS_PER_OUTLINE_PX * on_screen
+        + GLYPH_NS_PER_AREA_PX * area
+}
+
+/// The part of [`glyph_sums`] for finding the glyphs and flattening their outlines.
+fn glyph_sums_flattened(sums: &GlyphSums, em_px: f64) -> f64 {
+    let lines = f64::from(sums.lines)
+        + f64::from(sums.curves)
+        + em_px.abs().sqrt() * f64::from(sums.flatten);
+    NS_PER_GLYPH * f64::from(sums.count) + GLYPH_NS_PER_LINE * lines
+}
+
+/// The least the budget charges for drawing work a frame did: lines of text walked, text glyphs
+/// and glyph runs walked, glyph runs set up and glyphs drawn. A frame's estimate covers at least
+/// this.
+#[cfg(test)]
+pub(crate) fn least_cost(
+    text_lines: f64,
+    walked_glyphs: f64,
+    walked_runs: f64,
+    runs: f64,
+    glyphs: f64,
+) -> f64 {
+    NS_PER_TEXT_LINE * text_lines
+        + NS_PER_WALKED_GLYPH * walked_glyphs
+        + NS_PER_WALKED_RUN * walked_runs
+        + NS_PER_DRAW * runs
+        + NS_PER_GLYPH * glyphs
+}
+
+/// The estimated cost of laying out a text of `chars` characters, `non_ascii` of them outside
+/// ASCII, with `changes` changes of Unicode block, in `lines` lines, and planning it.
+pub(crate) fn layout(chars: usize, non_ascii: usize, changes: usize, lines: usize) -> f64 {
+    let ascii = chars.saturating_sub(non_ascii);
+    NS_PER_LAYOUT
+        + NS_PER_LAYOUT_ASCII_CHAR * ascii as f64
+        + NS_PER_LAYOUT_OTHER_CHAR * non_ascii as f64
+        + NS_PER_LAYOUT_CHANGE * changes as f64
+        + NS_PER_LAYOUT_LINE * lines as f64
+}
+
+/// The estimated cost of hashing `bytes` bytes of text.
+pub(crate) fn hashing(bytes: usize) -> f64 {
+    NS_PER_HASHED_BYTE * bytes as f64
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "glyph statistics are small numbers, summed in f32 to keep text plans small"
+)]
+fn to_f32(v: f64) -> f32 {
+    v as f32
+}
+
 /// The smallest rectangle holding a segment's points, control points included.
 fn control_box(seg: PathSeg) -> Rect {
     match seg {
@@ -395,6 +568,7 @@ mod tests {
         curves: 8.0,
         outline_em: 3.7,
         area_em: 0.26,
+        ink_em: [0.03, 0.0, 0.53, 0.54],
     };
 
     #[test]

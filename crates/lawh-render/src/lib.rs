@@ -14,7 +14,9 @@
 //!
 //! A frame's work is budgeted, so a hostile board can't freeze the window:
 //! each object's cost is estimated before it is drawn, and objects that don't
-//! fit are drawn as faint outlines of their bounds ([`FrameStats`]).
+//! fit are drawn as faint outlines of their bounds ([`FrameStats`]). Text is
+//! laid out once and cached ([`MAX_TEXT_CACHE_BYTES`]), with what its glyphs
+//! cost to draw, so a frame estimates a text without walking its layout.
 //!
 //! Board coordinates are grid units with y down. At zoom 1 and scale factor 1
 //! one unit is [`BASE_PX_PER_UNIT`] pixels.
@@ -29,6 +31,7 @@ mod viewport;
 
 pub use error::RenderError;
 pub use renderer::{FrameStats, Renderer};
+pub use text::MAX_TEXT_CACHE_BYTES;
 pub use viewport::Viewport;
 
 /// Pixels per grid unit at zoom 1 and scale factor 1.

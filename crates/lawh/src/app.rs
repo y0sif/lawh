@@ -200,7 +200,9 @@ impl App {
                 height,
                 scale_factor,
                 math_pending = drawn.math_pending,
+                math_evicted = drawn.math_evicted,
                 downgraded = drawn.downgraded,
+                text_pending = drawn.text_pending,
                 "first frame presented"
             );
         } else {
@@ -211,9 +213,17 @@ impl App {
                 width,
                 height,
                 math_pending = drawn.math_pending,
+                math_evicted = drawn.math_evicted,
                 downgraded = drawn.downgraded,
+                laid_out = drawn.laid_out,
+                text_pending = drawn.text_pending,
                 "frame"
             );
+        }
+        // Text the frame couldn't afford to lay out is drawn by the next one. Math still
+        // compiling asks for a frame itself, through the engine's waker.
+        if drawn.incomplete() {
+            gfx.window.request_redraw();
         }
         Ok(())
     }

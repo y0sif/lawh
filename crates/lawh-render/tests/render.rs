@@ -568,22 +568,139 @@ fn a_full_board_of_costly_shapes_stays_in_budget() {
         let bounds = renderer.board_bounds(&board).unwrap();
         for (width, height, scale) in [(1920, 1080, 1.0), (2880, 1800, 2.0)] {
             let vp = Viewport::fit(bounds, width, height, scale);
+            // The first frame at this size has the smaller budget of a frame right after a
+            // resize; the second has the full one.
+            renderer.render(
+                &board,
+                &Viewport {
+                    width: 64,
+                    height: 64,
+                    ..vp
+                },
+            );
+            let mut frames = Vec::new();
             for _ in 0..2 {
                 let started = Instant::now();
                 let buf = renderer.render(&board, &vp);
                 let took = started.elapsed();
                 assert!(ink_pixels(buf) > 1000, "{template}");
-                let frame = renderer.last_frame();
                 assert!(took < Duration::from_secs(1), "{template}: {took:?}");
+                let frame = renderer.last_frame();
                 assert!(
                     frame.drawn > 0 && frame.downgraded > 0,
                     "{template}: {frame:?}"
                 );
                 assert_eq!(frame.drawn + frame.downgraded, board.len(), "{frame:?}");
-                assert!(frame.estimated < Duration::from_millis(25), "{frame:?}");
+                frames.push(frame);
             }
+            // The objects are all alike, so how many are drawn follows the budget: 8 ms right
+            // after a resize, 18 ms after (lawh-render's `budget.rs`), less the grid's share.
+            let ratio = frames[0].drawn as f64 / frames[1].drawn as f64;
+            assert!(
+                (0.2..0.6).contains(&ratio),
+                "{template} {width}x{height}: {} drawn after the resize, {} after: {ratio:.2}",
+                frames[0].drawn,
+                frames[1].drawn
+            );
+            // An export of the same view has a far larger budget, and draws them all.
+            renderer.render_png(&board, &vp).unwrap();
+            let export = renderer.last_frame();
+            assert_eq!(
+                (export.drawn, export.downgraded),
+                (board.len(), 0),
+                "{template}: {export:?}"
+            );
         }
     }
+}
+
+/// A board of `count` texts at the origin, the `i`th made by `text(i)`.
+fn text_board(count: usize, text: impl Fn(usize) -> String) -> Board {
+    let mut board = Board::new();
+    for i in 0..count {
+        board
+            .insert(Object::new(
+                ObjectId::new(format!("t{i}")).unwrap(),
+                Shape::Text {
+                    at: Point::ZERO,
+                    text: text(i),
+                },
+            ))
+            .unwrap();
+    }
+    board
+}
+
+/// Text `i` of eight that together hold all the characters a board may: 5,000 characters of
+/// words in 455 lines.
+fn long_text(i: usize) -> String {
+    let words = "lorem ipsum dolor sit amet ".repeat(200);
+    let mut text = format!("{i} ");
+    for (n, c) in words.chars().enumerate() {
+        if text.chars().count() >= lawh_core::board::MAX_TEXT_CHARS {
+            break;
+        }
+        text.push(if n % 11 == 10 { '\n' } else { c });
+    }
+    text
+}
+
+#[test]
+fn opening_a_board_lays_its_text_out_once() {
+    let board = text_board(8, long_text);
+    let mut renderer = Renderer::new_trusted();
+    // As the app opens a board: the bounds for the fit lay every text out.
+    let bounds = renderer.board_bounds(&board).unwrap();
+    let vp = Viewport::fit(bounds, 800, 600, 1.0);
+    for view in [
+        vp,
+        // A frame that draws nothing doesn't cost the next one its layouts.
+        Viewport {
+            zoom: f64::NAN,
+            ..vp
+        },
+        vp,
+        Viewport::new(Point::new(2.0, 2.0), 20.0, 800, 600, 1.0),
+    ] {
+        renderer.render(&board, &view);
+        let frame = renderer.last_frame();
+        assert_eq!((frame.laid_out, frame.text_pending), (0, 0), "{frame:?}");
+    }
+    // Later fits only look the layouts up.
+    assert_eq!(renderer.board_bounds(&board), Some(bounds));
+}
+
+#[test]
+fn text_a_frame_cannot_afford_to_lay_out_waits_for_the_next() {
+    // Never laid out (no `board_bounds` first): laying all of it out costs about 40 ms, more
+    // than a frame's budget.
+    let board = text_board(8, long_text);
+    let mut renderer = Renderer::new_trusted();
+    let vp = Viewport::new(Point::new(4.0, 6.0), 1.0, 800, 600, 1.0);
+    renderer.render(&board, &vp);
+    let first = renderer.last_frame();
+    assert!(first.laid_out >= 1 && first.text_pending >= 1, "{first:?}");
+    assert_eq!(
+        first.laid_out + first.text_pending,
+        board.len(),
+        "{first:?}"
+    );
+    assert!(first.incomplete());
+    // Each frame lays out at least one more, so drawing again finishes.
+    let mut frames = 1;
+    while renderer.last_frame().incomplete() {
+        assert!(
+            frames <= board.len(),
+            "still incomplete after {frames} frames"
+        );
+        renderer.render(&board, &vp);
+        frames += 1;
+    }
+    let last = renderer.last_frame();
+    assert_eq!(last.text_pending, 0, "{last:?}");
+    assert_eq!(last.drawn + last.downgraded, board.len(), "{last:?}");
+    renderer.render(&board, &vp);
+    assert_eq!(renderer.last_frame().laid_out, 0);
 }
 
 #[test]
@@ -751,4 +868,88 @@ fn only_math_on_screen_is_asked_for_nearest_first() {
     let there = Viewport::new(Point::new(1001.0, 0.3), 4.0, 600, 200, 1.0);
     renderer.render(&board, &there);
     assert_eq!(renderer.math_pending(), 1);
+}
+
+#[test]
+fn formulas_on_screen_are_asked_for_nearest_the_centre_first() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    // Four formulas that each take a while to compile, on screen at different distances from
+    // the centre of the view, in board order far, mid, near, close. The engine compiles them
+    // one at a time in the order they were asked for, so at any time the ones compiled must be
+    // the first few in order of distance.
+    let slow = |n: u32| format!("#let s = 0; #for i in range({n}) {{ s += i }}; #s");
+    let board = common::board(&format!(
+        "lawh version=1\n\
+         math id=far x=-4 y=-2.8 \"{}\"\n\
+         math id=mid x=-4 y=2 \"{}\"\n\
+         math id=near x=-4 y=0 \"{}\"\n\
+         math id=close x=-4 y=1.2 \"{}\"\n",
+        slow(400_001),
+        slow(400_002),
+        slow(400_003),
+        slow(400_004),
+    ));
+    let by_distance = ["near", "close", "mid", "far"];
+    let wakes = Arc::new((Mutex::new(0_usize), Condvar::new()));
+    let engine = lawh_math::MathEngine::new().with_timeout(Duration::from_secs(120));
+    let woken = Arc::clone(&wakes);
+    engine.set_waker(Arc::new(move || {
+        *woken.0.lock().unwrap() += 1;
+        woken.1.notify_all();
+    }));
+    let mut renderer = Renderer::with_math(engine);
+    // 80 pixels a unit: every formula's placeholder is on screen, `near`'s around the centre,
+    // the others 0.9, 1.7 and 2.5 units from it.
+    let vp = Viewport::new(Point::new(0.0, 0.3), 2.0, 800, 600, 1.0);
+    let rows = |board: &Board| -> Vec<(&'static str, u16)> {
+        by_distance
+            .iter()
+            .map(|id| {
+                let object = board.get(&ObjectId::new(*id).unwrap()).unwrap();
+                let Shape::Math { at, .. } = &object.shape else {
+                    unreachable!()
+                };
+                // A formula's first line, a quarter of a unit below its top.
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "on screen"
+                )]
+                let y = vp.to_screen(Point::new(at.x, at.y + 0.25)).y as u16;
+                (*id, y)
+            })
+            .collect()
+    };
+    let rows = rows(&board);
+    // Which formulas are drawn in ink, in order of distance.
+    let compiled = |buf: &[u8]| -> Vec<bool> {
+        rows.iter()
+            .map(|(_, y)| {
+                // Ink, darker than any grey of a placeholder.
+                (0..vp.width).any(|x| common::pixel(buf, vp.width, x, *y)[0] < 100)
+            })
+            .collect()
+    };
+    renderer.render(&board, &vp);
+    assert_eq!(renderer.math_pending(), 4);
+    let mut seen = 0;
+    while seen < 4 {
+        let (lock, changed) = &*wakes;
+        let guard = lock.lock().unwrap();
+        let (guard, timeout) = changed
+            .wait_timeout_while(guard, Duration::from_secs(60), |wakes| *wakes <= seen)
+            .unwrap();
+        assert!(!timeout.timed_out(), "a formula took over a minute");
+        drop(guard);
+        let done = compiled(renderer.render(&board, &vp));
+        let count = done.iter().filter(|done| **done).count();
+        assert!(
+            done.iter().take(count).all(|done| *done),
+            "compiled out of order: {:?}",
+            by_distance.iter().zip(&done).collect::<Vec<_>>()
+        );
+        assert!(count > seen, "{done:?}");
+        seen = count;
+    }
 }

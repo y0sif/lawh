@@ -21,6 +21,8 @@ pub(crate) struct GlyphStats {
     pub(crate) outline_em: f64,
     /// Area of the outline's bounding box.
     pub(crate) area_em: f64,
+    /// The outline's bounding box from the glyph's origin, y up: `[x_min, y_min, x_max, y_max]`.
+    pub(crate) ink_em: [f32; 4],
 }
 
 impl GlyphStats {
@@ -111,12 +113,27 @@ fn measure(face: &Face<'_>, id: GlyphId, units_per_em: f64) -> GlyphStats {
     };
     let width = f64::from(bbox.x_max) - f64::from(bbox.x_min);
     let height = f64::from(bbox.y_max) - f64::from(bbox.y_min);
+    let em = |v: i16| to_f32(f64::from(v) / units_per_em);
     GlyphStats {
         lines: walk.lines,
         curves: walk.curves,
         outline_em: walk.outline / units_per_em,
         area_em: (width * height).abs() / (units_per_em * units_per_em),
+        ink_em: [
+            em(bbox.x_min),
+            em(bbox.y_min),
+            em(bbox.x_max),
+            em(bbox.y_max),
+        ],
     }
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "glyph extents in ems are small numbers"
+)]
+fn to_f32(v: f64) -> f32 {
+    v as f32
 }
 
 /// Totals an outline as the font draws it.

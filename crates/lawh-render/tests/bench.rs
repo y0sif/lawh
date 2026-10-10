@@ -377,11 +377,18 @@ fn board_objects_frame_time() {
 /// it.
 const FRAME_TARGET: Duration = Duration::from_millis(33);
 
+/// Most a new renderer may take to find the bounds of any board, as the app does when it opens
+/// one (every text and math source is laid out), in a release build.
+const OPEN_TARGET: Duration = Duration::from_millis(100);
+
 /// The hostile boards the frame budget is for: formulas at the complexity caps
 /// (`lawh_math::MAX_LAYOUT_GLYPHS`, `lawh_math::MAX_LAYOUT_PATH_ELEMENTS`) and boards of
-/// `lawh_core::board::MAX_OBJECTS` costly objects.
+/// `lawh_core::board::MAX_OBJECTS` costly objects. A formula is repeated as often as the board's
+/// text cap (`lawh_core::board::MAX_BOARD_TEXT_CHARS`) and object cap allow.
 fn worst_case_boards() -> Vec<(String, lawh_core::Board)> {
     use std::fmt::Write as _;
+
+    use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS};
 
     let mut boards = Vec::new();
     let formulas = [
@@ -403,17 +410,19 @@ fn worst_case_boards() -> Vec<(String, lawh_core::Board)> {
             .into_iter()
             .find(|(name, _)| *name == kind)
             .unwrap();
+        let copies = (MAX_BOARD_TEXT_CHARS / src.chars().count()).min(MAX_OBJECTS);
         let src = src.replace('"', "\\\"");
         boards.push((
             format!("{kind} n={n}"),
             common::board(&format!("lawh version=1\nmath id=m1 x=0 y=0 \"{src}\"\n")),
         ));
-        // The same formula 500 times: each copy is over the budget on its own.
+        // The same formula as many times as the board holds: each copy is over the budget on
+        // its own.
         let mut many = "lawh version=1\n".to_owned();
-        for i in 0..lawh_core::board::MAX_OBJECTS {
+        for i in 0..copies {
             writeln!(many, "math id=m{i} x=0 y=0 \"{src}\"").unwrap();
         }
-        boards.push((format!("500x {kind} n={n}"), common::board(&many)));
+        boards.push((format!("{copies}x {kind} n={n}"), common::board(&many)));
     }
     let line = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor";
     let objects = [
@@ -452,7 +461,7 @@ fn worst_case_boards() -> Vec<(String, lawh_core::Board)> {
     ];
     for (name, template) in objects {
         let mut src = "lawh version=1\n".to_owned();
-        for i in 0..lawh_core::board::MAX_OBJECTS {
+        for i in 0..MAX_OBJECTS {
             writeln!(src, "{}", template.replace("{i}", &i.to_string())).unwrap();
         }
         boards.push((format!("500x {name}"), common::board(&src)));
@@ -492,11 +501,29 @@ fn resized_and_steady(
     (resized, times[2])
 }
 
-/// Frame times of [`worst_case_boards`], fitted and at the app's highest zoom (20), at
-/// 1920x1080 and at 2880x1800 with scale factor 2: the frame right after a resize and the
-/// steady frame after it. Asserts [`FRAME_TARGET`] for both in release. The very first frame of
-/// a process is not timed: it also pays for loading code and fonts. `LAWH_BENCH_KINDS` picks
-/// boards by name prefix.
+/// A view at `zoom` with the board origin, where the worst text boards start, a grid unit in
+/// from the image's top-left corner.
+fn corner_view(zoom: f64, width: u16, height: u16, scale: f64) -> Viewport {
+    let unit = Viewport::new(kurbo::Point::ZERO, zoom, width, height, scale).px_per_unit();
+    let center = kurbo::Point::new(
+        f64::from(width) / 2.0 / unit - 1.0,
+        f64::from(height) / 2.0 / unit - 1.0,
+    );
+    Viewport::new(center, zoom, width, height, scale)
+}
+
+/// Opening and drawing [`worst_case_boards`] and the worst boards of text and failing math the
+/// text caps allow ([`text_worst_boards`]: the most texts of the most characters, the most
+/// lines, failing formulas of the longest sources, text changing script or direction at every
+/// character, CJK, stacked combining marks).
+///
+/// Opening is a new renderer finding the board's bounds before any math has compiled, as the
+/// app does (every text and every formula's source is laid out); [`OPEN_TARGET`] in release.
+/// Frames are fitted and at the app's highest zoom (20), plus zoom 1 and 20 at the corner where
+/// the texts start, at 1920x1080 and at 2880x1800 with scale factor 2: the frame right after a
+/// resize and the steady frame after it, once the math has compiled. Asserts [`FRAME_TARGET`]
+/// for both in release. The very first frame of a process is not timed: it also pays for
+/// loading code and fonts. `LAWH_BENCH_KINDS` picks boards by name prefix.
 /// `nice -n 19 cargo test --release -p lawh-render --test bench -- --ignored --nocapture frame_budget`
 #[test]
 #[ignore = "timing only; run with --release -- --ignored --nocapture"]
@@ -504,24 +531,51 @@ fn frame_budget_worst_cases() {
     use std::fmt::Write as _;
 
     let kinds = std::env::var("LAWH_BENCH_KINDS").unwrap_or_default();
+    let (chars, lines, total) = text_caps();
+    let boards = worst_case_boards()
+        .into_iter()
+        .map(|(name, board)| (name, board, false))
+        .chain(
+            text_worst_boards(chars, lines, total, "")
+                .into_iter()
+                .map(|(name, board)| (format!("text {name}"), board, true)),
+        );
     let mut worst = (Duration::ZERO, String::new());
-    for (name, board) in worst_case_boards() {
+    let mut worst_open = (Duration::ZERO, String::new());
+    for (name, board, text) in boards {
         if !kinds.is_empty() && !kinds.split(',').any(|k| name.starts_with(k)) {
             continue;
         }
         let mut renderer = Renderer::new_trusted();
+        black_box(renderer.board_bounds(&lawh_core::Board::default()));
+        let t = Instant::now();
+        black_box(renderer.board_bounds(&board));
+        let opened = t.elapsed();
+        if opened > worst_open.0 {
+            worst_open = (opened, name.clone());
+        }
         renderer.resolve_math(&board);
         let bounds = renderer.board_bounds(&board).unwrap();
-        let mut line = format!("{name:<44}");
+        println!("{name:<44} open {:.1} ms", ms(opened));
         for (width, height, scale) in [(1920, 1080, 1.0), (2880, 1800, 2.0)] {
-            let fit = Viewport::fit(bounds, width, height, scale);
-            let zoom20 = Viewport::new(bounds.center(), 20.0, width, height, scale);
-            for (label, vp) in [("fit", fit), ("zoom20", zoom20)] {
+            let mut line = format!("    {width}x{height}@{scale}");
+            let mut views = vec![
+                ("fit", Viewport::fit(bounds, width, height, scale)),
+                (
+                    "zoom20",
+                    Viewport::new(bounds.center(), 20.0, width, height, scale),
+                ),
+            ];
+            if text {
+                views.push(("corner1", corner_view(1.0, width, height, scale)));
+                views.push(("corner20", corner_view(20.0, width, height, scale)));
+            }
+            for (label, vp) in views {
                 let (resized, median) = resized_and_steady(&mut renderer, &board, &vp);
                 let stats = renderer.last_frame();
                 write!(
                     line,
-                    " | {width}x{height} {label} {:.1}/{:.1} ms est {:.1} ({} drawn, {} downgraded)",
+                    " | {label} {:.1}/{:.1} ms est {:.1} ({}d {}g)",
                     ms(resized),
                     ms(median),
                     ms(stats.estimated),
@@ -534,10 +588,16 @@ fn frame_budget_worst_cases() {
                     worst = (slowest, format!("{name} {width}x{height} {label}"));
                 }
             }
+            println!("{line}");
         }
-        println!("{line}");
     }
-    println!("worst frame: {:.1} ms ({})", ms(worst.0), worst.1);
+    println!(
+        "worst open: {:.1} ms ({}); worst frame: {:.1} ms ({})",
+        ms(worst_open.0),
+        worst_open.1,
+        ms(worst.0),
+        worst.1
+    );
     if !cfg!(debug_assertions) {
         assert!(
             worst.0 < FRAME_TARGET,
@@ -545,6 +605,13 @@ fn frame_budget_worst_cases() {
             ms(worst.0),
             worst.1,
             ms(FRAME_TARGET)
+        );
+        assert!(
+            worst_open.0 < OPEN_TARGET,
+            "worst open {:.1} ms ({}) is over the {:.0} ms target",
+            ms(worst_open.0),
+            worst_open.1,
+            ms(OPEN_TARGET)
         );
     }
 }
@@ -831,16 +898,7 @@ fn text_caps_worst_cases() {
         for (width, height, scale) in [(1920u16, 1080u16, 1.0), (2880, 1800, 2.0)] {
             let mut line = format!("    {width}x{height}@{scale}");
             let fit = Viewport::fit(bounds, width, height, scale);
-            let corner = |zoom: f64| {
-                let vp = Viewport::new(kurbo::Point::ZERO, zoom, width, height, scale);
-                let unit = vp.px_per_unit();
-                // The texts' top-left corner a little in from the view's.
-                let center = kurbo::Point::new(
-                    f64::from(width) / 2.0 / unit - 1.0,
-                    f64::from(height) / 2.0 / unit - 1.0,
-                );
-                Viewport::new(center, zoom, width, height, scale)
-            };
+            let corner = |zoom: f64| corner_view(zoom, width, height, scale);
             for (label, vp) in [
                 ("fit", fit),
                 ("z0.1", corner(0.1)),

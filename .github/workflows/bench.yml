@@ -1,0 +1,45 @@
+name: Bench
+
+# Release-build timings of lawh-render: the calibrations of the frame budget's cost estimates
+# (each asserts measured <= 1.2 x estimate), the worst-case boards (frames < 33 ms, opening
+# < 100 ms) and the other benches. The limits were measured on the maintainer's laptop, so a
+# slower or noisier runner can fail them: read the printed numbers either way.
+#
+# Run by hand only (`gh workflow run bench.yml`): the repo is private and Actions minutes are
+# limited.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Frame budget calibrations and benches
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo test --release --locked -p lawh-render --no-run
+      # One test at a time, so timings don't share the CPU. Every step runs even when an
+      # earlier one fails, so the whole picture is printed.
+      - name: Calibrations
+        if: ${{ !cancelled() }}
+        run: cargo test --release --locked -p lawh-render --lib -- --ignored --nocapture --test-threads=1 calibrate
+      - name: Worst cases
+        if: ${{ !cancelled() }}
+        run: cargo test --release --locked -p lawh-render --test bench -- --ignored --nocapture --test-threads=1 frame_budget_worst_cases
+      - name: Other benches
+        if: ${{ !cancelled() }}
+        run: cargo test --release --locked -p lawh-render --test bench -- --ignored --nocapture --test-threads=1 --skip frame_budget_worst_cases
