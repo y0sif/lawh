@@ -1,0 +1,11 @@
+---
+source: crates/lawh-math/tests/layout.rs
+expression: a/b
+---
+width: 13.08
+height: 34.58
+baseline: 20.38
+items: 3
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 20.0pt
+- path: 2 elements stroke 1.30pt

@@ -1,0 +1,10 @@
+---
+source: crates/lawh-math/tests/layout.rs
+expression: x^2
+---
+width: 19.12
+height: 17.46
+baseline: 17.26
+items: 2
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 16.0pt

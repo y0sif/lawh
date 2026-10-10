@@ -1,2 +1,5 @@
 *.lawh text eol=lf
 *.snap text eol=lf
+*.ttf binary
+*.otf binary
+*.png binary

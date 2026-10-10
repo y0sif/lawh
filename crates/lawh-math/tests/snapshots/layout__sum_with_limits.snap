@@ -1,0 +1,14 @@
+---
+source: crates/lawh-math/tests/layout.rs
+expression: sum_(i=1)^n i
+---
+width: 32.77
+height: 52.13
+baseline: 30.75
+items: 6
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 16.0pt
+- glyphs: 1 x Libertinus Math 16.0pt
+- glyphs: 1 x Libertinus Math 16.0pt
+- glyphs: 1 x Libertinus Math 16.0pt
+- glyphs: 1 x Libertinus Math 20.0pt

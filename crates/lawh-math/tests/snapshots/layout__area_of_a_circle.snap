@@ -1,0 +1,13 @@
+---
+source: crates/lawh-math/tests/layout.rs
+expression: A = pi r^2
+---
+width: 65.85
+height: 17.50
+baseline: 17.26
+items: 5
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 20.0pt
+- glyphs: 1 x Libertinus Math 16.0pt

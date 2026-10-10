@@ -5,7 +5,19 @@
 all-features = false
 
 [advisories]
-ignore = []
+# Only fail on unmaintained crates we depend on directly. The rest arrive through Typst's tree
+# (bincode, paste, rustybuzz, yaml-rust) and are out of our hands.
+unmaintained = "workspace"
+ignore = [
+    # quick-xml 0.38 comes only through hayagriva -> citationberg in typst-library. Both bugs are
+    # denial of service when parsing CSL styles, reachable only via `cite` and `bibliography`,
+    # which lawh-math removes from the Typst library (crates/lawh-math/src/world.rs).
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml via citationberg; cite/bibliography removed from Typst" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml via citationberg; cite/bibliography removed from Typst" },
+    # ttf-parser is Typst's own font type: Font::ttf() returns a ttf_parser::Face, so reading glyph
+    # outlines needs it directly. Revisit when Typst moves off it.
+    { id = "RUSTSEC-2026-0192", reason = "Typst's font type; needed to read glyph outlines" },
+]
 
 [licenses]
 # lawh is MIT. Permissive licences, plus file-level copyleft (MPL-2.0, used by nucleo) and font
