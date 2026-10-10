@@ -34,7 +34,7 @@ fn area_1080p_frame_time() {
     // bounds for the fit, then one render. Neither waits for math: the
     // formula is queued and drawn as a placeholder.
     let start = Instant::now();
-    let mut renderer = Renderer::new();
+    let mut renderer = Renderer::new_trusted();
     let created = start.elapsed();
     let bounds = renderer.board_bounds(&board).unwrap();
     let bounded = start.elapsed();
@@ -56,7 +56,7 @@ fn area_1080p_frame_time() {
     let median = (times[FRAMES / 2 - 1] + times[FRAMES / 2]) / 2;
 
     println!(
-        "[{profile}] first frame {:.1} ms (Renderer::new {:.1} ms, bounds {:.1} ms, render {:.1} ms)",
+        "[{profile}] first frame {:.1} ms (Renderer::new_trusted {:.1} ms, bounds {:.1} ms, render {:.1} ms)",
         ms(first),
         ms(created),
         ms(bounded.saturating_sub(created)),
@@ -81,7 +81,7 @@ const LIMITS_BUDGET: Duration = Duration::from_millis(100);
 #[ignore = "timing only; run with --release -- --ignored --nocapture"]
 fn limits_frame_time() {
     let board = common::limits_board();
-    let mut renderer = Renderer::new();
+    let mut renderer = Renderer::new_trusted();
     renderer.resolve_math(&board);
     let t = Instant::now();
     black_box(renderer.board_bounds(&board));
@@ -144,13 +144,13 @@ fn frame_time(
 
 /// Formulas of about `n` glyphs or path elements, laid out normally, stacked on one spot, or
 /// crossing the whole formula box.
-fn math_cases(n: usize) -> [(&'static str, String); 7] {
+fn math_cases(n: usize) -> Vec<(&'static str, String)> {
     let side = if n.isqrt().pow(2) == n {
         n.isqrt()
     } else {
         n.isqrt() + 1
     };
-    [
+    vec![
         (
             "glyph grid",
             format!(r#"#range({side}).map(_ => "x" * {side}).join(linebreak())"#),
@@ -186,6 +186,34 @@ fn math_cases(n: usize) -> [(&'static str, String); 7] {
             format!(
                 "#for i in range({}) {{ box(width: 0pt, line(length: 300pt, angle: 45deg, stroke: 100pt)) }}",
                 n / 2
+            ),
+        ),
+        (
+            "glyphs stacked translucent",
+            format!("#for i in range({n}) {{ box(width: 0pt, text(fill: rgb(0, 0, 0, 20))[x]) }}"),
+        ),
+        (
+            "big glyphs stacked 100pt W",
+            format!("#for i in range({n}) {{ box(width: 0pt, text(size: 100pt)[W]) }}"),
+        ),
+        (
+            "lines stacked translucent",
+            format!(
+                "#for i in range({}) {{ box(width: 0pt, line(length: 300pt, angle: 45deg, stroke: 100pt + rgb(0, 0, 0, 20))) }}",
+                n / 2
+            ),
+        ),
+        (
+            "rects stacked translucent",
+            format!(
+                "#for i in range({}) {{ box(width: 0pt, rect(width: 300pt, height: 300pt, fill: rgb(0, 0, 0, 20))) }}",
+                n / 5
+            ),
+        ),
+        (
+            "polygon stroke 2000pt",
+            format!(
+                "#polygon(stroke: 2000pt, ..range({n}).map(i => (calc.rem(i, 2) * 300pt, calc.rem(i, 3) * 300pt)))"
             ),
         ),
     ]
@@ -328,7 +356,7 @@ fn board_objects_frame_time() {
                 writeln!(src, "{}", template.replace("{i}", &i.to_string())).unwrap();
             }
             let board = common::board(&src);
-            let mut renderer = Renderer::new();
+            let mut renderer = Renderer::new_trusted();
             renderer.resolve_math(&board);
             let bounds = renderer.board_bounds(&board).unwrap();
             let fit = Viewport::fit(bounds, 1920, 1080, 1.0);
@@ -337,6 +365,203 @@ fn board_objects_frame_time() {
                 "{name:<26} n={:>6} ({:>7} bytes): fitted 1920x1080 first {:.1} ms, median {:.1} ms",
                 board.len(),
                 src.len(),
+                ms(first),
+                ms(median)
+            );
+        }
+    }
+}
+
+/// Most a window frame may take in a release build, whatever the board holds: two refreshes at
+/// 60 Hz. The frame budget in lawh-render's `budget.rs` is chosen to keep every case below under
+/// it.
+const FRAME_TARGET: Duration = Duration::from_millis(33);
+
+/// The hostile boards the frame budget is for: formulas at the complexity caps
+/// (`lawh_math::MAX_LAYOUT_GLYPHS`, `lawh_math::MAX_LAYOUT_PATH_ELEMENTS`) and boards of
+/// `lawh_core::board::MAX_OBJECTS` costly objects.
+fn worst_case_boards() -> Vec<(String, lawh_core::Board)> {
+    use std::fmt::Write as _;
+
+    let mut boards = Vec::new();
+    let formulas = [
+        (24_999, "glyphs stacked, own runs"),
+        (24_999, "big glyphs stacked 100pt W"),
+        (24_999, "glyphs stacked translucent"),
+        (24_999, "glyphs overlapping, one run"),
+        (24_964, "glyph grid"),
+        (4_999, "polygon stroke 100pt"),
+        (4_999, "polygon stroke 1pt"),
+        (9_998, "polygon fill"),
+        (4_999, "lines stacked, stroke 100pt"),
+        (4_999, "lines stacked translucent"),
+        (4_999, "rects stacked translucent"),
+        (4_999, "polygon stroke 2000pt"),
+    ];
+    for (n, kind) in formulas {
+        let (_, src) = math_cases(n)
+            .into_iter()
+            .find(|(name, _)| *name == kind)
+            .unwrap();
+        let src = src.replace('"', "\\\"");
+        boards.push((
+            format!("{kind} n={n}"),
+            common::board(&format!("lawh version=1\nmath id=m1 x=0 y=0 \"{src}\"\n")),
+        ));
+        // The same formula 500 times: each copy is over the budget on its own.
+        let mut many = "lawh version=1\n".to_owned();
+        for i in 0..lawh_core::board::MAX_OBJECTS {
+            writeln!(many, "math id=m{i} x=0 y=0 \"{src}\"").unwrap();
+        }
+        boards.push((format!("500x {kind} n={n}"), common::board(&many)));
+    }
+    let line = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor";
+    let objects = [
+        (
+            "circle r=1, stacked",
+            "circle id=o{i} x=0 y=0 r=1".to_owned(),
+        ),
+        (
+            "circle r=100, stacked",
+            "circle id=o{i} x=0 y=0 r=100".to_owned(),
+        ),
+        (
+            "rect 48x27, stacked",
+            "rect id=o{i} x=0 y=0 w=48 h=27".to_owned(),
+        ),
+        (
+            "rects offset by a pixel",
+            "rect id=o{i} x={i}e-3 y=0 w=48 h=27".to_owned(),
+        ),
+        (
+            "line diagonal, stacked",
+            "line id=o{i} x1=0 y1=0 x2=48 y2=27".to_owned(),
+        ),
+        (
+            "arrow diagonal, stacked",
+            "arrow id=o{i} x1=0 y1=0 x2=48 y2=27".to_owned(),
+        ),
+        (
+            "text line, stacked",
+            format!("text id=o{{i}} x=0 y=0 \"{line}\""),
+        ),
+        (
+            "text lines, spread",
+            format!("text id=o{{i}} x=0 y={{i}} \"{line}\""),
+        ),
+    ];
+    for (name, template) in objects {
+        let mut src = "lawh version=1\n".to_owned();
+        for i in 0..lawh_core::board::MAX_OBJECTS {
+            writeln!(src, "{}", template.replace("{i}", &i.to_string())).unwrap();
+        }
+        boards.push((format!("500x {name}"), common::board(&src)));
+    }
+    boards
+}
+
+/// The time of a frame right after the image changed size (the best of three, each after a
+/// frame at another size), and the median of five frames after it.
+fn resized_and_steady(
+    renderer: &mut Renderer,
+    board: &lawh_core::Board,
+    vp: &Viewport,
+) -> (Duration, Duration) {
+    let tiny = Viewport {
+        width: 64,
+        height: 64,
+        ..*vp
+    };
+    let resized = (0..3)
+        .map(|_| {
+            black_box(renderer.render(board, &tiny));
+            let t = Instant::now();
+            black_box(renderer.render(board, vp));
+            t.elapsed()
+        })
+        .min()
+        .unwrap();
+    let mut times: Vec<Duration> = (0..5)
+        .map(|_| {
+            let t = Instant::now();
+            black_box(renderer.render(board, vp));
+            t.elapsed()
+        })
+        .collect();
+    times.sort();
+    (resized, times[2])
+}
+
+/// Frame times of [`worst_case_boards`], fitted and at the app's highest zoom (20), at
+/// 1920x1080 and at 2880x1800 with scale factor 2: the frame right after a resize and the
+/// steady frame after it. Asserts [`FRAME_TARGET`] for both in release. The very first frame of
+/// a process is not timed: it also pays for loading code and fonts. `LAWH_BENCH_KINDS` picks
+/// boards by name prefix.
+/// `nice -n 19 cargo test --release -p lawh-render --test bench -- --ignored --nocapture frame_budget`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn frame_budget_worst_cases() {
+    use std::fmt::Write as _;
+
+    let kinds = std::env::var("LAWH_BENCH_KINDS").unwrap_or_default();
+    let mut worst = (Duration::ZERO, String::new());
+    for (name, board) in worst_case_boards() {
+        if !kinds.is_empty() && !kinds.split(',').any(|k| name.starts_with(k)) {
+            continue;
+        }
+        let mut renderer = Renderer::new_trusted();
+        renderer.resolve_math(&board);
+        let bounds = renderer.board_bounds(&board).unwrap();
+        let mut line = format!("{name:<44}");
+        for (width, height, scale) in [(1920, 1080, 1.0), (2880, 1800, 2.0)] {
+            let fit = Viewport::fit(bounds, width, height, scale);
+            let zoom20 = Viewport::new(bounds.center(), 20.0, width, height, scale);
+            for (label, vp) in [("fit", fit), ("zoom20", zoom20)] {
+                let (resized, median) = resized_and_steady(&mut renderer, &board, &vp);
+                let stats = renderer.last_frame();
+                write!(
+                    line,
+                    " | {width}x{height} {label} {:.1}/{:.1} ms est {:.1} ({} drawn, {} downgraded)",
+                    ms(resized),
+                    ms(median),
+                    ms(stats.estimated),
+                    stats.drawn,
+                    stats.downgraded,
+                )
+                .unwrap();
+                let slowest = resized.max(median);
+                if slowest > worst.0 {
+                    worst = (slowest, format!("{name} {width}x{height} {label}"));
+                }
+            }
+        }
+        println!("{line}");
+    }
+    println!("worst frame: {:.1} ms ({})", ms(worst.0), worst.1);
+    if !cfg!(debug_assertions) {
+        assert!(
+            worst.0 < FRAME_TARGET,
+            "worst frame {:.1} ms ({}) is over the {:.0} ms target",
+            ms(worst.0),
+            worst.1,
+            ms(FRAME_TARGET)
+        );
+    }
+}
+
+/// Frame times of an empty board at the zooms where the dot grid is densest.
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn grid_frame_time() {
+    let board = lawh_core::Board::new();
+    let mut renderer = Renderer::new_trusted();
+    for (width, height, scale) in [(1920, 1080, 1.0), (2880, 1800, 2.0)] {
+        for zoom in [0.1, 0.15, 0.3, 0.31, 0.6, 1.0] {
+            let vp = Viewport::new(kurbo::Point::ZERO, zoom, width, height, scale);
+            let (first, median) = frame_time(&mut renderer, &board, &vp, 5);
+            println!(
+                "empty {width}x{height} scale {scale} zoom {zoom} ({:.1} px/unit): first {:.1} ms, median {:.1} ms",
+                vp.px_per_unit(),
                 ms(first),
                 ms(median)
             );

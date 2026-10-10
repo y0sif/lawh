@@ -1639,6 +1639,7 @@ dependencies = [
  "parley",
  "thiserror 2.0.21",
  "tracing",
+ "ttf-parser",
  "vello_cpu 0.3.0",
 ]
 

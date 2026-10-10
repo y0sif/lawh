@@ -34,6 +34,11 @@ const GRID_MIN_PX_PER_UNIT: f64 = 12.0;
 const GRID_DOT_PX: f64 = 1.5;
 /// Most grid dots per row or column, a guard against absurd viewports.
 const GRID_MAX_DOTS_PER_AXIS: f64 = 4096.0;
+/// Most grid dots a frame draws before thinning them (see [`grid_dots`]): about 4 ms at
+/// 2880x1800 and scale factor 2, measured in release.
+const MAX_GRID_DOTS: f64 = 4000.0;
+/// Thinning never skips more than this many grid points in a row.
+const GRID_MAX_STEP: f64 = 4096.0;
 
 /// An ellipse whose bounds stay within this many pixels of the clip is drawn
 /// whole: `vello_cpu` culls the parts outside, and its `f32` coordinates are
@@ -331,31 +336,49 @@ fn halves(segment: PathSeg) -> (PathSeg, PathSeg) {
     }
 }
 
-/// One path holding a dot at every grid point on screen, or `None` when zoomed out too far for
-/// a grid to help.
-pub(crate) fn grid_dots(vp: &Viewport) -> Option<BezPath> {
+/// One path holding a dot at every grid point on screen, and how many dots it holds, or `None`
+/// when zoomed out too far for a grid to help.
+///
+/// Past [`MAX_GRID_DOTS`] dots, only every second grid point is drawn (along each axis), or
+/// every fourth, and so on: dots cost about a microsecond each, and a dot every 12 pixels would
+/// take tens of milliseconds a frame on a large screen. The thinned dots stay on the same board
+/// points as the view moves.
+pub(crate) fn grid_dots(vp: &Viewport) -> Option<(BezPath, usize)> {
     if vp.px_per_unit() < GRID_MIN_PX_PER_UNIT {
         return None;
     }
     let visible = vp.visible_board_rect();
-    let (x0, y0) = (visible.x0.floor(), visible.y0.floor());
-    let cols = (visible.x1.ceil() - x0).min(GRID_MAX_DOTS_PER_AXIS);
-    let rows = (visible.y1.ceil() - y0).min(GRID_MAX_DOTS_PER_AXIS);
-    if !(cols.is_finite() && rows.is_finite()) {
+    if !visible.is_finite() {
         return None;
     }
+    let mut step = 1.0;
+    let (cols, rows) = loop {
+        let (x0, y0) = ((visible.x0 / step).floor(), (visible.y0 / step).floor());
+        let cols = ((visible.x1 / step).ceil() - x0).min(GRID_MAX_DOTS_PER_AXIS);
+        let rows = ((visible.y1 / step).ceil() - y0).min(GRID_MAX_DOTS_PER_AXIS);
+        if (cols + 1.0) * (rows + 1.0) <= MAX_GRID_DOTS || step >= GRID_MAX_STEP {
+            break (cols, rows);
+        }
+        step *= 2.0;
+    };
+    let (x0, y0) = (
+        (visible.x0 / step).floor() * step,
+        (visible.y0 / step).floor() * step,
+    );
     let radius = GRID_DOT_PX * vp.scale_factor / 2.0;
     let mut path = BezPath::new();
+    let mut dots = 0;
     for row in 0..=count(rows) {
-        let y = y0 + f64::from(row);
+        let y = y0 + f64::from(row) * step;
         for col in 0..=count(cols) {
-            let at = vp.to_screen(Point::new(x0 + f64::from(col), y));
+            let at = vp.to_screen(Point::new(x0 + f64::from(col) * step, y));
             // Centre each dot on a pixel so it stays a crisp single dot.
             let at = Point::new(at.x.floor() + 0.5, at.y.floor() + 0.5);
             path.extend(Circle::new(at, radius).path_elements(TOLERANCE_PX));
+            dots += 1;
         }
     }
-    Some(path)
+    Some((path, dots))
 }
 
 fn segment(a: Point, b: Point) -> BezPath {
@@ -571,6 +594,32 @@ mod tests {
                 ),
                 "{radius}"
             );
+        }
+    }
+
+    #[test]
+    fn dense_grids_are_thinned_to_whole_steps() {
+        // 40 px per unit: every grid point, 49 x 28 of them.
+        let vp = Viewport::new(Point::new(0.3, 0.2), 1.0, 1920, 1080, 1.0);
+        let (_, dots) = grid_dots(&vp).unwrap();
+        assert!((1300..=1500).contains(&dots), "{dots}");
+        // 12 px per unit at 2880x1800: 36,000 grid points, thinned to every fourth.
+        for center in [Point::ZERO, Point::new(1.7, -3.2)] {
+            let vp = Viewport::new(center, 0.15, 2880, 1800, 2.0);
+            let (path, dots) = grid_dots(&vp).unwrap();
+            assert!(dots >= 1000 && dots as f64 <= MAX_GRID_DOTS, "{dots}");
+            // Every dot sits on a board point whose coordinates are multiples of 4, so the
+            // thinned grid doesn't move as the view pans. A dot's outline starts at its right
+            // edge, and dots are snapped to pixel centres: within 2 px, a sixth of a unit.
+            for el in path.elements() {
+                if let PathEl::MoveTo(p) = el {
+                    let board = vp.to_board(*p);
+                    for v in [board.x, board.y] {
+                        let off = (v / 4.0 - (v / 4.0).round()).abs() * 4.0;
+                        assert!(off < 0.25, "{board:?}");
+                    }
+                }
+            }
         }
     }
 

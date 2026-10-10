@@ -166,6 +166,29 @@ fn format_error_reports_path_line_and_column() {
 }
 
 #[test]
+fn too_many_objects_reports_path_line_and_column() {
+    use std::fmt::Write as _;
+
+    let max = lawh_core::board::MAX_OBJECTS;
+    let mut src = "lawh version=1\n".to_owned();
+    for i in 0..=max {
+        writeln!(src, "circle id=c{i} x=0 y=0 r=1").unwrap();
+    }
+    let board = TempBoard::new("many", &src);
+    let out = lawh(&[board.0.as_os_str()]);
+    assert_eq!(out.status.code(), Some(1));
+    // The first object over the limit is on the line after the header and `max` objects.
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "lawh: {}:{}:1: too many objects; a board holds at most {max}\n",
+            board.0.display(),
+            max + 2
+        )
+    );
+}
+
+#[test]
 fn oversized_file_is_refused_before_it_is_read() {
     // 1 GiB: the error must report this size, which only the file's metadata knows, and come
     // back at once instead of after reading a gigabyte.

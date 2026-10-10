@@ -94,7 +94,7 @@ fn check_golden(name: &str, png: &[u8]) {
 
 /// The area board fitted to 800x600, as the `area` golden draws it.
 fn area_fit_png(board: &Board) -> Vec<u8> {
-    let mut renderer = Renderer::new();
+    let mut renderer = Renderer::new_trusted();
     renderer.resolve_math(board);
     let bounds = renderer.board_bounds(board).unwrap();
     let vp = Viewport::fit(bounds, 800, 600, 1.0);
@@ -105,7 +105,7 @@ fn area_fit_png(board: &Board) -> Vec<u8> {
 /// draws it. The view is centred where the real formula is, so a mutated
 /// formula is compared at the same place.
 fn area_zoom3_png(board: &Board) -> Vec<u8> {
-    let mut renderer = Renderer::new();
+    let mut renderer = Renderer::new_trusted();
     let real = common::area_board();
     renderer.resolve_math(&real);
     let formula = real.get(&ObjectId::new("m1").unwrap()).unwrap();
@@ -122,6 +122,33 @@ fn area_fit_800x600() {
 #[test]
 fn area_formula_at_zoom_3() {
     check_golden("area_zoom3", &area_zoom3_png(&common::area_board()));
+}
+
+/// The frame budget never touches an everyday board: every object of the area example is drawn
+/// in full in window frames, right after a resize (when the budget is smallest) and after, at
+/// every size and zoom the app shows.
+#[test]
+fn the_area_board_is_never_downgraded() {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    renderer.resolve_math(&board);
+    let bounds = renderer.board_bounds(&board).unwrap();
+    for (width, height, scale) in [(800, 600, 1.0), (1920, 1080, 1.0), (2880, 1800, 2.0)] {
+        let fit = Viewport::fit(bounds, width, height, scale);
+        for vp in [
+            fit,
+            Viewport { zoom: 0.1, ..fit },
+            Viewport { zoom: 3.0, ..fit },
+            Viewport { zoom: 20.0, ..fit },
+        ] {
+            for _ in 0..2 {
+                renderer.render(&board, &vp);
+                let frame = renderer.last_frame();
+                assert_eq!(frame.downgraded, 0, "{vp:?}: {frame:?}");
+                assert_eq!(frame.math_pending, 0, "{vp:?}");
+            }
+        }
+    }
 }
 
 /// The area example with one line of its source replaced.

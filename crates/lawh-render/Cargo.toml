@@ -21,6 +21,8 @@ lawh-math.workspace = true
 parley.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# Glyph outline sizes for the frame budget; already in the tree through lawh-math.
+ttf-parser.workspace = true
 vello_cpu.workspace = true
 
 [lints]

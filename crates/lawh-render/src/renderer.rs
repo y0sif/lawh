@@ -1,6 +1,8 @@
 //! Board → pixels with `vello_cpu`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape as _, Stroke};
 use lawh_core::{Board, Object, Shape};
@@ -10,6 +12,8 @@ use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::peniko::{Blob, FontData};
 use vello_cpu::{Glyph, Pixmap, RenderContext, Resources};
 
+use crate::budget::{self, Budget, Estimate, MIN_VISIBLE_PX};
+use crate::glyphs::GlyphTable;
 use crate::text::{LAYOUT_EM, TextShaper};
 use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
 
@@ -23,6 +27,11 @@ const GRID: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
 const ERROR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC0, 0x39, 0x2B);
 /// The source of math that is still compiling, as a placeholder.
 const PENDING: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x9A, 0x9A, 0x94);
+/// The outline of an object drawn in its place when the frame budget is spent.
+const OUTLINE: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC8, 0xC8, 0xC2);
+
+/// Width of those outlines in logical pixels.
+const OUTLINE_PX: f64 = 1.0;
 
 /// How far from its origin a glyph's outline may reach, in ems. Glyphs whose
 /// origin is further than this outside the image aren't drawn.
@@ -53,10 +62,43 @@ enum MathWait {
     Yes,
 }
 
+/// What the last frame drew, from [`Renderer::last_frame`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FrameStats {
+    /// Objects on screen drawn in full.
+    pub drawn: usize,
+    /// Objects on screen that didn't fit in the frame's work budget: each is drawn as a faint
+    /// outline of its bounds instead, or left out once the outlines' own budget is spent too.
+    pub downgraded: usize,
+    /// How many of the downgraded objects were left out, outline and all.
+    pub left_out: usize,
+    /// Objects on screen smaller than half a pixel, not drawn.
+    pub too_small: usize,
+    /// Math blocks drawn as placeholders because they were still compiling.
+    pub math_pending: usize,
+    /// The frame's estimated work: what it drew (outlines and grid included) and the work of
+    /// estimating what it didn't. A window frame stays within a fixed budget of this.
+    pub estimated: Duration,
+}
+
+/// The bounds of a formula that has laid out, in pt within its layout.
+struct KnownMath {
+    bounds: Rect,
+    /// The frame that last looked at it.
+    last_used: u64,
+}
+
 /// Draws boards into a pixel buffer it owns, at any pan and zoom.
 ///
 /// Keep one per window: it caches text layouts, compiled math and glyph
 /// outlines between frames.
+///
+/// A window frame never does more than a fixed budget of work, whatever the
+/// board holds: each object's cost is estimated before it is drawn, and an
+/// object that doesn't fit in what is left is drawn as a faint outline of its
+/// bounds instead (see [`FrameStats::downgraded`]). Objects are still drawn in
+/// board order, so nothing changes places. Everyday boards are nowhere near
+/// the budget.
 pub struct Renderer {
     ctx: RenderContext,
     resources: Resources,
@@ -65,22 +107,25 @@ pub struct Renderer {
     math: MathEngine,
     /// `vello_cpu` handles for [`lawh_math::fonts`], by the same index.
     math_fonts: Vec<FontData>,
-    /// Math blocks the last frame drew as placeholders.
-    math_pending: usize,
-}
-
-impl Default for Renderer {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Outline sizes of the glyphs of [`lawh_math::fonts`], for the budget.
+    glyphs: GlyphTable,
+    /// Formulas known to have laid out, by source, so bounds and culling can
+    /// use their real extent without asking the math engine for them. Entries
+    /// a frame doesn't look at are dropped at its end.
+    known_math: HashMap<String, KnownMath>,
+    /// Counts frames, for [`KnownMath::last_used`].
+    frame: u64,
+    /// The current frame's image has a new size (or is the first).
+    resized: bool,
+    last: FrameStats,
 }
 
 impl Renderer {
     /// A renderer that compiles math in this process ([`MathEngine::new`]).
-    /// For trusted boards only, such as tests and goldens: a formula that
+    /// **For trusted boards only**, such as tests and goldens: a formula that
     /// overflows the stack takes this process down. Draw boards from files
     /// with [`Renderer::with_math`] and a worker engine.
-    pub fn new() -> Self {
+    pub fn new_trusted() -> Self {
         Self::with_math(MathEngine::new())
     }
 
@@ -99,54 +144,95 @@ impl Renderer {
             text: TextShaper::new(),
             math,
             math_fonts,
-            math_pending: 0,
+            glyphs: GlyphTable::new(),
+            known_math: HashMap::new(),
+            frame: 0,
+            resized: false,
+            last: FrameStats::default(),
         }
     }
 
     /// Draws `board` through `vp` and returns the image: premultiplied RGBA8,
     /// row-major, `vp.width * vp.height * 4` bytes.
     ///
-    /// Never waits for math. A formula not compiled yet is queued and its
-    /// source drawn in grey as a placeholder; the math engine's waker says
-    /// when to draw again. A formula that failed shows its source in red.
+    /// Never waits for math. Only formulas on screen are asked for, nearest
+    /// the centre of the view first, so a slow formula elsewhere on the board
+    /// can't hold up the ones in view. A formula not compiled yet is queued
+    /// and its source drawn in grey as a placeholder; the math engine's waker
+    /// says when to draw again. A formula that failed shows its source in red.
+    ///
+    /// The frame's work is budgeted (see [`Renderer`]); [`Self::last_frame`]
+    /// says what was left out.
     pub fn render(&mut self, board: &Board, vp: &Viewport) -> &[u8] {
         self.draw_frame(board, vp, MathWait::No)
     }
 
     fn draw_frame(&mut self, board: &Board, vp: &Viewport, wait: MathWait) -> &[u8] {
         if !self.begin_frame(vp) {
+            self.last = FrameStats::default();
             return self.pixmap.data_as_u8_slice();
         }
-        let mut pending = 0;
+        let mut stats = FrameStats::default();
+        let mut budget = match (wait, self.resized) {
+            (MathWait::No, false) => Budget::frame(),
+            (MathWait::No, true) => Budget::resized_frame(),
+            (MathWait::Yes, _) => Budget::export(),
+        };
         if vp.is_drawable() {
-            if let Some(dots) = draw::grid_dots(vp) {
+            if let Some((path, dots)) = draw::grid_dots(vp) {
+                budget.charge(budget::grid(dots, vp.scale_factor));
                 self.ctx.set_paint(GRID);
-                self.ctx.fill_path(&dots);
+                self.ctx.fill_path(&path);
             }
             let clip = draw::clip_rect(vp);
             let to_screen = vp.transform();
-            for object in board.objects() {
-                // Asked once per object, so bounds and drawing agree.
-                let math = self.math_status(object, wait);
-                if matches!(math, Some(MathStatus::Pending)) {
-                    pending += 1;
+            let statuses = self.math_statuses(board, vp, clip, wait);
+            for (object, math) in board.objects().iter().zip(statuses) {
+                if matches!(object.shape, Shape::Math { .. }) && math.is_none() {
+                    // Off screen, so not asked for.
+                    continue;
                 }
-                let on_screen = self
+                if matches!(math, Some(MathStatus::Pending)) {
+                    stats.math_pending += 1;
+                }
+                let Some(screen) = self
                     .bounds_with(object, math.as_ref())
                     .map(|bounds| to_screen.transform_rect_bbox(bounds))
-                    .is_some_and(|bounds| bounds.is_finite() && bounds.overlaps(clip));
-                if on_screen {
-                    self.draw_object(object, math, vp, clip);
+                    .filter(|bounds| bounds.is_finite() && bounds.overlaps(clip))
+                else {
+                    continue;
+                };
+                if screen.width().max(screen.height()) < MIN_VISIBLE_PX {
+                    stats.too_small += 1;
+                } else if self.draw_object(object, math, vp, clip, &mut budget) {
+                    stats.drawn += 1;
+                } else {
+                    stats.downgraded += 1;
+                    if !self.draw_outline(screen, vp, clip, &mut budget) {
+                        stats.left_out += 1;
+                    }
                 }
             }
         } else {
             tracing::debug!(?vp, "viewport not drawable; drawing the background only");
         }
-        if pending > 0 {
-            tracing::debug!(pending, "math still compiling; drawn as placeholders");
+        if stats.math_pending > 0 {
+            tracing::debug!(
+                pending = stats.math_pending,
+                "math still compiling; drawn as placeholders"
+            );
         }
-        self.math_pending = pending;
-        self.text.end_frame();
+        if stats.downgraded > 0 {
+            tracing::debug!(
+                downgraded = stats.downgraded,
+                left_out = stats.left_out,
+                drawn = stats.drawn,
+                "frame budget spent; drew objects over it as outlines"
+            );
+        }
+        stats.estimated = Duration::from_secs_f64(budget.spent.max(0.0) / 1e9);
+        self.last = stats;
+        self.end_frame(vp.is_drawable());
         self.finish_frame()
     }
 
@@ -160,16 +246,29 @@ impl Renderer {
         if width == 0 || height == 0 {
             return false;
         }
-        if self.ctx.width() == width && self.ctx.height() == height {
-            self.ctx.reset();
-        } else {
+        self.resized = self.ctx.width() != width || self.ctx.height() != height;
+        if self.resized {
             self.ctx.reset_and_resize(width, height);
+        } else {
+            self.ctx.reset();
         }
         self.ctx.set_transform(Affine::IDENTITY);
         self.ctx.set_paint(PAPER);
         self.ctx
             .fill_rect(&Rect::new(0.0, 0.0, f64::from(width), f64::from(height)));
         true
+    }
+
+    /// Drops what the frame didn't use from the caches and starts the next one.
+    /// A frame that `drew` nothing looked at no formula, so the formulas it
+    /// knows are kept.
+    fn end_frame(&mut self, drew: bool) {
+        self.text.end_frame();
+        if drew {
+            let frame = self.frame;
+            self.known_math.retain(|_, known| known.last_used == frame);
+        }
+        self.frame = self.frame.wrapping_add(1);
     }
 
     /// Renders what was drawn since [`Self::begin_frame`] into the image.
@@ -183,7 +282,8 @@ impl Renderer {
     ///
     /// Waits for every formula on the board first ([`Self::resolve_math`]),
     /// so the image never has placeholders: math that doesn't compile in
-    /// time shows its source in red.
+    /// time shows its source in red. Exports have a work budget too, far
+    /// larger than a window frame's.
     pub fn render_png(&mut self, board: &Board, vp: &Viewport) -> Result<Vec<u8>, RenderError> {
         if vp.width == 0 || vp.height == 0 {
             return Err(RenderError::EmptyImage {
@@ -203,12 +303,13 @@ impl Renderer {
     /// for each (up to the math engine's timeout and restart margin). After
     /// it, [`Self::board_bounds`] and [`Self::render`] see the final math.
     /// For exports and tests; the window never waits.
-    pub fn resolve_math(&self, board: &Board) {
+    pub fn resolve_math(&mut self, board: &Board) {
         for object in board.objects() {
-            if let Shape::Math { src, .. } = &object.shape
-                && let Err(err) = self.math.layout_blocking(src)
-            {
-                tracing::debug!(id = %object.id, %err, "math did not lay out");
+            if let Shape::Math { src, .. } = &object.shape {
+                match self.math.layout_blocking(src) {
+                    Ok(layout) => self.record_math(src, &layout),
+                    Err(err) => tracing::debug!(id = %object.id, %err, "math did not lay out"),
+                }
             }
         }
     }
@@ -216,16 +317,23 @@ impl Renderer {
     /// How many math blocks the last [`Self::render`] drew as placeholders
     /// because they were still compiling.
     pub fn math_pending(&self) -> usize {
-        self.math_pending
+        self.last.math_pending
+    }
+
+    /// What the last frame drew and what it left out.
+    pub fn last_frame(&self) -> FrameStats {
+        self.last
     }
 
     /// The smallest rectangle, in grid units, holding every object on the
     /// board, text and math extents included; `None` for an empty board.
     ///
-    /// Never waits for math: a formula still compiling counts with the
-    /// extents of its source text. Call [`Self::resolve_math`] first for
-    /// final bounds. Strokes and arrowheads have a fixed pixel size, so they
-    /// aren't included; [`Viewport::fit`] leaves a margin for them.
+    /// Never waits for math, and never asks for it: a formula this renderer
+    /// hasn't seen laid out counts with the extents of its source text. A
+    /// laid-out formula counts with everything it draws, which can reach
+    /// outside its box. Call [`Self::resolve_math`] first for final bounds.
+    /// Strokes and arrowheads have a fixed pixel size, so they aren't
+    /// included; [`Viewport::fit`] leaves a margin for them.
     pub fn board_bounds(&mut self, board: &Board) -> Option<Rect> {
         board
             .objects()
@@ -237,25 +345,84 @@ impl Renderer {
     /// The bounds of one object in grid units, as in [`Self::board_bounds`];
     /// `None` for an object with no finite bounds.
     pub fn object_bounds(&mut self, object: &Object) -> Option<Rect> {
-        let math = self.math_status(object, MathWait::No);
-        self.bounds_with(object, math.as_ref())
+        self.bounds_with(object, None)
     }
 
-    /// Where a math object's formula stands; `None` for other objects.
-    fn math_status(&self, object: &Object, wait: MathWait) -> Option<MathStatus> {
-        let Shape::Math { src, .. } = &object.shape else {
-            return None;
-        };
-        Some(match wait {
-            MathWait::No => self.math.request(src),
-            MathWait::Yes => match self.math.layout_blocking(src) {
-                Ok(layout) => MathStatus::Ready(layout),
-                Err(err) => MathStatus::Failed(err),
-            },
-        })
+    /// The math status of every object on `board`, by index: `None` for
+    /// objects that aren't math, and for formulas off screen when the frame
+    /// doesn't wait. Formulas on screen (by their known bounds, or their
+    /// placeholder's) are asked for nearest the centre of the view first, so
+    /// they queue ahead of the rest.
+    fn math_statuses(
+        &mut self,
+        board: &Board,
+        vp: &Viewport,
+        clip: Rect,
+        wait: MathWait,
+    ) -> Vec<Option<MathStatus>> {
+        let objects = board.objects();
+        let mut statuses = vec![None; objects.len()];
+        let to_screen = vp.transform();
+        let center = Point::new(f64::from(vp.width) / 2.0, f64::from(vp.height) / 2.0);
+        let mut visible = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            let Shape::Math { src, .. } = &object.shape else {
+                continue;
+            };
+            if wait == MathWait::Yes {
+                let status = match self.math.layout_blocking(src) {
+                    Ok(layout) => MathStatus::Ready(layout),
+                    Err(err) => MathStatus::Failed(err),
+                };
+                statuses[index] = Some(self.noted(src, status));
+                continue;
+            }
+            let on_screen = self
+                .bounds_with(object, None)
+                .map(|bounds| to_screen.transform_rect_bbox(bounds))
+                .filter(|bounds| bounds.is_finite() && bounds.overlaps(clip));
+            if let Some(bounds) = on_screen {
+                visible.push((distance(bounds, center), index));
+            }
+        }
+        // Stable, so formulas the same distance away are asked for in board order.
+        visible.sort_by(|a, b| a.0.total_cmp(&b.0));
+        for (_, index) in visible {
+            if let Some(Shape::Math { src, .. }) = objects.get(index).map(|object| &object.shape) {
+                let status = self.math.request(src);
+                statuses[index] = Some(self.noted(src, status));
+            }
+        }
+        statuses
     }
 
-    /// An object's bounds, given its math status from [`Self::math_status`].
+    /// `status`, after remembering the bounds of a laid-out formula.
+    fn noted(&mut self, src: &str, status: MathStatus) -> MathStatus {
+        if let MathStatus::Ready(layout) = &status {
+            self.record_math(src, layout);
+        }
+        status
+    }
+
+    fn record_math(&mut self, src: &str, layout: &MathLayout) {
+        let bounds = layout_bounds(layout);
+        let frame = self.frame;
+        if let Some(known) = self.known_math.get_mut(src) {
+            known.bounds = bounds;
+            known.last_used = frame;
+        } else {
+            self.known_math.insert(
+                src.to_owned(),
+                KnownMath {
+                    bounds,
+                    last_used: frame,
+                },
+            );
+        }
+    }
+
+    /// An object's bounds, given its math status from [`Self::math_statuses`]
+    /// (`None`: what this renderer knows, without asking the engine).
     fn bounds_with(&mut self, object: &Object, math: Option<&MathStatus>) -> Option<Rect> {
         let bounds = match &object.shape {
             Shape::Ellipse { center, rx, ry } => {
@@ -270,14 +437,24 @@ impl Renderer {
             Shape::Rect { origin, w, h } => Some(Rect::from_origin_size(*origin, (*w, *h)).abs()),
             Shape::Line { a, b } | Shape::Arrow { a, b } => Some(Rect::from_points(*a, *b)),
             Shape::Text { at, text } => self.text_bounds(*at, text),
-            Shape::Math { at, src } => match math {
-                Some(MathStatus::Ready(layout)) => Some(Rect::from_origin_size(
-                    *at,
-                    (layout.width * MATH_SCALE, layout.height * MATH_SCALE),
-                )),
-                // Still compiling or failed: the source is drawn as text.
-                _ => self.text_bounds(*at, src),
-            },
+            Shape::Math { at, src } => {
+                let laid_out = match math {
+                    Some(MathStatus::Ready(layout)) => Some(layout_bounds(layout)),
+                    // Still compiling or failed: the source is drawn as text.
+                    Some(MathStatus::Pending | MathStatus::Failed(_)) => None,
+                    None => {
+                        let frame = self.frame;
+                        self.known_math.get_mut(src.as_str()).map(|known| {
+                            known.last_used = frame;
+                            known.bounds
+                        })
+                    }
+                };
+                match laid_out {
+                    Some(pt) => Some(math_to_board(*at).transform_rect_bbox(pt)),
+                    None => self.text_bounds(*at, src),
+                }
+            }
         };
         bounds.filter(Rect::is_finite)
     }
@@ -293,60 +470,131 @@ impl Renderer {
         ))
     }
 
-    /// Draws one object whose bounds reach into `clip` (screen pixels).
+    /// Draws one object whose bounds reach into `clip` (screen pixels), if
+    /// its estimated cost fits in `budget`; `false`, with nothing drawn, when
+    /// it doesn't.
     fn draw_object(
         &mut self,
         object: &Object,
         math: Option<MathStatus>,
         vp: &Viewport,
         clip: Rect,
-    ) {
+        budget: &mut Budget,
+    ) -> bool {
         match &object.shape {
             Shape::Ellipse { center, rx, ry } => {
-                self.stroke_px(draw::ellipse(vp, *center, *rx, *ry, clip), vp);
+                self.stroke_px(draw::ellipse(vp, *center, *rx, *ry, clip), vp, clip, budget)
             }
             Shape::Rect { origin, w, h } => {
-                self.stroke_px(draw::rect(vp, *origin, *w, *h, clip), vp);
+                self.stroke_px(draw::rect(vp, *origin, *w, *h, clip), vp, clip, budget)
             }
-            Shape::Line { a, b } => self.stroke_px(draw::line(vp, *a, *b, clip), vp),
+            Shape::Line { a, b } => self.stroke_px(draw::line(vp, *a, *b, clip), vp, clip, budget),
             Shape::Arrow { a, b } => {
                 let (shaft, head) = draw::arrow(vp, *a, *b, clip);
-                self.stroke_px(shaft, vp);
+                let width = draw::stroke_width_px(vp);
+                let mut cost = Estimate::new(clip, vp.width, vp.height, budget.left());
+                if let Some(shaft) = &shaft {
+                    cost.stroke(shaft, width);
+                }
+                if let Some(head) = &head {
+                    cost.fill(head);
+                }
+                if !budget.settle(&cost) {
+                    return false;
+                }
+                if let Some(shaft) = shaft {
+                    self.stroke_ink(&shaft, width);
+                }
                 if let Some(head) = head {
                     self.ctx.set_transform(Affine::IDENTITY);
                     self.ctx.set_paint(INK);
                     self.ctx.fill_path(&head);
                 }
+                true
             }
-            Shape::Text { at, text } => self.draw_text(*at, text, INK, vp, clip),
+            Shape::Text { at, text } => self.draw_text(*at, text, INK, vp, clip, budget),
             Shape::Math { at, src } => match math {
-                Some(MathStatus::Ready(layout)) => self.draw_math(*at, &layout, vp, clip),
+                Some(MathStatus::Ready(layout)) => self.draw_math(*at, &layout, vp, clip, budget),
                 Some(MathStatus::Failed(err)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");
-                    self.draw_text(*at, src, ERROR, vp, clip);
+                    self.draw_text(*at, src, ERROR, vp, clip, budget)
                 }
-                Some(MathStatus::Pending) | None => self.draw_text(*at, src, PENDING, vp, clip),
+                Some(MathStatus::Pending) | None => {
+                    self.draw_text(*at, src, PENDING, vp, clip, budget)
+                }
             },
         }
     }
 
-    /// Strokes a path given in screen pixels with the fixed outline width.
-    fn stroke_px(&mut self, path: Option<BezPath>, vp: &Viewport) {
+    /// Strokes a path given in screen pixels with the fixed outline width, if
+    /// it fits in `budget`. Nothing to stroke always fits.
+    fn stroke_px(
+        &mut self,
+        path: Option<BezPath>,
+        vp: &Viewport,
+        clip: Rect,
+        budget: &mut Budget,
+    ) -> bool {
         let Some(path) = path else {
-            return;
+            return true;
         };
+        let width = draw::stroke_width_px(vp);
+        let mut cost = Estimate::new(clip, vp.width, vp.height, budget.left());
+        cost.stroke(&path, width);
+        if !budget.settle(&cost) {
+            return false;
+        }
+        self.stroke_ink(&path, width);
+        true
+    }
+
+    /// Strokes a path given in screen pixels in ink, `width` pixels wide.
+    fn stroke_ink(&mut self, path: &BezPath, width: f64) {
         self.ctx.set_transform(Affine::IDENTITY);
         self.ctx.set_paint(INK);
         self.ctx.set_stroke(
-            Stroke::new(draw::stroke_width_px(vp))
+            Stroke::new(width)
                 .with_caps(Cap::Round)
                 .with_join(Join::Round),
         );
+        self.ctx.stroke_path(path);
+    }
+
+    /// Draws the faint outline of `screen`, an object's bounds in screen
+    /// pixels, in place of an object over the budget, from the outlines' own
+    /// budget; `false` when that is spent too.
+    fn draw_outline(
+        &mut self,
+        screen: Rect,
+        vp: &Viewport,
+        clip: Rect,
+        budget: &mut Budget,
+    ) -> bool {
+        let around_clip = screen.x0 < clip.x0
+            && screen.y0 < clip.y0
+            && screen.x1 > clip.x1
+            && screen.y1 > clip.y1;
+        if around_clip {
+            // The whole outline is off screen.
+            return true;
+        }
+        // An edge moved onto the clip's border is outside the image.
+        let path = screen.intersect(clip).to_path(draw::TOLERANCE_PX);
+        let width = OUTLINE_PX * vp.scale_factor;
+        let mut cost = Estimate::new(clip, vp.width, vp.height, f64::INFINITY);
+        cost.stroke(&path, width);
+        if !budget.spend_outline(cost.ns) {
+            return false;
+        }
+        self.ctx.set_transform(Affine::IDENTITY);
+        self.ctx.set_paint(OUTLINE);
+        self.ctx.set_stroke(Stroke::new(width));
         self.ctx.stroke_path(&path);
+        true
     }
 
     /// Draws text with its top-left corner at `at`, skipping glyphs too far
-    /// outside `clip` to reach into it.
+    /// outside `clip` to reach into it, if it fits in `budget`.
     fn draw_text(
         &mut self,
         at: Point,
@@ -354,21 +602,55 @@ impl Renderer {
         color: AlphaColor<Srgb>,
         vp: &Viewport,
         clip: Rect,
-    ) {
+        budget: &mut Budget,
+    ) -> bool {
+        let em_px = f64::from(LAYOUT_EM) * text_scale() * vp.px_per_unit();
+        if em_px < MIN_VISIBLE_PX {
+            return true;
+        }
+        let Some(near) = glyph_area(f64::from(LAYOUT_EM) * text_scale(), vp, clip) else {
+            return true;
+        };
         let Some(layout) = self.text.layout(text) else {
-            return;
+            return true;
         };
         let transform =
             vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(text_scale());
-        let Some(near) = glyph_area(f64::from(LAYOUT_EM) * text_scale(), vp, clip) else {
-            return;
+        let shown = |baseline: f32| {
+            // Text is only scaled and moved, so a line's screen height depends on its baseline.
+            let y = (transform * Point::new(0.0, f64::from(baseline))).y;
+            (near.y0..=near.y1).contains(&y)
         };
+        let mut cost = Estimate::new(clip, vp.width, vp.height, budget.left());
+        'lines: for line in layout.lines() {
+            if !shown(line.metrics().baseline) {
+                continue;
+            }
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
+                    continue;
+                };
+                cost.run();
+                for glyph in glyph_run.positioned_glyphs() {
+                    if cost.over() {
+                        break 'lines;
+                    }
+                    let at = transform * Point::new(f64::from(glyph.x), f64::from(glyph.y));
+                    // Text is laid out with the bundled text font only, `fonts()[0]`.
+                    let drawn = near
+                        .contains(at)
+                        .then(|| (self.glyphs.stats(0, glyph.id), em_px));
+                    cost.glyph(drawn);
+                }
+            }
+        }
+        if !budget.settle(&cost) {
+            return false;
+        }
         self.ctx.set_transform(transform);
         self.ctx.set_paint(color);
         for line in layout.lines() {
-            // Text is only scaled and moved, so a line's screen height depends on its baseline.
-            let baseline = transform * Point::new(0.0, f64::from(line.metrics().baseline));
-            if !(near.y0..=near.y1).contains(&baseline.y) {
+            if !shown(line.metrics().baseline) {
                 continue;
             }
             for item in line.items() {
@@ -402,13 +684,93 @@ impl Renderer {
                 }
             }
         }
+        true
+    }
+
+    /// The estimated cost of [`Self::draw_math`] with the same arguments,
+    /// counted until it is past `limit`.
+    fn math_cost(
+        &mut self,
+        at: Point,
+        layout: &MathLayout,
+        vp: &Viewport,
+        clip: Rect,
+        limit: f64,
+    ) -> Estimate {
+        let transform = math_transform(at, vp);
+        let px_per_pt = vp.px_per_unit() * MATH_SCALE;
+        let mut cost = Estimate::new(clip, vp.width, vp.height, limit);
+        for item in &layout.items {
+            if cost.over() {
+                break;
+            }
+            match item {
+                MathItem::Glyphs {
+                    font, size, glyphs, ..
+                } => {
+                    let Some(near) = self.glyph_run_area(*font, *size, vp, clip) else {
+                        continue;
+                    };
+                    cost.run();
+                    let em_px = (size * px_per_pt).abs();
+                    for glyph in glyphs {
+                        if cost.over() {
+                            break;
+                        }
+                        let drawn = near
+                            .contains(transform * Point::new(glyph.x, glyph.y))
+                            .then(|| (self.glyphs.stats(*font, glyph.id), em_px));
+                        cost.glyph(drawn);
+                    }
+                }
+                MathItem::Path { path, fill, stroke } => {
+                    let stroke = stroke_px(*stroke, px_per_pt);
+                    cost.bound(path);
+                    if path_area(path, transform, stroke, clip).is_none() {
+                        continue;
+                    }
+                    if fill.is_some() {
+                        cost.path(path, transform, None);
+                    }
+                    if let Some((width, _)) = stroke {
+                        cost.path(path, transform, Some(width));
+                    }
+                }
+            }
+        }
+        cost
+    }
+
+    /// Where on screen a math glyph run's glyph origins must be to be drawn;
+    /// `None` when none of it is drawn (unknown font, glyphs under half a
+    /// pixel or absurdly large).
+    fn glyph_run_area(&self, font: usize, size: f64, vp: &Viewport, clip: Rect) -> Option<Rect> {
+        if self.math_fonts.get(font).is_none() {
+            tracing::warn!(font, "math glyphs reference an unknown font");
+            return None;
+        }
+        if (size * MATH_SCALE * vp.px_per_unit()).abs() < MIN_VISIBLE_PX {
+            return None;
+        }
+        glyph_area(size * MATH_SCALE, vp, clip)
     }
 
     /// Draws a formula with its top-left corner at `at`, skipping glyphs and
-    /// paths that can't reach into `clip` and cutting paths down to it.
-    fn draw_math(&mut self, at: Point, layout: &MathLayout, vp: &Viewport, clip: Rect) {
-        let transform =
-            vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(MATH_SCALE);
+    /// paths that can't reach into `clip` and cutting paths down to it, if it
+    /// fits in `budget`.
+    fn draw_math(
+        &mut self,
+        at: Point,
+        layout: &MathLayout,
+        vp: &Viewport,
+        clip: Rect,
+        budget: &mut Budget,
+    ) -> bool {
+        let cost = self.math_cost(at, layout, vp, clip, budget.left());
+        if !budget.settle(&cost) {
+            return false;
+        }
+        let transform = math_transform(at, vp);
         let px_per_pt = vp.px_per_unit() * MATH_SCALE;
         for item in &layout.items {
             match item {
@@ -418,11 +780,10 @@ impl Renderer {
                     fill,
                     glyphs,
                 } => {
-                    let Some(font_data) = self.math_fonts.get(*font) else {
-                        tracing::warn!(font, "math glyphs reference an unknown font");
+                    let Some(near) = self.glyph_run_area(*font, *size, vp, clip) else {
                         continue;
                     };
-                    let Some(near) = glyph_area(size * MATH_SCALE, vp, clip) else {
+                    let Some(font_data) = self.math_fonts.get(*font) else {
                         continue;
                     };
                     self.ctx.set_transform(transform);
@@ -449,25 +810,12 @@ impl Renderer {
                     }
                 }
                 MathItem::Path { path, fill, stroke } => {
-                    let stroke = stroke.and_then(|(width, color)| {
-                        let width = width.abs() * px_per_pt;
-                        if width.is_finite() && width <= MAX_STROKE_PX {
-                            Some((width, color))
-                        } else {
-                            tracing::debug!(width, "math stroke too wide to draw");
-                            None
-                        }
-                    });
-                    // Grown by a whole stroke width, so a stroke's joins and caps
-                    // are inside too.
-                    let reach = stroke.map_or(0.0, |(width, _)| width);
-                    let near = clip.inflate(reach, reach);
+                    let stroke = stroke_px(*stroke, px_per_pt);
+                    let Some(near) = path_area(path, transform, stroke, clip) else {
+                        continue;
+                    };
                     let mut screen = path.clone();
                     screen.apply_affine(transform);
-                    let bounds = screen.bounding_box();
-                    if !(bounds.is_finite() && bounds.overlaps(near)) {
-                        continue;
-                    }
                     self.ctx.set_transform(Affine::IDENTITY);
                     if let Some(fill) = fill {
                         self.ctx.set_paint(math_color(*fill));
@@ -481,7 +829,64 @@ impl Renderer {
                 }
             }
         }
+        true
     }
+}
+
+/// A math path's stroke as its width in screen pixels and its colour; `None`
+/// when it has none, or one too wide to draw ([`MAX_STROKE_PX`]).
+fn stroke_px(stroke: Option<(f64, [u8; 4])>, px_per_pt: f64) -> Option<(f64, [u8; 4])> {
+    stroke.and_then(|(width, color)| {
+        let width = width.abs() * px_per_pt;
+        if width.is_finite() && width <= MAX_STROKE_PX {
+            Some((width, color))
+        } else {
+            tracing::debug!(width, "math stroke too wide to draw");
+            None
+        }
+    })
+}
+
+/// The screen rectangle a math path is cut to: `clip` grown by a whole stroke
+/// width, so a stroke's joins and caps are inside too. `None` when the path
+/// doesn't reach into it, so isn't drawn.
+fn path_area(
+    path: &BezPath,
+    transform: Affine,
+    stroke: Option<(f64, [u8; 4])>,
+    clip: Rect,
+) -> Option<Rect> {
+    let reach = stroke.map_or(0.0, |(width, _)| width);
+    let near = clip.inflate(reach, reach);
+    // The transform only scales and moves, so this is the screen path's control box.
+    let bounds = transform.transform_rect_bbox(path.control_box());
+    (bounds.is_finite() && bounds.overlaps(near)).then_some(near)
+}
+
+/// A formula's layout (pt, origin at its top-left) → screen pixels, for a
+/// formula at `at`.
+fn math_transform(at: Point, vp: &Viewport) -> Affine {
+    vp.transform() * math_to_board(at)
+}
+
+/// A formula's layout (pt) → grid units, for a formula at `at`.
+fn math_to_board(at: Point) -> Affine {
+    Affine::translate(at.to_vec2()) * Affine::scale(MATH_SCALE)
+}
+
+/// The bounds of everything a layout covers, in pt: its box joined with its
+/// ink, which can reach outside the box.
+fn layout_bounds(layout: &MathLayout) -> Rect {
+    Rect::new(0.0, 0.0, layout.width, layout.height)
+        .abs()
+        .union(layout.ink.abs())
+}
+
+/// How far `p` is from `rect`; 0 inside it.
+fn distance(rect: Rect, p: Point) -> f64 {
+    let dx = (rect.x0 - p.x).max(p.x - rect.x1).max(0.0);
+    let dy = (rect.y0 - p.y).max(p.y - rect.y1).max(0.0);
+    dx.hypot(dy)
 }
 
 /// Where on screen a glyph's origin must be for any of it to reach into
@@ -521,6 +926,9 @@ fn to_f32(v: f64) -> f32 {
 }
 
 #[cfg(test)]
+mod calibrate;
+
+#[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
 
@@ -532,13 +940,14 @@ mod tests {
     const BLACK: [u8; 4] = [0, 0, 0, 255];
     const MAX: f64 = MAX_LAYOUT_EXTENT_PT;
 
-    /// Draws only `layout`, its top-left corner at the board origin, as a frame
-    /// draws a math object, and returns the image and how long it took.
+    /// Draws only `layout`, its top-left corner at the board origin, as an
+    /// export draws a math object, and returns the image and how long it took.
     fn render_layout(layout: &MathLayout, vp: &Viewport) -> (Vec<u8>, Duration) {
-        let mut renderer = Renderer::new();
+        let mut renderer = Renderer::new_trusted();
         let started = Instant::now();
         assert!(renderer.begin_frame(vp));
-        renderer.draw_math(Point::ZERO, layout, vp, draw::clip_rect(vp));
+        let mut budget = Budget::export();
+        assert!(renderer.draw_math(Point::ZERO, layout, vp, draw::clip_rect(vp), &mut budget));
         let image = renderer.finish_frame().to_vec();
         (image, started.elapsed())
     }

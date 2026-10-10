@@ -26,7 +26,8 @@ pub struct MathReady;
 pub struct App {
     board: Board,
     title: String,
-    /// Draws the board; its math engine never blocks a frame.
+    /// Draws the board; its math engine never blocks a frame, and its work budget keeps frames
+    /// short whatever the board holds.
     renderer: Renderer,
     /// Created on the first `resumed`.
     gfx: Option<Gfx>,
@@ -188,24 +189,29 @@ impl App {
         let frame_time = render_start.elapsed();
 
         self.frames += 1;
-        let math_pending = self.renderer.math_pending();
+        // Objects over the renderer's work budget are drawn as outlines; it logs how many.
+        let drawn = self.renderer.last_frame();
         if self.frames == 1 {
             tracing::info!(
                 since_start_ms = ms(self.started.elapsed()),
                 render_ms = ms(render_time),
+                estimated_ms = ms(drawn.estimated),
                 width,
                 height,
                 scale_factor,
-                math_pending,
+                math_pending = drawn.math_pending,
+                downgraded = drawn.downgraded,
                 "first frame presented"
             );
         } else {
             tracing::debug!(
                 render_ms = ms(render_time),
+                estimated_ms = ms(drawn.estimated),
                 frame_ms = ms(frame_time),
                 width,
                 height,
-                math_pending,
+                math_pending = drawn.math_pending,
+                downgraded = drawn.downgraded,
                 "frame"
             );
         }
