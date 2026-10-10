@@ -1,0 +1,26 @@
+[package]
+name = "lawh"
+description = "A native, keyboard-driven whiteboard and text editor: draw shapes, write Typst math and arrange text with Vim motions instead of a mouse or pen"
+keywords = ["whiteboard", "vim", "math", "diagram", "keyboard"]
+categories = ["text-editors", "graphics", "mathematics"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lawh"
+path = "src/main.rs"
+
+[dependencies]
+lawh-core.workspace = true
+lawh-math.workspace = true
+lawh-render.workspace = true
+
+[lints]
+workspace = true

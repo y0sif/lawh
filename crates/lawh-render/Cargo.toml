@@ -1,0 +1,21 @@
+[package]
+name = "lawh-render"
+description = "Renders lawh whiteboards to pixels and exports them to SVG, PNG and PDF"
+keywords = ["whiteboard", "rendering", "svg", "pdf", "vector"]
+categories = ["graphics", "rendering"]
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[dependencies]
+lawh-core.workspace = true
+lawh-math.workspace = true
+
+[lints]
+workspace = true

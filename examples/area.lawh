@@ -1,0 +1,8 @@
+// The "area of a circle" benchmark board, in grid units.
+lawh version=1
+
+text   id=t1 x=0 y=-5 "Area of a circle"
+circle id=c1 x=0 y=0 r=3
+line   id=l1 x1=0 y1=0 x2=3 y2=0
+text   id=t2 x=1.5 y=-0.6 "r"
+math   id=m1 x=5 y=0 "A = pi r^2"

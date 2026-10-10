@@ -1,0 +1,15 @@
+/target
+**/*.rs.bk
+
+# Maintainer-only brand and design notes, never committed
+docs/BRAND.md
+docs/DESIGN.md
+
+# Local environment and exports
+.env
+/out/
+
+# Editors and OS
+*.swp
+*.swo
+.DS_Store
