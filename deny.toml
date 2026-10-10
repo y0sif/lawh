@@ -1,0 +1,42 @@
+# cargo-deny: licence, advisory, ban and source checks. Runs in CI.
+# Local run: cargo deny check
+
+[graph]
+all-features = false
+
+[advisories]
+ignore = []
+
+[licenses]
+# lawh is MIT. Permissive licences, plus file-level copyleft (MPL-2.0, used by nucleo) and font
+# licences. GPL, LGPL and AGPL are deliberately absent: adding one needs a decision, not a config edit.
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OFL-1.1",
+]
+confidence-threshold = 0.8
+# Some of the list is pre-approved for planned dependencies (see docs/tech-stack.md).
+unused-allowed-license = "allow"
+
+[bans]
+# The Vello and Typst ecosystems pull in some duplicate versions; flag them without failing.
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

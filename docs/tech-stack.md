@@ -23,6 +23,17 @@ that needs them lands.
 | Config and cache dirs | `etcetera` | 0.11.0 | MIT OR Apache-2.0 | XDG on Linux, native folders on macOS and Windows. |
 | Accessibility | `accesskit` | 0.25.1 | MIT OR Apache-2.0 | Screen-reader tree for winit apps. |
 
+## Cross-cutting
+
+| Job | Crate | Version | Licence | Status | Why |
+|---|---|---|---|---|---|
+| Logging | `tracing`, `tracing-subscriber` (env-filter) | 0.1.44, 0.3.23 | MIT | **In use** (app) | Structured logs, `RUST_LOG` filtering, the Rust standard. |
+| Library errors | `thiserror` | 2.0.21 | MIT OR Apache-2.0 | Planned | Typed error enums callers can match on. |
+| App errors | `anyhow` | 1.0.104 | MIT OR Apache-2.0 | Planned | Context chaining at the top level. |
+| Snapshot tests | `insta` (dev) | 1.49.0 | Apache-2.0 | Planned | Board snapshots as `.lawh` text, `cargo insta review`. |
+| Property tests | `proptest` (dev) | 1.11.0 | MIT OR Apache-2.0 | Planned | Random boards for format round-trips. |
+| Licence and advisory gate | `cargo-deny` (tool) | 0.20.2 | MIT OR Apache-2.0 | **In use** (CI) | Blocks GPL-family licences, unknown sources and known advisories. |
+
 All licences above were read from crates.io. `nucleo` is MPL-2.0, a file-level copyleft: fine as an
 unmodified dependency of an MIT app, but changes to its own files would have to stay MPL.
 

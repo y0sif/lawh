@@ -36,6 +36,15 @@ All three must pass. CI runs the same commands.
 See [docs/architecture.md](docs/architecture.md) for the design and
 [docs/tech-stack.md](docs/tech-stack.md) before adding a dependency.
 
+## Code conventions
+
+- Library crates return typed errors (`thiserror`) and never panic, unwrap or print. The app uses `anyhow`.
+- Log with `tracing`. Run with `RUST_LOG=debug` to see it.
+- To silence a lint, use `#[expect(lint, reason = "...")]`, not a bare `#[allow]`.
+- Tests: see [docs/testing.md](docs/testing.md). Engine changes come with a key-script snapshot test.
+- New dependencies must pass `cargo deny check` (licences and advisories) and be listed in
+  [docs/tech-stack.md](docs/tech-stack.md).
+
 ## Commits
 
 Imperative mood with a prefix: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`, `test:`.

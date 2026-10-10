@@ -40,6 +40,20 @@ nice -n 19 cargo clippy --all-targets -- -D warnings
 - Linux system libraries for winit/softbuffer aren't installed in CI yet. Add an apt step when the
   app gains those dependencies.
 
+## Code quality
+
+- Lints live in the root `Cargo.toml`: clippy `all` + `pedantic` (a few allowed), plus `unwrap_used`,
+  `expect_used`, `panic`, `todo`, `dbg_macro`, `print_stdout`, `print_stderr`. `clippy.toml` exempts
+  tests. CI runs with `-D warnings`, so a warning fails the build.
+- Silence a lint with `#[expect(lint, reason = "...")]`, never a bare `#[allow]`.
+- Errors: each library crate has typed `thiserror` enums; the app uses `anyhow` with context.
+  Library code never panics, unwraps or prints.
+- Logging: `tracing` macros in every crate; only the binary installs the subscriber. `RUST_LOG`
+  sets the level (default `warn`), output goes to stderr.
+- Dependencies: `deny.toml` allows permissive licences, MPL-2.0 and OFL-1.1 only. A GPL-family
+  licence needs a decision, not a config edit. Every new crate goes in `docs/tech-stack.md`.
+- Testing: see `docs/testing.md`. Engine tests type Vim key scripts and snapshot the board as `.lawh` text.
+
 ## Conventions
 
 - Portable from day one: no hard-coded `/` in paths, platform dirs via `etcetera`, bundled fonts,
