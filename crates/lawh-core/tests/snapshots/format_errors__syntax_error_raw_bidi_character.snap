@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:22: character U+202E cannot appear as itself in a lawh file (inside a string, write it as \u{202E})

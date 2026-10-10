@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+1:16: unexpected argument: `lawh` takes only `key=value` properties

@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:1: `text` needs its content as a quoted string, like `text id=… x=0 y=0 "…"`

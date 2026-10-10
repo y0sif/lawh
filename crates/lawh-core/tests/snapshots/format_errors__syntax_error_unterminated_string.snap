@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:20: Unexpected newline in single-line quoted string (You can make a string multi-line by wrapping it in '"""', with a newline immediately after the opening quotes.)

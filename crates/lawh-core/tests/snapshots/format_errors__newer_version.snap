@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+1:6: this file was made by a newer lawh (format version 2); this lawh reads version 1
