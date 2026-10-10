@@ -26,6 +26,20 @@ nice -n 19 cargo clippy --all-targets -- -D warnings
 - The laptop has 14 GB RAM: `~/.cargo/config.toml` caps `jobs = 4`. Keep it, and build under `nice`.
 - Never put `CARGO_TARGET_DIR` under `/tmp` (small tmpfs).
 
+## CI and releases
+
+- `ci.yml`: fmt, clippy `-D warnings` and tests on Linux for every push and PR, plus a check on
+  Rust 1.95. macOS and Windows only run when triggered by hand
+  (`gh workflow run ci.yml -f all_platforms=true`) or from a release, because a private repo has
+  2,000 Actions minutes a month. Usage is blocked, not billed, once they run out. **When the repo goes
+  public, make all three platforms the default and set `publish = true`.**
+- `release.yml`: push a `v*` tag to run CI on all three platforms and build unsigned archives for
+  Linux x86_64/arm64, macOS arm64/x86_64 and Windows x86_64, with `SHA256SUMS`. A tag with a
+  hyphen becomes a pre-release.
+- Lint workflows locally with `uvx --from actionlint-py actionlint`.
+- Linux system libraries for winit/softbuffer aren't installed in CI yet. Add an apt step when the
+  app gains those dependencies.
+
 ## Conventions
 
 - Portable from day one: no hard-coded `/` in paths, platform dirs via `etcetera`, bundled fonts,

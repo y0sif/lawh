@@ -1,0 +1,71 @@
+name: CI
+
+# While the repo is private, Actions minutes are limited (2,000 a month on GitHub Free),
+# so pushes and pull requests run on Linux only. macOS and Windows run when triggered by
+# hand (all_platforms) and from the release workflow. Once the repo is public, runners are
+# free: switch the default to all three platforms.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      all_platforms:
+        description: Also run on macOS and Windows
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      all_platforms:
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  check:
+    name: Lint and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.all_platforms && '["ubuntu-latest","macos-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+      # `+1.95` overrides rust-toolchain.toml, which pins stable.
+      - run: cargo +1.95 check --workspace --locked

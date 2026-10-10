@@ -1,0 +1,27 @@
+name: Feature request
+description: Suggest a command, motion or capability
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The thing you want to explain or draw, and where lawh gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How should it work?
+      description: Sketch the keys or the `:` command, for example `:arrow from=c1 to=t2` or `gv` to reselect.
+    validations:
+      required: true
+  - type: textarea
+    id: vim
+    attributes:
+      label: Is there a Vim equivalent?
+      description: If Vim or Neovim has something similar, how does it behave there? lawh tries to match Vim where it makes sense on a canvas.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you've considered

@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in lawh doesn't work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. The keys you pressed and the board file are usually all we need to reproduce it.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      options:
+        - Keys and modes (motions, operators, counts, undo)
+        - "Ex commands (:circle, :w, :export)"
+        - Drawing and rendering
+        - Math (Typst)
+        - Files (.lawh format, saving, loading)
+        - Export (SVG, PNG, PDF)
+        - Window, status line or command line
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: keys
+    attributes:
+      label: Keys you pressed
+      description: The exact sequence, starting from a known state. Use Vim notation, for example `3l:circle r=2<CR>jj`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: board
+    attributes:
+      label: Board file
+      description: Paste the `.lawh` file (or the smallest one that shows the bug), or attach it.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: lawh version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Linux (Wayland)
+        - Linux (X11)
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: os-details
+    attributes:
+      label: OS details
+      description: Distro and version, desktop or compositor, display scaling.
+      placeholder: "Arch Linux, Hyprland, 1.5x scaling"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run with `RUST_LOG=debug lawh` and paste the output around the problem.
+      render: shell
