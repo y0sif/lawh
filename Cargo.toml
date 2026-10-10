@@ -35,6 +35,11 @@ vello_cpu = "0.3.0"
 # No `system` feature: lawh never loads system fonts, and it would need fontconfig.
 parley = { version = "0.12.0", default-features = false, features = ["std", "bytemuck"] }
 bytemuck = "1.25.2"
+# App. winit keeps its default features: X11 and Wayland libraries are loaded at run time, so
+# building needs no system packages.
+winit = "0.30.13"
+softbuffer = "0.4.8"
+anyhow = "1.0.104"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -61,3 +66,16 @@ print_stdout = "warn"
 print_stderr = "warn"
 undocumented_unsafe_blocks = "warn"
 allow_attributes_without_reason = "warn"
+
+# Debug builds optimise dependencies and the app's own pixel loop, so panning is smooth in dev.
+# Measured in debug at 1920x1080 (area.lawh):
+# - all dependencies at opt-level 2: lawh-render's bench went from 116 ms to 1.3 ms a frame.
+#   A cold `cargo build` went from 2.5 to 8 minutes; incremental builds of our crates are unchanged.
+# - lawh-render at opt-level 1 on top: no measurable gain, so it stays at 0 and easy to step through.
+# - lawh at opt-level 2: copying a frame to the window went from 35 ms (opt 0) and 3.2 ms (opt 1)
+#   to 1 ms. The crate is small, so this costs about a second per build.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.lawh]
+opt-level = 2

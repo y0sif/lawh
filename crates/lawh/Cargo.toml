@@ -18,11 +18,14 @@ name = "lawh"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
 lawh-core.workspace = true
 lawh-math.workspace = true
 lawh-render.workspace = true
+softbuffer.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+winit.workspace = true
 
 [lints]
 workspace = true
