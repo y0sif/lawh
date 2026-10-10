@@ -4,16 +4,30 @@
 //! Typst runs in a sandbox (see `SECURITY.md`): the only file it can see is
 //! the formula itself, fonts come from [`fonts`], there is no clock and no
 //! package download, and `plugin` (WebAssembly), `cite` and `bibliography`
-//! (CSL parsing) are removed from the library. Each compile runs on its own
-//! thread with a time limit, and [`MathEngine`] caches every outcome.
+//! (CSL parsing), `image` (image decoding) and `read` with the data loaders
+//! (`json`, `yaml`, `toml`, `cbor`, `csv`, `xml`) are removed from the
+//! library.
+//!
+//! A formula from a board is untrusted, and Typst can't be stopped, so
+//! [`MathEngine::with_worker`] compiles in a separate worker process
+//! ([`worker_main`]) with a memory cap, and kills it when a compile takes too
+//! long or restarts it when it crashes. [`MathEngine::new`] compiles in this
+//! process, for trusted input only. Either way [`MathEngine`] caches every
+//! outcome.
 
+mod compile;
 mod engine;
 mod fonts;
 mod layout;
+mod process;
+mod protocol;
+mod worker;
 mod world;
 
-pub use engine::{DEFAULT_TIMEOUT, MAX_WORKERS, MathEngine};
+pub use engine::{DEFAULT_TIMEOUT, MAX_WORKERS, MathEngine, MathStatus, MathWaker};
 pub use fonts::{FontAsset, fonts};
+pub use process::WorkerCommand;
+pub use worker::{WORKER_MEMORY_LIMIT_BYTES, worker_main};
 
 /// Font size of math, in Typst pt. [`MathLayout`] coordinates are at this
 /// size; the renderer scales them to the board's text size.
@@ -76,11 +90,20 @@ pub enum MathError {
     /// Typst rejected the formula; the message joins its diagnostics.
     #[error("math error: {0}")]
     Compile(String),
-    /// The compile took longer than the engine's timeout, or too many
-    /// earlier compiles are still running.
+    /// The compile took longer than the engine's timeout (in process mode,
+    /// the worker was killed), or, in-process, too many earlier compiles are
+    /// still running.
     #[error("math took too long to compile")]
     Timeout,
-    /// The compiler crashed.
+    /// The compiler panicked.
     #[error("math compiler crashed")]
     Panicked,
+    /// The worker process died during the compile (stack overflow, memory
+    /// cap) or sent a malformed response. A new worker serves the next
+    /// formula.
+    #[error("math worker crashed")]
+    Crashed,
+    /// The worker process can't be started; the message says why.
+    #[error("math is unavailable: {0}")]
+    Unavailable(String),
 }

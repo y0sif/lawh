@@ -81,6 +81,26 @@ pub(crate) fn asset_index(font: &Font) -> Option<usize> {
         .position(|asset| std::ptr::eq(asset.data.as_ptr(), data) && asset.index == font.index())
 }
 
+/// Number of glyphs in the bundled font at `index` into [`fonts`], or `None`
+/// if there is no such font.
+pub(crate) fn glyph_count(index: usize) -> Option<u16> {
+    static COUNTS: OnceLock<Vec<Option<u16>>> = OnceLock::new();
+    COUNTS
+        .get_or_init(|| {
+            fonts()
+                .iter()
+                .map(|asset| {
+                    ttf_parser::Face::parse(asset.data, asset.index)
+                        .ok()
+                        .map(|face| face.number_of_glyphs())
+                })
+                .collect()
+        })
+        .get(index)
+        .copied()
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use typst::text::FontFlags;
@@ -93,7 +113,9 @@ mod tests {
         for (i, (asset, font)) in fonts().iter().zip(typst_fonts()).enumerate() {
             assert_eq!(font.info().family, asset.family);
             assert_eq!(asset_index(font), Some(i));
+            assert!(glyph_count(i).is_some_and(|n| n > 0));
         }
+        assert_eq!(glyph_count(fonts().len()), None);
     }
 
     #[test]

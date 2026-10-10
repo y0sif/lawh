@@ -1,0 +1,272 @@
+//! Process mode: formulas from a board compile in a worker process that is
+//! killed when it takes too long and restarted when it dies, so no formula
+//! can crash, hang or exhaust lawh itself.
+
+// Lets the helpers below unwrap and panic like test functions (see clippy.toml).
+#![cfg(test)]
+
+use std::fmt::Write as _;
+use std::sync::{Arc, mpsc};
+use std::time::{Duration, Instant};
+
+use lawh_math::{DEFAULT_TIMEOUT, MathEngine, MathError, MathStatus, WorkerCommand};
+
+fn worker() -> WorkerCommand {
+    WorkerCommand::new(env!("CARGO_BIN_EXE_lawh-math-worker"))
+}
+
+fn engine() -> MathEngine {
+    MathEngine::with_worker(worker())
+}
+
+/// How long a failing formula may take: the timeout, then killing the worker
+/// and starting a new one.
+const FAIL_WITHIN: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(1));
+
+/// A PNG header claiming 40000x40000 pixels, like the verifier's PNG bomb.
+fn png_bomb() -> String {
+    let mut bytes = vec![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82];
+    bytes.extend_from_slice(&40000u32.to_be_bytes());
+    bytes.extend_from_slice(&40000u32.to_be_bytes());
+    bytes.extend_from_slice(&[1, 0, 0, 0, 0, 121, 119, 51, 168]);
+    let mut src = "#image(bytes((".to_owned();
+    for b in bytes {
+        write!(src, "{b},").unwrap();
+    }
+    src.push_str(")))");
+    src
+}
+
+/// Formulas that crashed, hung or ran away with memory when Typst ran on a
+/// thread of the app (verifier repros, M1).
+fn hostile() -> Vec<(&'static str, String)> {
+    [
+        // Stack overflows.
+        (
+            "xml_deep",
+            r#"#xml(bytes("<a>" * 200000 + "</a>" * 200000)).len()"#,
+        ),
+        (
+            "nest_content",
+            "#let c = [x]; #for i in range(100000) { c = box(c) }; #c",
+        ),
+        (
+            "nest_arrays_repr",
+            "#let a = (); #for i in range(100000) { a = (a,) }; #repr(a).len()",
+        ),
+        (
+            "flatten_deep",
+            "#let a = (); #for i in range(1000000) { a = (a,) }; #a.flatten().len()",
+        ),
+        // Memory.
+        ("huge_range", "#range(100000000).len()"),
+        ("huge_range2", "#range(1000000000).len()"),
+        ("huge_range3", "#range(9223372036854775807).len()"),
+        ("huge_str2", r#"#("a" * 3000000000).len()"#),
+        (
+            "huge_str3",
+            r#"#let s = "a" * 100000000; #(s + s + s + s + s + s + s + s).len()"#,
+        ),
+        (
+            "expo_content",
+            "#let f(n) = if n == 0 [x] else [#f(n - 1)#f(n - 1)]; #f(28)",
+        ),
+        (
+            "push_loop",
+            "#let a = (); #for i in range(200000000) { a.push(i) }; #a.len()",
+        ),
+        // Time.
+        (
+            "nested_loops",
+            "#for i in range(10000) { for j in range(10000) { } }",
+        ),
+        (
+            "endless",
+            "#for i in range(10000) { for j in range(10000) { for k in range(10000) { } } }",
+        ),
+        // Panicked in-process.
+        (
+            "cbor_hugearr",
+            "#cbor(bytes((0x9b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))).len()",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, src)| (name, src.to_owned()))
+    .chain([("png_bomb", png_bomb())])
+    .collect()
+}
+
+#[test]
+fn hostile_formulas_fail_in_time_and_the_worker_recovers() {
+    let engine = engine();
+    for (name, src) in hostile() {
+        let started = Instant::now();
+        let outcome = engine.layout_blocking(&src);
+        let took = started.elapsed();
+        assert!(
+            matches!(
+                outcome,
+                Err(MathError::Compile(_) | MathError::Timeout | MathError::Crashed)
+            ),
+            "{name}: {outcome:?}"
+        );
+        assert!(took < FAIL_WITHIN, "{name} took {took:?}");
+    }
+
+    // A new worker serves the next formula.
+    assert!(engine.layout_blocking("A = pi r^2").is_ok());
+
+    // Every failure is cached: asking again costs nothing.
+    for (name, src) in hostile() {
+        let started = Instant::now();
+        assert!(
+            matches!(engine.request(&src), MathStatus::Failed(_)),
+            "{name}"
+        );
+        assert!(started.elapsed() < Duration::from_millis(50), "{name}");
+    }
+}
+
+#[test]
+fn request_is_pending_until_the_waker_fires() {
+    let engine = engine();
+    let (tx, rx) = mpsc::channel();
+    engine.set_waker(Arc::new(move || {
+        let _ = tx.send(());
+    }));
+
+    let started = Instant::now();
+    assert_eq!(engine.request("A = pi r^2"), MathStatus::Pending);
+    // Asking again doesn't queue it twice.
+    assert_eq!(engine.request("A = pi r^2"), MathStatus::Pending);
+    assert!(started.elapsed() < Duration::from_millis(50));
+
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let MathStatus::Ready(first) = engine.request("A = pi r^2") else {
+        panic!("expected a layout after the waker fired");
+    };
+    let MathStatus::Ready(second) = engine.request("A = pi r^2") else {
+        panic!("expected the cached layout");
+    };
+    assert!(Arc::ptr_eq(&first, &second));
+    // One compile, one wake.
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+}
+
+#[test]
+fn a_hostile_request_does_not_block_the_caller() {
+    let engine = engine();
+    let (tx, rx) = mpsc::channel();
+    engine.set_waker(Arc::new(move || {
+        let _ = tx.send(());
+    }));
+    let endless = "#for i in range(10000) { for j in range(10000) { for k in range(10000) { } } }";
+
+    let started = Instant::now();
+    assert_eq!(engine.request(endless), MathStatus::Pending);
+    assert_eq!(engine.request("x^2"), MathStatus::Pending);
+    assert!(started.elapsed() < Duration::from_millis(50));
+
+    // The endless loop times out, then x^2 compiles on a new worker.
+    let deadline = Instant::now() + FAIL_WITHIN + Duration::from_secs(5);
+    while !matches!(engine.request("x^2"), MathStatus::Ready(_)) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "x^2 never compiled");
+        let _ = rx.recv_timeout(left);
+    }
+    assert_eq!(
+        engine.request(endless),
+        MathStatus::Failed(MathError::Timeout)
+    );
+}
+
+#[test]
+fn worker_layouts_match_in_process_layouts_exactly() {
+    let in_process = MathEngine::new();
+    let worker = engine();
+    for src in [
+        "A = pi r^2",
+        "x^2",
+        "a/b",
+        "sum_(i=1)^n i",
+        "mat(1, 2; 3, 4)",
+        "integral_0^infinity e^(-x^2) dif x = sqrt(pi)/2",
+        "#rotate(45deg, $x$)",
+        "#text(fill: red)[y] + #line(length: 1em)",
+        "#nope",
+    ] {
+        assert_eq!(worker.layout_blocking(src), in_process.layout(src), "{src}");
+    }
+}
+
+#[test]
+fn layout_in_worker_mode_goes_through_the_worker() {
+    let engine = engine();
+    let first = engine.layout("A = pi r^2").unwrap();
+    let second = engine.layout_blocking("A = pi r^2").unwrap();
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
+#[test]
+fn a_missing_worker_is_unavailable() {
+    let missing = std::env::temp_dir().join("lawh-no-such-math-worker");
+    let engine = MathEngine::with_worker(WorkerCommand::new(missing));
+    let started = Instant::now();
+    assert!(matches!(
+        engine.layout_blocking("x"),
+        Err(MathError::Unavailable(_))
+    ));
+    assert!(matches!(
+        engine.request("y"),
+        MathStatus::Pending | MathStatus::Failed(MathError::Unavailable(_))
+    ));
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[test]
+fn a_program_that_is_not_the_worker_is_unavailable() {
+    // This test binary lists its tests on stdout instead of a handshake.
+    let not_a_worker = WorkerCommand::new(std::env::current_exe().unwrap()).arg("--list");
+    let engine = MathEngine::with_worker(not_a_worker);
+    match engine.layout_blocking("x") {
+        Err(MathError::Unavailable(message)) => {
+            assert!(message.contains("not a lawh math worker"), "{message}");
+        }
+        other => panic!("expected Unavailable, got {other:?}"),
+    }
+}
+
+/// Runs every `*.typ` formula in `$LAWH_MATH_REPROS` through a worker and
+/// prints what each did and how long it took. Not part of the suite:
+/// `LAWH_MATH_REPROS=dir cargo test -p lawh-math --test worker -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs a directory of formulas in LAWH_MATH_REPROS"]
+fn run_repro_directory() {
+    let dir = std::env::var_os("LAWH_MATH_REPROS").expect("set LAWH_MATH_REPROS");
+    let mut paths: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "typ"))
+        .collect();
+    paths.sort();
+    let engine = engine();
+    for path in paths {
+        let src = std::fs::read_to_string(&path).unwrap();
+        let started = Instant::now();
+        let outcome = engine.layout_blocking(&src);
+        let took = started.elapsed();
+        let summary = match &outcome {
+            Ok(layout) => format!("Ready {} items", layout.items.len()),
+            Err(MathError::Compile(message)) => {
+                format!("Compile {}", message.chars().take(70).collect::<String>())
+            }
+            Err(err) => format!("{err:?}"),
+        };
+        println!(
+            "{:<20} {:>6} ms  {summary}",
+            path.file_stem().unwrap().to_string_lossy(),
+            took.as_millis()
+        );
+    }
+    assert!(engine.layout_blocking("A = pi r^2").is_ok());
+}

@@ -1,5 +1,6 @@
 //! The Typst sandbox: one in-memory source, bundled fonts, no files, no
-//! packages, no clock and no WebAssembly plugins.
+//! packages, no clock, no WebAssembly plugins, no image decoding and no data
+//! loading.
 
 use std::sync::OnceLock;
 
@@ -13,14 +14,32 @@ use typst::{Library, LibraryExt, World};
 use crate::MATH_FONT_SIZE_PT;
 use crate::fonts::{MATH_FAMILY, TEXT_FAMILY, typst_fonts};
 
-/// Standard library definitions a board must not reach.
+/// Standard library definitions a board must not reach. A formula never
+/// needs any of them.
 ///
 /// - `plugin` loads and runs WebAssembly: code we never want a shared file to
 ///   execute.
 /// - `cite` and `bibliography` parse CSL styles given as inline bytes with
 ///   quick-xml 0.38, which has open denial-of-service advisories
-///   (RUSTSEC-2026-0194, RUSTSEC-2026-0195). A formula never needs them.
-const DENIED: &[&str] = &["plugin", "cite", "bibliography"];
+///   (RUSTSEC-2026-0194, RUSTSEC-2026-0195).
+/// - `image` decodes PNG, JPEG, GIF, WebP and SVG from inline bytes: a small
+///   PNG can claim 40000x40000 pixels and take gigabytes to decode.
+/// - `read` and the data loaders `json`, `yaml`, `toml`, `cbor`, `csv` and
+///   `xml` read files (denied anyway) or parse inline bytes; deep XML
+///   overflows the stack and a CBOR header can claim a huge array.
+const DENIED: &[&str] = &[
+    "plugin",
+    "cite",
+    "bibliography",
+    "image",
+    "read",
+    "json",
+    "yaml",
+    "toml",
+    "cbor",
+    "csv",
+    "xml",
+];
 
 /// Value of the metadata element that marks the first line's baseline.
 ///

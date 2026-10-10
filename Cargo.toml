@@ -30,6 +30,8 @@ typst = "=0.15.1"
 typst-layout = "=0.15.1"
 # Same version Typst uses; only for the glyph outline trait.
 ttf-parser = { version = "0.25.1", default-features = false }
+# Caps the math worker process's address space on Unix (lawh-math worker_main).
+rlimit = "0.11.0"
 # Rendering. kurbo above must stay the version vello_cpu re-exports.
 vello_cpu = "0.3.0"
 # No `system` feature: lawh never loads system fonts, and it would need fontconfig.

@@ -16,13 +16,18 @@ fn compile_error(src: &str) -> String {
 
 #[test]
 fn reading_a_file_is_denied() {
-    let message = compile_error(r#"#read("/etc/passwd")"#);
-    assert!(message.contains("access denied"), "{message}");
+    for src in [
+        r#"#include "/etc/passwd""#,
+        r#"#raw("x", lang: "rust", theme: "/etc/passwd")"#,
+    ] {
+        let message = compile_error(src);
+        assert!(message.contains("access denied"), "{src}: {message}");
+    }
 }
 
 #[test]
 fn reading_a_relative_file_is_denied() {
-    let message = compile_error(r#"#read("main.typ")"#);
+    let message = compile_error(r#"#include "notes.typ""#);
     assert!(message.contains("access denied"), "{message}");
 }
 
@@ -33,9 +38,32 @@ fn importing_a_package_fails_without_network() {
 }
 
 #[test]
-fn loading_an_image_file_is_denied() {
-    let message = compile_error(r#"#image("x.png")"#);
-    assert!(message.contains("access denied"), "{message}");
+fn file_reading_data_loading_and_images_are_not_in_the_library() {
+    for (name, src) in [
+        ("read", r#"#read("/etc/passwd")"#),
+        ("image", r#"#image("x.png")"#),
+        ("image", "#image(bytes((137, 80, 78, 71)))"),
+        ("json", r#"#json(bytes("{}"))"#),
+        ("yaml", r#"#yaml(bytes("a: 1"))"#),
+        ("toml", r#"#toml(bytes("a = 1"))"#),
+        ("cbor", "#cbor(bytes((0x80,)))"),
+        ("csv", r#"#csv(bytes("a,b"))"#),
+        (
+            "xml",
+            r#"#xml(bytes("<a>" * 200000 + "</a>" * 200000)).len()"#,
+        ),
+    ] {
+        let message = compile_error(src);
+        assert!(
+            message.contains(&format!("unknown variable: {name}")),
+            "{src}: {message}"
+        );
+        let message = compile_error(&format!("#std.{name}"));
+        assert!(
+            message.contains(&format!("does not contain `{name}`")),
+            "std.{name}: {message}"
+        );
+    }
 }
 
 #[test]

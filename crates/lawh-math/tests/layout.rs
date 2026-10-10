@@ -4,9 +4,10 @@
 #![cfg(test)]
 
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
-use lawh_math::{MathEngine, MathItem, MathLayout, fonts};
+use lawh_math::{MathEngine, MathItem, MathLayout, MathStatus, fonts};
 
 /// Size, baseline (2 decimals) and the item list as kinds and counts, which
 /// stays stable across small layout tweaks that don't matter.
@@ -111,4 +112,22 @@ fn errors_are_cached_too() {
     let first = engine.layout("#nope").unwrap_err();
     let second = engine.layout("#nope").unwrap_err();
     assert_eq!(first, second);
+}
+
+#[test]
+fn request_works_in_process_too() {
+    let engine = MathEngine::new();
+    let (tx, rx) = mpsc::channel();
+    engine.set_waker(Arc::new(move || {
+        let _ = tx.send(());
+    }));
+    assert_eq!(engine.request("x^2"), MathStatus::Pending);
+    rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    let MathStatus::Ready(layout) = engine.request("x^2") else {
+        panic!("expected a layout after the waker fired");
+    };
+    assert!(Arc::ptr_eq(
+        &layout,
+        &engine.layout_blocking("x^2").unwrap()
+    ));
 }
