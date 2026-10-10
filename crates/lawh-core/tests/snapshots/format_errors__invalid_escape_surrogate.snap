@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:22: invalid escape `\u{D800}` (valid escapes are \\, \", \b, \f, \n, \r, \s, \t and \u{...} with 1 to 6 hex digits)

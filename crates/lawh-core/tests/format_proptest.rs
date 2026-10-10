@@ -3,35 +3,48 @@
 // Lets the helpers below unwrap and panic like test functions (see clippy.toml).
 #![cfg(test)]
 
+use lawh_core::board::{MAX_COORDINATE, MAX_SIZE};
 use lawh_core::{Board, Object, ObjectId, Point, Shape, from_lawh, to_lawh};
 use proptest::prelude::*;
 
-/// Finite numbers: any bit pattern, plus the round and fractional values real boards hold.
-fn number() -> impl Strategy<Value = f64> {
+/// Coordinates: any bit pattern within the limit, plus the round and fractional values real
+/// boards hold.
+fn coordinate() -> impl Strategy<Value = f64> {
     use proptest::num::f64 as f;
     prop_oneof![
-        3 => f::POSITIVE | f::NEGATIVE | f::NORMAL | f::SUBNORMAL | f::ZERO,
+        // Out-of-range bit patterns wrap into range, keeping their mantissa bits.
+        3 => (f::POSITIVE | f::NEGATIVE | f::NORMAL | f::SUBNORMAL | f::ZERO)
+            .prop_map(|v| if v.abs() <= MAX_COORDINATE { v } else { v % MAX_COORDINATE }),
         3 => (-4000_i32..4000).prop_map(|i| f64::from(i) / 8.0),
         2 => (-1000_i32..1000, 1_i32..1000).prop_map(|(a, b)| f64::from(a) / f64::from(b)),
         1 => prop::sample::select(vec![
             -0.0,
             0.1 + 0.2,
+            1e-6,
+            9.99e-7,
             1e-7,
-            1e21,
-            1e38,
-            -1.7e38,
-            f64::MAX,
-            f64::MIN,
+            999_999.999_999_999_9,
+            MAX_COORDINATE,
+            -MAX_COORDINATE,
             f64::MIN_POSITIVE,
             f64::EPSILON,
             5e-324,
-            9_007_199_254_740_993.0,
+            -5e-324,
         ]),
     ]
 }
 
+/// Sizes: above zero and at most the limit.
+fn size() -> impl Strategy<Value = f64> {
+    prop_oneof![
+        4 => coordinate().prop_map(f64::abs),
+        1 => prop::sample::select(vec![MAX_SIZE, 5e-324, 1e-7, 0.5, 3.0]),
+    ]
+    .prop_filter("sizes are above zero", |v| *v > 0.0)
+}
+
 fn point() -> impl Strategy<Value = Point> {
-    (number(), number()).prop_map(|(x, y)| Point::new(x, y))
+    (coordinate(), coordinate()).prop_map(|(x, y)| Point::new(x, y))
 }
 
 /// Characters KDL or a terminal treat specially.
@@ -65,17 +78,13 @@ fn shape() -> impl Strategy<Value = Shape> {
     prop_oneof![
         (point(), text()).prop_map(|(at, text)| Shape::Text { at, text }),
         (point(), text()).prop_map(|(at, src)| Shape::Math { at, src }),
-        (point(), number()).prop_map(|(center, r)| Shape::Ellipse {
+        (point(), size()).prop_map(|(center, r)| Shape::Ellipse {
             center,
             rx: r,
             ry: r
         }),
-        (point(), number(), number()).prop_map(|(center, rx, ry)| Shape::Ellipse {
-            center,
-            rx,
-            ry
-        }),
-        (point(), number(), number()).prop_map(|(origin, w, h)| Shape::Rect { origin, w, h }),
+        (point(), size(), size()).prop_map(|(center, rx, ry)| Shape::Ellipse { center, rx, ry }),
+        (point(), size(), size()).prop_map(|(origin, w, h)| Shape::Rect { origin, w, h }),
         (point(), point()).prop_map(|(a, b)| Shape::Line { a, b }),
         (point(), point()).prop_map(|(a, b)| Shape::Arrow { a, b }),
     ]

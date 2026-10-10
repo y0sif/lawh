@@ -11,13 +11,27 @@
 //! arrow id=a1 x1=0 y1=0 x2=3 y2=0
 //! ```
 //!
-//! Reading goes through the `kdl` crate's parser, so hand-written files may use any KDL v2
+//! Reading goes through the `kdl` crate's parser, so hand-written files may use flat KDL v2
 //! syntax: comments, quoted or raw strings, properties in any order. Writing is done here, in one
 //! fixed shape per object, so saved files diff cleanly.
+//!
+//! Before kdl sees a file, a linear scan checks its structure (see `scan.rs`): kdl's parser
+//! recurses on nested blocks, nested comments and error recovery, so hostile files could
+//! otherwise overflow the stack. Files are limited to [`MAX_FILE_BYTES`], block comments to
+//! [`MAX_COMMENT_DEPTH`] levels, and numbers and texts to the board's limits
+//! ([`MAX_COORDINATE`](crate::board::MAX_COORDINATE), [`MAX_SIZE`](crate::board::MAX_SIZE),
+//! [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS)).
 
 mod error;
 mod read;
+mod scan;
 mod write;
+
+/// Largest `.lawh` file [`from_lawh`] reads, in bytes (8 MiB).
+pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Deepest nesting of block comments `/* /* */ */` in a `.lawh` file.
+pub const MAX_COMMENT_DEPTH: usize = 16;
 
 pub use error::FormatError;
 pub use read::from_lawh;

@@ -86,8 +86,11 @@ fn write_segment(f: &mut Formatter<'_>, kind: &str, id: Id<'_>, a: Point, b: Poi
 
 /// A number as Rust prints it (`3`, `-0.5`, `0.30000000000000004`), with `-0` as `0`.
 ///
-/// Magnitudes of 1e38 and up use exponent form (`1e300`): Rust prints them as long integers, and
-/// KDL integers past the `i128` range are a parse error.
+/// Very large and very small magnitudes use exponent form (`1e300`, `5e-324`), which still reads
+/// back exactly:
+/// - 1e38 and up: Rust prints them as long integers, and KDL integers past the `i128` range are a
+///   parse error.
+/// - Below 1e-6: Rust prints them with up to 300+ zeros after the point.
 struct Num(f64);
 
 impl Display for Num {
@@ -95,7 +98,7 @@ impl Display for Num {
         let v = self.0;
         if v == 0.0 {
             f.write_str("0")
-        } else if v.abs() >= 1e38 {
+        } else if v.abs() >= 1e38 || v.abs() < 1e-6 {
             write!(f, "{v:e}")
         } else {
             write!(f, "{v}")
@@ -201,7 +204,13 @@ mod tests {
             (0.1 + 0.2, "0.30000000000000004"),
             (0.0, "0"),
             (-0.0, "0"),
-            (1e-7, "0.0000001"),
+            (1e-6, "0.000001"),
+            (-0.000_123, "-0.000123"),
+            (9.99e-7, "9.99e-7"),
+            (1e-7, "1e-7"),
+            (-2.5e-10, "-2.5e-10"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+            (4.9e-324, "5e-324"),
             (123_456.789, "123456.789"),
             (1e20, "100000000000000000000"),
             (1e38, "1e38"),
@@ -210,6 +219,35 @@ mod tests {
         ];
         for (v, want) in cases {
             assert_eq!(Num(v).to_string(), want, "{v:?}");
+        }
+    }
+
+    /// Numbers in every form the writer uses read back as the same `f64` through kdl.
+    #[test]
+    fn numbers_parse_back_exactly() {
+        let samples = [
+            0.1 + 0.2,
+            -1.0 / 3.0,
+            1e-6,
+            9.99e-7,
+            -1e-7,
+            1.234_567_890_123_456_7e-200,
+            f64::MIN_POSITIVE,
+            5e-324,
+            -5e-324,
+            1e37,
+            9.999_999_999_999_998e37,
+            1e38,
+            -f64::MAX,
+        ];
+        for v in samples {
+            let doc = kdl::KdlDocument::parse_v2(&format!("n {}", Num(v))).unwrap();
+            let back = match doc.nodes()[0].entries()[0].value() {
+                kdl::KdlValue::Float(f) => *f,
+                kdl::KdlValue::Integer(i) => *i as f64,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(back.to_bits(), v.to_bits(), "{v:e} written as {}", Num(v));
         }
     }
 

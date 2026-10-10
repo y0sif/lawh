@@ -5,54 +5,92 @@ use std::collections::HashSet;
 use kdl::{KdlDocument, KdlEntry, KdlError, KdlNode, KdlValue};
 use kurbo::Point;
 
-use super::FormatError;
-use crate::board::{Board, Object, ObjectId, Shape};
+use super::scan::{Scan, Stop, scan};
+use super::{FormatError, MAX_FILE_BYTES};
+use crate::board::{
+    Board, Object, ObjectId, Shape, is_valid_coordinate, is_valid_size, is_valid_text,
+};
 
 /// The format version this build reads and writes.
 const VERSION: i128 = 1;
 
 /// Reads a `.lawh` file. Accepts LF and CRLF line endings.
+///
+/// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed.
 pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
-    let doc = KdlDocument::parse_v2(src).map_err(|e| syntax_error(src, &e))?;
+    if src.len() > MAX_FILE_BYTES {
+        return Err(FormatError::FileTooLarge { bytes: src.len() });
+    }
+    let Scan { text, stop } = scan(src);
+    // A children block ends what kdl reads: the byte offset of its `{`, and the name of its
+    // owner when kdl drops that node (it is slashdashed).
+    let (end, children) = match stop {
+        None => (text.len(), None),
+        Some(Stop::Children {
+            brace,
+            cut,
+            dropped_owner,
+        }) => (cut, Some((brace, dropped_owner))),
+        Some(Stop::Rejected { at, end, message }) => {
+            return Err(rejected(src, &text, at, end, message));
+        }
+        Some(Stop::Error(e)) => return Err(e),
+    };
+    let doc = KdlDocument::parse_v2(text.get(..end).unwrap_or(&text))
+        .map_err(|e| syntax_error(src, &e, 0))?;
     let reader = Reader { src };
-    let mut nodes = doc.nodes().iter();
-    let Some(header) = nodes.next() else {
+    let Some((header, objects)) = doc.nodes().split_first() else {
         return Err(FormatError::MissingHeader { line: 1, column: 1 });
     };
-    reader.header(header)?;
+    // The last node kdl kept owns the children block, unless kdl dropped the owner.
+    let owner_brace = |is_last: bool| match &children {
+        Some((brace, None)) if is_last => Some(*brace),
+        _ => None,
+    };
+    reader.header(header, owner_brace(objects.is_empty()))?;
     let mut board = Board::new();
-    for node in nodes {
-        let object = reader.object(node, &board)?;
+    for (i, node) in objects.iter().enumerate() {
+        let object = reader.object(node, &board, owner_brace(i + 1 == objects.len()))?;
         board.push_checked(object);
+    }
+    if let Some((brace, Some(kind))) = children {
+        let (line, column) = line_column(src, brace);
+        return Err(FormatError::Children { line, column, kind });
     }
     Ok(board)
 }
 
-fn syntax_error(src: &str, error: &KdlError) -> FormatError {
-    // kdl reports a raw bidi or control character as "Expected quoted string" at the opening
-    // quote; name the character instead.
-    if let Some((offset, c)) = src
-        .char_indices()
-        .find(|&(i, c)| is_forbidden_literal(c) && !(i == 0 && c == '\u{FEFF}'))
-    {
-        let (line, column) = line_column(src, offset);
-        let code = u32::from(c);
-        return FormatError::Syntax {
-            line,
-            column,
-            message: format!("character U+{code:04X} cannot appear as itself in a lawh file"),
-            help: Some(format!("inside a string, write it as \\u{{{code:X}}}")),
-        };
+/// The error for text the scan rejected at byte `at`: kdl's own, from reading up to `end`
+/// (just past the bad token), or the scan's `message` if kdl accepts that much.
+fn rejected(src: &str, text: &str, at: usize, end: usize, message: &str) -> FormatError {
+    if let Err(e) = KdlDocument::parse_v2(text.get(..end).unwrap_or(text)) {
+        return syntax_error(src, &e, at);
     }
+    let (line, column) = line_column(src, at);
+    FormatError::Syntax {
+        line,
+        column,
+        message: message.to_owned(),
+        help: None,
+    }
+}
+
+/// kdl's first diagnostic, placed no earlier than byte `min_offset`.
+///
+/// The scan has already checked everything before `min_offset`, so a diagnostic placed earlier
+/// is one of kdl's spans that run from the start of the document to the problem.
+fn syntax_error(src: &str, error: &KdlError, min_offset: usize) -> FormatError {
     let first = error.diagnostics.first();
-    let (line, column) = first.map_or((1, 1), |d| {
+    let offset = first.map_or(min_offset, |d| {
         let (start, len) = (d.span.offset(), d.span.len());
         // Some kdl errors carry a span from the start of the document to the problem.
         let multi_line = src
             .get(start..start + len)
             .is_some_and(|s| s.contains('\n'));
-        line_column(src, if start == 0 && multi_line { len } else { start })
+        let offset = if start == 0 && multi_line { len } else { start };
+        offset.max(min_offset)
     });
+    let (line, column) = line_column(src, offset);
     FormatError::Syntax {
         line,
         column,
@@ -63,24 +101,10 @@ fn syntax_error(src: &str, error: &KdlError) -> FormatError {
     }
 }
 
-/// Code points KDL v2 forbids anywhere in a document, even inside strings.
-fn is_forbidden_literal(c: char) -> bool {
-    matches!(
-        c,
-        '\u{0}'..='\u{8}'
-            | '\u{E}'..='\u{1F}'
-            | '\u{7F}'
-            | '\u{200E}'..='\u{200F}'
-            | '\u{202A}'..='\u{202E}'
-            | '\u{2066}'..='\u{2069}'
-            | '\u{FEFF}'
-    )
-}
-
 /// 1-based line and column (in characters) of byte `offset` in `src`.
 ///
 /// LF, CRLF and a lone CR each end a line. A leading byte order mark takes no column.
-fn line_column(src: &str, offset: usize) -> (usize, usize) {
+pub(super) fn line_column(src: &str, offset: usize) -> (usize, usize) {
     let (mut line, mut column) = (1, 1);
     let mut after_cr = false;
     for (i, c) in src.char_indices() {
@@ -177,7 +201,8 @@ impl Reader<'_> {
         line_column(self.src, offset)
     }
 
-    fn header(&self, node: &KdlNode) -> Result<(), FormatError> {
+    /// Checks the `lawh version=1` header. `children` is the offset of a `{` after it.
+    fn header(&self, node: &KdlNode, children: Option<usize>) -> Result<(), FormatError> {
         let start = node.span().offset();
         if node.name().value() != "lawh" {
             let (line, column) = self.at(start);
@@ -216,7 +241,7 @@ impl Reader<'_> {
                 });
             }
         }
-        self.no_annotation_or_children(node, "lawh")?;
+        self.no_annotation_or_children(node, "lawh", children)?;
         let mut seen_version = false;
         for entry in node.entries() {
             self.no_annotation(entry)?;
@@ -248,7 +273,13 @@ impl Reader<'_> {
         Ok(())
     }
 
-    fn object(&self, node: &KdlNode, board: &Board) -> Result<Object, FormatError> {
+    /// Reads one object. `children` is the offset of a `{` after it.
+    fn object(
+        &self,
+        node: &KdlNode,
+        board: &Board,
+        children: Option<usize>,
+    ) -> Result<Object, FormatError> {
         let start = node.span().offset();
         let name = node.name().value();
         if node.ty().is_some() {
@@ -263,7 +294,7 @@ impl Reader<'_> {
                 kind: name.to_owned(),
             });
         };
-        self.no_annotation_or_children(node, kind.name())?;
+        self.no_annotation_or_children(node, kind.name(), children)?;
         let parts = self.parts(node, kind, board)?;
 
         let missing = |property: &'static str| {
@@ -320,6 +351,14 @@ impl Reader<'_> {
                         kind: kind.name().to_owned(),
                     });
                 };
+                if !is_valid_text(s) {
+                    let (line, column) = here();
+                    return Err(FormatError::TextTooLong {
+                        line,
+                        column,
+                        kind: kind.name().to_owned(),
+                    });
+                }
                 parts.content = Some(s.clone());
                 continue;
             };
@@ -380,19 +419,54 @@ impl Reader<'_> {
         })
     }
 
+    /// A finite number within the board's limits: a size for `r`, `rx`, `ry`, `w` and `h`, a
+    /// coordinate otherwise.
     fn number(&self, entry: &KdlEntry, prop: &str) -> Result<f64, FormatError> {
-        let expected = match entry.value() {
-            KdlValue::Integer(i) => return Ok(*i as f64),
-            KdlValue::Float(f) if f.is_finite() => return Ok(*f),
-            KdlValue::Float(_) => "a finite number",
-            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => "a number",
+        let v = match entry.value() {
+            KdlValue::Integer(i) => *i as f64,
+            KdlValue::Float(f) => *f,
+            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => f64::NAN,
         };
+        let is_size = matches!(prop, "r" | "rx" | "ry" | "w" | "h");
+        let in_range = if is_size {
+            is_valid_size(v)
+        } else {
+            is_valid_coordinate(v)
+        };
+        if in_range {
+            return Ok(v);
+        }
+        // Only now find the position: it scans from the file start.
         let (line, column) = self.at(entry.span().offset());
-        Err(FormatError::WrongType {
-            line,
-            column,
-            property: prop.to_owned(),
-            expected,
+        let property = prop.to_owned();
+        Err(match entry.value() {
+            KdlValue::Integer(_) | KdlValue::Float(_) if v.is_finite() => {
+                if is_size {
+                    FormatError::InvalidSize {
+                        line,
+                        column,
+                        property,
+                    }
+                } else {
+                    FormatError::CoordinateOutOfRange {
+                        line,
+                        column,
+                        property,
+                    }
+                }
+            }
+            KdlValue::Integer(_) | KdlValue::Float(_) => FormatError::WrongType {
+                line,
+                column,
+                property,
+                expected: "a finite number",
+            },
+            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => FormatError::WrongType {
+                line,
+                column,
+                property,
+                expected: "a number",
+            },
         })
     }
 
@@ -404,20 +478,22 @@ impl Reader<'_> {
         Ok(())
     }
 
-    fn no_annotation_or_children(&self, node: &KdlNode, kind: &str) -> Result<(), FormatError> {
+    /// Rejects a type annotation on the node, then a children block: `children` is the offset
+    /// of the `{` the scan stopped at, when it belongs to this node.
+    fn no_annotation_or_children(
+        &self,
+        node: &KdlNode,
+        kind: &str,
+        children: Option<usize>,
+    ) -> Result<(), FormatError> {
         let start = node.span().offset();
         if node.ty().is_some() {
             let (line, column) = self.at(start);
             return Err(FormatError::TypeAnnotation { line, column });
         }
-        if let Some(children) = node.children() {
-            // Point at the `{`: the last one between the node start and its first child.
-            let inner = children.span().offset();
-            let brace = self
-                .src
-                .get(start..inner)
-                .and_then(|s| s.rfind('{'))
-                .map_or(start, |i| start + i);
+        // kdl never sees a `{` (the scan stops there), but stay safe if it reports children.
+        let brace = children.or_else(|| node.children().map(|_| start));
+        if let Some(brace) = brace {
             let (line, column) = self.at(brace);
             return Err(FormatError::Children {
                 line,

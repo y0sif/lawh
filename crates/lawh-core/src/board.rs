@@ -1,6 +1,10 @@
 //! The board model: objects in z-order, each with a stable id.
 //!
 //! Coordinates are grid units (`f64`) with y growing down, like a screen.
+//!
+//! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`]) and every
+//! text within [`MAX_TEXT_CHARS`], so bounds, zoom-to-fit and rendering never meet values that
+//! overflow or allocate without limit. The file reader enforces the same limits.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -59,6 +63,35 @@ fn is_id_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'-'
 }
 
+/// Largest magnitude of any coordinate, in grid units: every `x` and `y` lies in
+/// `-MAX_COORDINATE..=MAX_COORDINATE`.
+pub const MAX_COORDINATE: f64 = 1_000_000.0;
+
+/// Largest radius, width or height, in grid units.
+///
+/// Sizes must also be above zero: a zero or negative size draws nothing (or the same thing as its
+/// absolute value), so the board rejects it instead of storing it.
+pub const MAX_SIZE: f64 = 1_000_000.0;
+
+/// Most characters (Unicode scalar values) in the content of a text or math object.
+pub const MAX_TEXT_CHARS: usize = 100_000;
+
+/// True when `v` is a coordinate the board accepts. False for NaN.
+pub(crate) fn is_valid_coordinate(v: f64) -> bool {
+    v.abs() <= MAX_COORDINATE
+}
+
+/// True when `v` is a size the board accepts: above zero and at most [`MAX_SIZE`]. False for NaN.
+pub(crate) fn is_valid_size(v: f64) -> bool {
+    v > 0.0 && v <= MAX_SIZE
+}
+
+/// True when `s` has at most [`MAX_TEXT_CHARS`] characters.
+pub(crate) fn is_valid_text(s: &str) -> bool {
+    // Only the bytes could make it too long, so skip counting short strings.
+    s.len() <= MAX_TEXT_CHARS || s.chars().nth(MAX_TEXT_CHARS).is_none()
+}
+
 /// One object on the board.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Object {
@@ -101,6 +134,55 @@ impl Shape {
             Self::Line { a, b } | Self::Arrow { a, b } => a.is_finite() && b.is_finite(),
         }
     }
+
+    /// The points that place the shape: one for most kinds, both ends for lines and arrows.
+    fn points(&self) -> [Option<Point>; 2] {
+        match self {
+            Self::Text { at, .. } | Self::Math { at, .. } => [Some(*at), None],
+            Self::Ellipse { center, .. } => [Some(*center), None],
+            Self::Rect { origin, .. } => [Some(*origin), None],
+            Self::Line { a, b } | Self::Arrow { a, b } => [Some(*a), Some(*b)],
+        }
+    }
+
+    /// The radii of an ellipse or the width and height of a rectangle.
+    fn sizes(&self) -> Option<[f64; 2]> {
+        match self {
+            Self::Ellipse { rx, ry, .. } => Some([*rx, *ry]),
+            Self::Rect { w, h, .. } => Some([*w, *h]),
+            Self::Text { .. } | Self::Math { .. } | Self::Line { .. } | Self::Arrow { .. } => None,
+        }
+    }
+
+    /// The text of a text object or the source of a math object.
+    fn content(&self) -> Option<&str> {
+        match self {
+            Self::Text { text, .. } => Some(text),
+            Self::Math { src, .. } => Some(src),
+            Self::Ellipse { .. } | Self::Rect { .. } | Self::Line { .. } | Self::Arrow { .. } => {
+                None
+            }
+        }
+    }
+
+    /// Every coordinate is within [`MAX_COORDINATE`].
+    pub fn coordinates_in_range(&self) -> bool {
+        self.points()
+            .into_iter()
+            .flatten()
+            .all(|p| is_valid_coordinate(p.x) && is_valid_coordinate(p.y))
+    }
+
+    /// Every size is above zero and at most [`MAX_SIZE`]. True for kinds without sizes.
+    pub fn sizes_in_range(&self) -> bool {
+        self.sizes()
+            .is_none_or(|s| s.into_iter().all(is_valid_size))
+    }
+
+    /// The text or math content has at most [`MAX_TEXT_CHARS`] characters.
+    pub fn content_in_range(&self) -> bool {
+        self.content().is_none_or(is_valid_text)
+    }
 }
 
 /// Why the board refused a change.
@@ -112,6 +194,12 @@ pub enum BoardError {
     DuplicateId(ObjectId),
     #[error("object `{0}` has a coordinate or size that is not a finite number")]
     NonFinite(ObjectId),
+    #[error("object `{0}` has a coordinate outside -{max}..={max}", max = MAX_COORDINATE)]
+    CoordinateOutOfRange(ObjectId),
+    #[error("object `{0}` has a size that is not above 0 and at most {max}", max = MAX_SIZE)]
+    InvalidSize(ObjectId),
+    #[error("object `{0}` has more than {max} characters of text", max = MAX_TEXT_CHARS)]
+    TextTooLong(ObjectId),
 }
 
 /// The whiteboard: objects in z-order, back to front.
@@ -150,19 +238,31 @@ impl Board {
 
     /// Adds `object` on top of the others.
     ///
-    /// Fails if its id is already used or any of its numbers is not finite.
+    /// Fails if its id is already used, any of its numbers is not finite or outside the limits
+    /// ([`MAX_COORDINATE`], [`MAX_SIZE`]), or its text is longer than [`MAX_TEXT_CHARS`].
     pub fn insert(&mut self, object: Object) -> Result<(), BoardError> {
-        if self.contains(&object.id) {
-            return Err(BoardError::DuplicateId(object.id));
-        }
-        if !object.shape.is_finite() {
-            return Err(BoardError::NonFinite(object.id));
+        let shape = &object.shape;
+        let problem: Option<fn(ObjectId) -> BoardError> = if self.contains(&object.id) {
+            Some(BoardError::DuplicateId)
+        } else if !shape.is_finite() {
+            Some(BoardError::NonFinite)
+        } else if !shape.coordinates_in_range() {
+            Some(BoardError::CoordinateOutOfRange)
+        } else if !shape.sizes_in_range() {
+            Some(BoardError::InvalidSize)
+        } else if !shape.content_in_range() {
+            Some(BoardError::TextTooLong)
+        } else {
+            None
+        };
+        if let Some(error) = problem {
+            return Err(error(object.id));
         }
         self.push_checked(object);
         Ok(())
     }
 
-    /// Adds an object the caller has already checked: unique id, finite numbers.
+    /// Adds an object the caller has already checked as [`Board::insert`] does.
     pub(crate) fn push_checked(&mut self, object: Object) {
         self.index.insert(object.id.clone(), self.objects.len());
         self.objects.push(object);
@@ -269,6 +369,153 @@ mod tests {
             assert_eq!(board.insert(text), Err(BoardError::NonFinite(id("t1"))));
         }
         assert!(board.is_empty());
+    }
+
+    fn rect(name: &str, origin: Point, w: f64, h: f64) -> Object {
+        Object::new(id(name), Shape::Rect { origin, w, h })
+    }
+
+    #[test]
+    fn insert_accepts_numbers_at_the_limits() {
+        let mut board = Board::new();
+        let far = Point::new(MAX_COORDINATE, -MAX_COORDINATE);
+        board.insert(rect("r1", far, MAX_SIZE, MAX_SIZE)).unwrap();
+        board.insert(rect("r2", far, 5e-324, 1e-9)).unwrap();
+        let line = Shape::Line {
+            a: Point::new(-MAX_COORDINATE, 0.0),
+            b: Point::new(MAX_COORDINATE, 0.0),
+        };
+        board.insert(Object::new(id("l1"), line)).unwrap();
+        assert_eq!(board.len(), 3);
+    }
+
+    #[test]
+    fn insert_rejects_coordinates_out_of_range() {
+        let mut board = Board::new();
+        for bad in [
+            MAX_COORDINATE * (1.0 + f64::EPSILON),
+            -1e7,
+            1e308,
+            -f64::MAX,
+        ] {
+            let shapes = [
+                Shape::Text {
+                    at: Point::new(bad, 0.0),
+                    text: String::new(),
+                },
+                Shape::Math {
+                    at: Point::new(0.0, bad),
+                    src: String::new(),
+                },
+                Shape::Ellipse {
+                    center: Point::new(bad, bad),
+                    rx: 1.0,
+                    ry: 1.0,
+                },
+                Shape::Rect {
+                    origin: Point::new(0.0, bad),
+                    w: 1.0,
+                    h: 1.0,
+                },
+                Shape::Line {
+                    a: Point::ZERO,
+                    b: Point::new(bad, 0.0),
+                },
+                Shape::Arrow {
+                    a: Point::new(0.0, bad),
+                    b: Point::ZERO,
+                },
+            ];
+            for shape in shapes {
+                assert_eq!(
+                    board.insert(Object::new(id("o1"), shape.clone())),
+                    Err(BoardError::CoordinateOutOfRange(id("o1"))),
+                    "{shape:?}"
+                );
+            }
+        }
+        assert!(board.is_empty());
+    }
+
+    #[test]
+    fn insert_rejects_sizes_not_above_zero_or_too_big() {
+        let mut board = Board::new();
+        for bad in [
+            0.0,
+            -0.0,
+            -1.0,
+            -5e-324,
+            MAX_SIZE * (1.0 + f64::EPSILON),
+            1e60,
+        ] {
+            assert_eq!(
+                board.insert(circle("c1", bad)),
+                Err(BoardError::InvalidSize(id("c1"))),
+                "{bad:?}"
+            );
+            assert_eq!(
+                board.insert(rect("r1", Point::ZERO, 1.0, bad)),
+                Err(BoardError::InvalidSize(id("r1"))),
+                "{bad:?}"
+            );
+            let ellipse = Shape::Ellipse {
+                center: Point::ZERO,
+                rx: bad,
+                ry: 1.0,
+            };
+            assert_eq!(
+                board.insert(Object::new(id("e1"), ellipse)),
+                Err(BoardError::InvalidSize(id("e1"))),
+                "{bad:?}"
+            );
+        }
+        assert!(board.is_empty());
+    }
+
+    #[test]
+    fn insert_rejects_text_over_the_limit() {
+        let mut board = Board::new();
+        // Multi-byte characters: the limit counts characters, not bytes.
+        let longest = "é".repeat(MAX_TEXT_CHARS);
+        let text = |name: &str, text: String| {
+            Object::new(
+                id(name),
+                Shape::Text {
+                    at: Point::ZERO,
+                    text,
+                },
+            )
+        };
+        board.insert(text("t1", longest.clone())).unwrap();
+        assert_eq!(
+            board.insert(text("t2", format!("{longest}x"))),
+            Err(BoardError::TextTooLong(id("t2")))
+        );
+        let math = Shape::Math {
+            at: Point::ZERO,
+            src: "x".repeat(MAX_TEXT_CHARS + 1),
+        };
+        assert_eq!(
+            board.insert(Object::new(id("m1"), math)),
+            Err(BoardError::TextTooLong(id("m1")))
+        );
+        assert_eq!(board.len(), 1);
+    }
+
+    #[test]
+    fn limit_errors_name_the_limits() {
+        assert_eq!(
+            BoardError::CoordinateOutOfRange(id("c1")).to_string(),
+            "object `c1` has a coordinate outside -1000000..=1000000"
+        );
+        assert_eq!(
+            BoardError::InvalidSize(id("c1")).to_string(),
+            "object `c1` has a size that is not above 0 and at most 1000000"
+        );
+        assert_eq!(
+            BoardError::TextTooLong(id("t1")).to_string(),
+            "object `t1` has more than 100000 characters of text"
+        );
     }
 
     #[test]

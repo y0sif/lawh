@@ -1,9 +1,13 @@
 //! Errors from reading a `.lawh` file.
 
+use super::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
+use crate::board::{MAX_COORDINATE, MAX_SIZE, MAX_TEXT_CHARS};
+
 /// Why a `.lawh` file could not be read.
 ///
 /// Every variant carries a 1-based `line` and `column` (counted in characters) pointing into the
-/// file, and its message starts with `line:column:`.
+/// file, and its message starts with `line:column:`. [`FormatError::FileTooLarge`] is about the
+/// whole file, so it reports `1:1`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FormatError {
     /// The file is not valid KDL.
@@ -139,6 +143,44 @@ pub enum FormatError {
     /// A KDL type annotation such as `(u8)`, which lawh files do not use.
     #[error("{line}:{column}: type annotations like `(name)` are not supported")]
     TypeAnnotation { line: usize, column: usize },
+
+    /// The file is longer than [`MAX_FILE_BYTES`]. Checked before anything is parsed.
+    #[error("1:1: the file is {bytes} bytes; lawh reads files of up to {MAX_FILE_BYTES} bytes")]
+    FileTooLarge { bytes: usize },
+
+    /// Block comments `/* */` nested more than [`MAX_COMMENT_DEPTH`] deep.
+    #[error("{line}:{column}: block comments are nested more than {MAX_COMMENT_DEPTH} deep")]
+    CommentTooDeep { line: usize, column: usize },
+
+    /// A coordinate outside `-MAX_COORDINATE..=MAX_COORDINATE`.
+    #[error(
+        "{line}:{column}: property `{property}` must be between -{max} and {max}",
+        max = MAX_COORDINATE
+    )]
+    CoordinateOutOfRange {
+        line: usize,
+        column: usize,
+        property: String,
+    },
+
+    /// A radius, width or height that is not above zero, or above [`MAX_SIZE`].
+    #[error(
+        "{line}:{column}: property `{property}` must be above 0 and at most {max}",
+        max = MAX_SIZE
+    )]
+    InvalidSize {
+        line: usize,
+        column: usize,
+        property: String,
+    },
+
+    /// The content of a `text` or `math` node is longer than [`MAX_TEXT_CHARS`] characters.
+    #[error("{line}:{column}: the content of `{kind}` is longer than {MAX_TEXT_CHARS} characters")]
+    TextTooLong {
+        line: usize,
+        column: usize,
+        kind: String,
+    },
 }
 
 impl FormatError {
@@ -169,7 +211,12 @@ impl FormatError {
             | Self::MissingText { line, column, .. }
             | Self::TextNotString { line, column, .. }
             | Self::ExtraArgument { line, column, .. }
-            | Self::TypeAnnotation { line, column } => (*line, *column),
+            | Self::TypeAnnotation { line, column }
+            | Self::CommentTooDeep { line, column }
+            | Self::CoordinateOutOfRange { line, column, .. }
+            | Self::InvalidSize { line, column, .. }
+            | Self::TextTooLong { line, column, .. } => (*line, *column),
+            Self::FileTooLarge { .. } => (1, 1),
         }
     }
 }

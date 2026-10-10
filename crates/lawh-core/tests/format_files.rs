@@ -3,6 +3,7 @@
 // Lets the helpers below unwrap and panic like test functions (see clippy.toml).
 #![cfg(test)]
 
+use lawh_core::board::{MAX_COORDINATE, MAX_SIZE};
 use lawh_core::{Board, Object, ObjectId, Point, Shape, from_lawh, to_lawh};
 
 const AREA: &str = include_str!("../../../examples/area.lawh");
@@ -173,17 +174,17 @@ fn tricky_strings_and_numbers_round_trip() {
         object(
             "true",
             Shape::Ellipse {
-                center: Point::new(f64::MAX, f64::MIN_POSITIVE),
+                center: Point::new(MAX_COORDINATE, f64::MIN_POSITIVE),
                 rx: 5e-324,
-                ry: 1e38,
+                ry: MAX_SIZE,
             },
         ),
         object(
             "1",
             Shape::Rect {
-                origin: Point::new(-1.0 / 3.0, 2.0 / 3.0),
-                w: -4.0,
-                h: 1e21,
+                origin: Point::new(-1.0 / 3.0, -MAX_COORDINATE),
+                w: 9.99e-7,
+                h: 1e-6,
             },
         ),
     ]);
@@ -192,6 +193,18 @@ fn tricky_strings_and_numbers_round_trip() {
     assert_eq!(back, tricky);
     assert_eq!(to_lawh(&back), text);
     insta::assert_snapshot!(text);
+}
+
+#[test]
+fn tiny_numbers_are_written_in_exponent_form() {
+    // The verifier's num_subnormal.lawh: 4.9e-324 used to be written with 300+ digits.
+    let board = from_lawh("lawh version=1\ncircle id=c1 x=4.9e-324 y=-2.5e-320 r=1e-7\n").unwrap();
+    let text = to_lawh(&board);
+    assert_eq!(
+        text,
+        "lawh version=1\ncircle id=c1 x=5e-324 y=-2.5e-320 r=1e-7\n"
+    );
+    assert_eq!(from_lawh(&text).unwrap(), board);
 }
 
 #[test]

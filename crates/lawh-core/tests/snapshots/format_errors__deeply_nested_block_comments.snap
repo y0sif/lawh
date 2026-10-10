@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:33: block comments are nested more than 16 deep
