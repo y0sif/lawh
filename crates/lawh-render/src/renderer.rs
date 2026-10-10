@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape as _, Stroke};
 use lawh_core::{Board, Object, Shape};
-use lawh_math::{MATH_FONT_SIZE_PT, MathEngine, MathItem, MathLayout, MathStatus};
+use lawh_math::{MATH_FONT_SIZE_PT, MathEngine, MathItem, MathLayout, MathStatus, MathSummary};
 use parley::PositionedLayoutItem;
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::peniko::{Blob, FontData};
@@ -396,16 +396,22 @@ impl Renderer {
         statuses
     }
 
-    /// `status`, after remembering the bounds of a laid-out formula.
+    /// `status`, after remembering the bounds of a laid-out formula (or one
+    /// whose layout the engine pushed out of its cache).
     fn noted(&mut self, src: &str, status: MathStatus) -> MathStatus {
-        if let MathStatus::Ready(layout) = &status {
-            self.record_math(src, layout);
+        match &status {
+            MathStatus::Ready(layout) => self.record_math(src, layout),
+            MathStatus::Evicted(summary) => self.record_bounds(src, summary_bounds(summary)),
+            MathStatus::Pending | MathStatus::Failed(_) => {}
         }
         status
     }
 
     fn record_math(&mut self, src: &str, layout: &MathLayout) {
-        let bounds = layout_bounds(layout);
+        self.record_bounds(src, layout_bounds(layout));
+    }
+
+    fn record_bounds(&mut self, src: &str, bounds: Rect) {
         let frame = self.frame;
         if let Some(known) = self.known_math.get_mut(src) {
             known.bounds = bounds;
@@ -440,6 +446,7 @@ impl Renderer {
             Shape::Math { at, src } => {
                 let laid_out = match math {
                     Some(MathStatus::Ready(layout)) => Some(layout_bounds(layout)),
+                    Some(MathStatus::Evicted(summary)) => Some(summary_bounds(summary)),
                     // Still compiling or failed: the source is drawn as text.
                     Some(MathStatus::Pending | MathStatus::Failed(_)) => None,
                     None => {
@@ -522,6 +529,10 @@ impl Renderer {
                 Some(MathStatus::Pending) | None => {
                     self.draw_text(*at, src, PENDING, vp, clip, budget)
                 }
+                // Laid out before, but pushed out of the math cache and not compiled again
+                // for now: drawn as the faint outline of its bounds, like an object over the
+                // budget (and counted with them in `FrameStats::downgraded`).
+                Some(MathStatus::Evicted(_)) => false,
             },
         }
     }
@@ -880,6 +891,13 @@ fn layout_bounds(layout: &MathLayout) -> Rect {
     Rect::new(0.0, 0.0, layout.width, layout.height)
         .abs()
         .union(layout.ink.abs())
+}
+
+/// [`layout_bounds`] of a layout the math engine no longer holds.
+fn summary_bounds(summary: &MathSummary) -> Rect {
+    Rect::new(0.0, 0.0, summary.width, summary.height)
+        .abs()
+        .union(summary.ink.abs())
 }
 
 /// How far `p` is from `rect`; 0 inside it.

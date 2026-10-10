@@ -22,13 +22,16 @@
 //! ```
 //!
 //! The parent treats everything the worker sends as untrusted: frames are
-//! capped at [`MAX_FRAME_BYTES`], counts must fit in the bytes left, numbers
-//! must be finite, fonts must be bundled, glyph ids must exist in their font,
-//! paths must start with a move, the ink bounds must be in order, and nothing
-//! may follow the payload. A well-formed layout past the limits
-//! ([`crate::MAX_LAYOUT_EXTENT_PT`], [`crate::MAX_LAYOUT_GLYPHS`],
-//! [`crate::MAX_LAYOUT_PATH_ELEMENTS`]) becomes [`MathError::TooLarge`], as it
-//! would in process.
+//! capped at [`MAX_FRAME_BYTES`], counts must fit in the bytes left (each
+//! thing counted at its smallest encoding), numbers must be finite, fonts must
+//! be bundled, glyph ids must exist in their font, paths must start with a
+//! move, the ink bounds must be in order, and nothing may follow the payload.
+//! A well-formed layout past the limits ([`crate::MAX_LAYOUT_EXTENT_PT`],
+//! [`MAX_LAYOUT_GLYPHS`], [`MAX_LAYOUT_PATH_ELEMENTS`]) becomes
+//! [`MathError::TooLarge`], as it would in process. Counts are added up as
+//! they are read, so a layout is [`MathError::TooLarge`] as soon as they pass
+//! the complexity caps, before anything past them is allocated or read: the
+//! parent never holds more than the caps allow, whatever the frame's size.
 //!
 //! The parent takes the ink bounds as the worker reports them, checked only
 //! for order and extent: wrong bounds could only make the renderer cull or fit
@@ -44,7 +47,9 @@ use kurbo::{BezPath, PathEl, Point, Rect};
 use crate::compile::Outcome;
 use crate::fonts::glyph_count;
 use crate::layout::check_limits;
-use crate::{MathError, MathGlyph, MathItem, MathLayout};
+use crate::{
+    MAX_LAYOUT_GLYPHS, MAX_LAYOUT_PATH_ELEMENTS, MathError, MathGlyph, MathItem, MathLayout,
+};
 
 /// Version of this format. The parent refuses a worker that announces any
 /// other.
@@ -73,11 +78,27 @@ const EL_QUAD: u8 = 2;
 const EL_CUBIC: u8 = 3;
 const EL_CLOSE: u8 = 4;
 
-/// Smallest encoding of one item, glyph, path element and layout header, so a
-/// count can be checked against the bytes left before anything is allocated.
-const MIN_ITEM_BYTES: usize = 1 + 4 + 8 + 4 + 4;
+/// Smallest encoding of a glyph run: tag, font, size, fill and glyph count,
+/// with no glyphs.
+const MIN_GLYPHS_ITEM_BYTES: usize = 1 + 4 + 8 + 4 + 4;
+/// Smallest encoding of a path: tag, flags and element count, with no fill,
+/// no stroke and no elements. A fill adds 4 bytes, a stroke 12.
+const MIN_PATH_ITEM_BYTES: usize = 1 + 1 + 4;
+/// Smallest encoding of any item, so an item count can be checked against
+/// the bytes left before anything is allocated.
+const MIN_ITEM_BYTES: usize = if MIN_PATH_ITEM_BYTES < MIN_GLYPHS_ITEM_BYTES {
+    MIN_PATH_ITEM_BYTES
+} else {
+    MIN_GLYPHS_ITEM_BYTES
+};
 const GLYPH_BYTES: usize = 4 + 8 + 8;
+/// A close, which has no points.
 const MIN_ELEMENT_BYTES: usize = 1;
+
+/// Most items a layout within the complexity caps can hold: each counts at
+/// least one glyph (an empty run counts as one) or one path element (an
+/// empty path counts as one).
+const MAX_ITEMS: usize = MAX_LAYOUT_GLYPHS + MAX_LAYOUT_PATH_ELEMENTS;
 
 /// The line the worker announces itself with.
 pub(crate) fn handshake() -> Vec<u8> {
@@ -221,10 +242,11 @@ fn is_char_boundary(utf8: &[u8], at: usize) -> bool {
 pub(crate) fn decode_response(payload: &[u8]) -> Result<Outcome, ProtocolError> {
     let mut input = Cursor(payload);
     let outcome = match input.u8()? {
-        RESPONSE_LAYOUT => {
-            let layout = decode_layout(&mut input)?;
-            check_limits(&layout).map(|()| Arc::new(layout))
-        }
+        RESPONSE_LAYOUT => match decode_layout(&mut input)? {
+            Some(layout) => check_limits(&layout).map(|()| Arc::new(layout)),
+            // Past the complexity caps: the rest of the frame isn't read.
+            None => return Ok(Err(MathError::TooLarge)),
+        },
         RESPONSE_COMPILE_ERROR => {
             let message = std::str::from_utf8(input.rest())
                 .map_err(|_| ProtocolError("error message not UTF-8"))?;
@@ -307,7 +329,43 @@ fn encode_element(el: PathEl, out: &mut Vec<u8>) {
     }
 }
 
-fn decode_layout(input: &mut Cursor<'_>) -> Result<MathLayout, ProtocolError> {
+/// What is left of the complexity caps while a layout is decoded, counted as
+/// [`check_limits`] counts.
+struct CapsLeft {
+    glyphs: usize,
+    path_elements: usize,
+}
+
+impl CapsLeft {
+    /// Counts a glyph run of `glyphs` glyphs; false when that passes the cap.
+    fn glyph_run(&mut self, glyphs: usize) -> bool {
+        take(&mut self.glyphs, glyphs.max(1))
+    }
+
+    /// Counts a path of `elements` elements, stroked elements twice (stroking
+    /// costs about twice what filling does); false when that passes the cap.
+    fn path(&mut self, elements: usize, stroked: bool) -> bool {
+        let weight = if stroked { 2 } else { 1 };
+        take(
+            &mut self.path_elements,
+            elements.max(1).saturating_mul(weight),
+        )
+    }
+}
+
+/// Takes `n` from `left`; false, leaving it alone, when there isn't that much left.
+fn take(left: &mut usize, n: usize) -> bool {
+    match left.checked_sub(n) {
+        Some(rest) => {
+            *left = rest;
+            true
+        }
+        None => false,
+    }
+}
+
+/// The layout, or `None` as soon as its counts pass the complexity caps.
+fn decode_layout(input: &mut Cursor<'_>) -> Result<Option<MathLayout>, ProtocolError> {
     let width = input.f64()?;
     let height = input.f64()?;
     let baseline = input.f64()?;
@@ -316,29 +374,47 @@ fn decode_layout(input: &mut Cursor<'_>) -> Result<MathLayout, ProtocolError> {
         return Err(ProtocolError("ink bounds out of order"));
     }
     let count = input.count(MIN_ITEM_BYTES)?;
+    if count > MAX_ITEMS {
+        return Ok(None);
+    }
+    let mut caps = CapsLeft {
+        glyphs: MAX_LAYOUT_GLYPHS,
+        path_elements: MAX_LAYOUT_PATH_ELEMENTS,
+    };
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
-        items.push(match input.u8()? {
-            ITEM_GLYPHS => decode_glyphs(input)?,
-            ITEM_PATH => decode_path(input)?,
+        let item = match input.u8()? {
+            ITEM_GLYPHS => decode_glyphs(input, &mut caps)?,
+            ITEM_PATH => decode_path(input, &mut caps)?,
             _ => return Err(ProtocolError("unknown item")),
-        });
+        };
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        items.push(item);
     }
-    Ok(MathLayout {
+    Ok(Some(MathLayout {
         width,
         height,
         baseline,
         ink,
         items,
-    })
+    }))
 }
 
-fn decode_glyphs(input: &mut Cursor<'_>) -> Result<MathItem, ProtocolError> {
+/// A glyph run, or `None` if its glyphs pass what is left of the cap.
+fn decode_glyphs(
+    input: &mut Cursor<'_>,
+    caps: &mut CapsLeft,
+) -> Result<Option<MathItem>, ProtocolError> {
     let font = usize::try_from(input.u32()?).map_err(|_| ProtocolError("bad font"))?;
     let glyphs_in_font = glyph_count(font).ok_or(ProtocolError("font not bundled"))?;
     let size = input.f64()?;
     let fill = input.rgba()?;
     let count = input.count(GLYPH_BYTES)?;
+    if !caps.glyph_run(count) {
+        return Ok(None);
+    }
     let mut glyphs = Vec::with_capacity(count);
     for _ in 0..count {
         let id = input.u32()?;
@@ -351,15 +427,19 @@ fn decode_glyphs(input: &mut Cursor<'_>) -> Result<MathItem, ProtocolError> {
             y: input.f64()?,
         });
     }
-    Ok(MathItem::Glyphs {
+    Ok(Some(MathItem::Glyphs {
         font,
         size,
         fill,
         glyphs,
-    })
+    }))
 }
 
-fn decode_path(input: &mut Cursor<'_>) -> Result<MathItem, ProtocolError> {
+/// A path, or `None` if its elements pass what is left of the cap.
+fn decode_path(
+    input: &mut Cursor<'_>,
+    caps: &mut CapsLeft,
+) -> Result<Option<MathItem>, ProtocolError> {
     let flags = input.u8()?;
     if flags & !(PATH_FILL | PATH_STROKE) != 0 {
         return Err(ProtocolError("unknown path flags"));
@@ -375,6 +455,9 @@ fn decode_path(input: &mut Cursor<'_>) -> Result<MathItem, ProtocolError> {
         Some((input.f64()?, input.rgba()?))
     };
     let count = input.count(MIN_ELEMENT_BYTES)?;
+    if !caps.path(count, stroke.is_some()) {
+        return Ok(None);
+    }
     let mut elements = Vec::with_capacity(count);
     for _ in 0..count {
         elements.push(match input.u8()? {
@@ -393,11 +476,11 @@ fn decode_path(input: &mut Cursor<'_>) -> Result<MathItem, ProtocolError> {
     {
         return Err(ProtocolError("path does not start with a move"));
     }
-    Ok(MathItem::Path {
+    Ok(Some(MathItem::Path {
         path: BezPath::from_vec(elements),
         fill,
         stroke,
-    })
+    }))
 }
 
 fn put_f64(out: &mut Vec<u8>, v: f64) {
@@ -616,7 +699,7 @@ mod tests {
             unreachable!()
         };
         // The sample has two glyphs.
-        glyphs.resize(crate::MAX_LAYOUT_GLYPHS, glyph);
+        glyphs.resize(MAX_LAYOUT_GLYPHS, glyph);
         assert!(matches!(decode_response(&layout_frame(&layout)), Ok(Ok(_))));
         let MathItem::Glyphs { glyphs, .. } = &mut layout.items[0] else {
             unreachable!()
@@ -632,7 +715,7 @@ mod tests {
         let MathItem::Path { path, .. } = &mut layout.items[1] else {
             unreachable!()
         };
-        for _ in 0..(crate::MAX_LAYOUT_PATH_ELEMENTS - 11) / 2 {
+        for _ in 0..(MAX_LAYOUT_PATH_ELEMENTS - 11) / 2 {
             path.line_to((1.0, 1.0));
         }
         assert!(matches!(decode_response(&layout_frame(&layout)), Ok(Ok(_))));
@@ -693,6 +776,103 @@ mod tests {
         );
     }
 
+    /// A layout of `n` copies of `item`.
+    fn repeated(item: &MathItem, n: usize) -> MathLayout {
+        MathLayout {
+            items: vec![item.clone(); n],
+            ..sample()
+        }
+    }
+
+    fn empty_path(fill: Option<[u8; 4]>, stroke: Option<(f64, [u8; 4])>) -> MathItem {
+        MathItem::Path {
+            path: BezPath::new(),
+            fill,
+            stroke,
+        }
+    }
+
+    #[test]
+    fn items_count_at_their_smallest_encoding() {
+        // An empty path is 6 bytes, 10 with a fill and 18 with a stroke; an empty glyph run 21.
+        let empty_run = MathItem::Glyphs {
+            font: 1,
+            size: 20.0,
+            fill: [0, 0, 0, 255],
+            glyphs: Vec::new(),
+        };
+        let header = layout_frame(&repeated(&empty_run, 0)).len();
+        for (item, bytes) in [
+            (empty_path(None, None), MIN_PATH_ITEM_BYTES),
+            (empty_path(Some([1, 2, 3, 4]), None), 10),
+            (empty_path(None, Some((1.0, [1, 2, 3, 4]))), 18),
+            (empty_run, MIN_GLYPHS_ITEM_BYTES),
+        ] {
+            assert_eq!(
+                layout_frame(&repeated(&item, 1)).len(),
+                header + bytes,
+                "{item:?}"
+            );
+        }
+        assert_eq!(MIN_ITEM_BYTES, 6);
+    }
+
+    #[test]
+    fn layouts_of_empty_paths_round_trip() {
+        // `#for i in range(2000) { rotate(1deg, text("\u{2003}")) }` lays out 2,000 empty
+        // filled paths, 10 bytes each: under the 21 bytes a glyph run takes, which the item
+        // count used to be checked against.
+        for item in [
+            empty_path(None, None),
+            empty_path(Some([0, 0, 0, 255]), None),
+            empty_path(None, Some((0.5, [0, 0, 0, 255]))),
+            empty_path(Some([0, 0, 0, 255]), Some((0.5, [1, 2, 3, 4]))),
+        ] {
+            for n in [1, 2, 2000, MAX_LAYOUT_PATH_ELEMENTS / 2] {
+                let layout = repeated(&item, n);
+                assert_eq!(
+                    decode_response(&layout_frame(&layout)),
+                    Ok(Ok(Arc::new(layout))),
+                    "{n} x {item:?}"
+                );
+            }
+        }
+        // Every truncation of a frame of small items is still caught.
+        let frame = layout_frame(&repeated(&empty_path(None, None), 3));
+        for len in 0..frame.len() {
+            assert!(decode_response(&frame[..len]).is_err(), "cut at {len}");
+        }
+    }
+
+    #[test]
+    fn counts_past_the_caps_are_too_large_before_anything_is_read() {
+        // More empty paths than the cap: too large, from the count alone.
+        let layout = repeated(&empty_path(None, None), MAX_ITEMS + 1);
+        let frame = layout_frame(&layout);
+        assert_eq!(decode_response(&frame), Ok(Err(MathError::TooLarge)));
+        // And as soon as the running count passes the cap, whatever follows.
+        let mut frame = layout_frame(&repeated(
+            &empty_path(None, None),
+            MAX_LAYOUT_PATH_ELEMENTS + 1,
+        ));
+        frame.extend_from_slice(b"anything");
+        assert_eq!(decode_response(&frame), Ok(Err(MathError::TooLarge)));
+        // A glyph run claiming more glyphs than the cap, but no more than the frame holds.
+        let mut frame = vec![RESPONSE_LAYOUT];
+        for v in [1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0] {
+            put_f64(&mut frame, v);
+        }
+        frame.extend_from_slice(&1u32.to_le_bytes());
+        frame.push(ITEM_GLYPHS);
+        frame.extend_from_slice(&1u32.to_le_bytes());
+        put_f64(&mut frame, 20.0);
+        frame.extend_from_slice(&[0, 0, 0, 255]);
+        let glyphs = MAX_LAYOUT_GLYPHS + 1;
+        frame.extend_from_slice(&u32::try_from(glyphs).unwrap().to_le_bytes());
+        frame.resize(frame.len() + glyphs * GLYPH_BYTES, 0);
+        assert_eq!(decode_response(&frame), Ok(Err(MathError::TooLarge)));
+    }
+
     #[test]
     fn lying_counts_are_rejected_before_allocating() {
         let mut frame = vec![RESPONSE_LAYOUT];
@@ -700,6 +880,14 @@ mod tests {
             put_f64(&mut frame, v);
         }
         frame.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(
+            decode_response(&frame),
+            Err(ProtocolError("count larger than the frame"))
+        );
+        // One item more than the bytes left could hold at 6 bytes each.
+        frame.truncate(frame.len() - 4);
+        frame.extend_from_slice(&3u32.to_le_bytes());
+        frame.extend_from_slice(&[ITEM_PATH, 0, 0, 0, 0, 0, ITEM_PATH, 0, 0, 0, 0, 0]);
         assert_eq!(
             decode_response(&frame),
             Err(ProtocolError("count larger than the frame"))

@@ -15,7 +15,7 @@ use crate::fonts::{asset_index, glyph_box};
 use crate::world::BASELINE_MARKER;
 use crate::{
     MAX_LAYOUT_EXTENT_PT, MAX_LAYOUT_GLYPHS, MAX_LAYOUT_PATH_ELEMENTS, MathError, MathGlyph,
-    MathItem, MathLayout,
+    MathItem, MathLayout, MathSummary,
 };
 
 /// Fallback colour for gradients and tilings, which a layout can't carry.
@@ -84,6 +84,19 @@ impl Counts {
             }
         }
         counts
+    }
+}
+
+/// `layout` without its items.
+pub(crate) fn summary(layout: &MathLayout) -> MathSummary {
+    let counts = Counts::of(layout);
+    MathSummary {
+        width: layout.width,
+        height: layout.height,
+        baseline: layout.baseline,
+        ink: layout.ink,
+        glyphs: counts.glyphs,
+        path_elements: counts.weighted_elements,
     }
 }
 

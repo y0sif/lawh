@@ -8,7 +8,7 @@ use kurbo::Point;
 use super::scan::{Scan, Stop, scan};
 use super::{FormatError, MAX_FILE_BYTES};
 use crate::board::{
-    Board, Object, ObjectId, Shape, is_valid_coordinate, is_valid_size, is_valid_text,
+    Board, Object, ObjectId, Shape, TextProblem, check_text, is_valid_coordinate, is_valid_size,
 };
 
 /// The format version this build reads and writes.
@@ -16,9 +16,11 @@ const VERSION: i128 = 1;
 
 /// Reads a `.lawh` file. Accepts LF and CRLF line endings.
 ///
-/// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed, and a file with
+/// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed, a file with
 /// more than [`MAX_OBJECTS`](crate::board::MAX_OBJECTS) objects at its first object over the
-/// limit.
+/// limit, and one with more than
+/// [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS) characters of text at the
+/// content that goes over it.
 pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     if src.len() > MAX_FILE_BYTES {
         return Err(FormatError::FileTooLarge { bytes: src.len() });
@@ -357,13 +359,19 @@ impl Reader<'_> {
                         kind: kind.name().to_owned(),
                     });
                 };
-                if !is_valid_text(s) {
+                let chars = check_text(s).map_err(|problem| {
                     let (line, column) = here();
-                    return Err(FormatError::TextTooLong {
-                        line,
-                        column,
-                        kind: kind.name().to_owned(),
-                    });
+                    let kind = kind.name().to_owned();
+                    match problem {
+                        TextProblem::TooLong => FormatError::TextTooLong { line, column, kind },
+                        TextProblem::TooManyLines => {
+                            FormatError::TooManyLines { line, column, kind }
+                        }
+                    }
+                })?;
+                if !board.has_room_for_text(chars) {
+                    let (line, column) = here();
+                    return Err(FormatError::TooMuchText { line, column });
                 }
                 parts.content = Some(s.clone());
                 continue;

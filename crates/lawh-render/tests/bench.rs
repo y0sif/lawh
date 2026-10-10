@@ -75,7 +75,7 @@ const LIMITS_BUDGET: Duration = Duration::from_millis(100);
 
 /// Frames of a board at the core's limits, at the app's highest zoom (20) and scale factor 2,
 /// looking at the places where its huge shapes cross the view. Asserts the release budget for
-/// every frame. Laying out the board's 200,000 characters of text happens once, when the board
+/// every frame. Laying out the board's 10,000 characters of text happens once, when the board
 /// is opened, and is timed separately.
 #[test]
 #[ignore = "timing only; run with --release -- --ignored --nocapture"]
@@ -566,5 +566,357 @@ fn grid_frame_time() {
                 ms(median)
             );
         }
+    }
+}
+
+/// A `kB` field of `/proc/self/status`, in MiB; 0 where there is none.
+fn status_mib(field: &str) -> f64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|kb| kb.parse::<f64>().ok())
+        .map_or(0.0, |kb| kb / 1024.0)
+}
+
+/// Resets this process's peak resident memory (`VmHWM`) to what it uses now (Linux).
+fn reset_peak_rss() {
+    let _ = std::fs::write("/proc/self/clear_refs", "5");
+}
+
+/// `n` characters of words in lines of about `per_line` characters (the line breaks count),
+/// starting with `tag` so no two texts are the same.
+fn words(tag: usize, n: usize, per_line: usize) -> String {
+    cycled(tag, n, per_line, WORDS)
+}
+
+/// `n` characters cycling through `alphabet`, in lines of about `per_line` characters,
+/// starting with `tag`.
+fn cycled(tag: usize, n: usize, per_line: usize, alphabet: &str) -> String {
+    let mut out = format!("{tag} ");
+    let mut count = out.chars().count();
+    let mut column = count;
+    let mut chars = alphabet.chars().cycle();
+    while count < n {
+        if column + 1 >= per_line {
+            out.push('\n');
+            column = 0;
+        } else {
+            out.push(chars.next().unwrap());
+            column += 1;
+        }
+        count += 1;
+    }
+    out
+}
+
+/// The text caps the worst boards are built to: from `LAWH_CAP_CHARS`, `LAWH_CAP_LINES` and
+/// `LAWH_CAP_TOTAL`, or lawh-core's.
+fn text_caps() -> (usize, usize, usize) {
+    let var = |name: &str, default: usize| {
+        std::env::var(name)
+            .ok()
+            .map_or(default, |v| v.trim().parse().unwrap())
+    };
+    (
+        var("LAWH_CAP_CHARS", lawh_core::board::MAX_TEXT_CHARS),
+        var("LAWH_CAP_LINES", lawh_core::board::MAX_TEXT_LINES),
+        var("LAWH_CAP_TOTAL", lawh_core::board::MAX_BOARD_TEXT_CHARS),
+    )
+}
+
+/// How [`text_worst_boards`] fills one board.
+struct TextCase {
+    name: &'static str,
+    /// Characters in each text.
+    per_text: usize,
+    /// The `i`th text of `n` characters.
+    content: Box<dyn Fn(usize, usize) -> String>,
+    /// Failing math sources instead of texts.
+    math: bool,
+}
+
+/// Words for the cases below.
+const WORDS: &str = "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ";
+
+/// The kinds of text [`text_worst_boards`] tries, for texts of at most `chars` characters and
+/// `lines` lines, and boards of at most `total` characters.
+fn text_cases(chars: usize, lines: usize, total: usize) -> Vec<TextCase> {
+    // Lines just long enough that a text of `n` characters has fewer than `lines` of them.
+    let per_line = move |n: usize| n.div_ceil(lines - 1).max(2);
+    let case = |name: &'static str, per_text: usize, math: bool, content| TextCase {
+        name,
+        per_text,
+        content,
+        math,
+    };
+    // `alphabet` over as many lines as a text may have, or in lines of 75 characters or more.
+    let cycling = |name: &'static str, alphabet: &'static str, max_lines: bool| {
+        let content = move |i, n| {
+            let line = if max_lines {
+                per_line(n)
+            } else {
+                per_line(n).max(75)
+            };
+            cycled(i, n, line, alphabet)
+        };
+        case(name, chars, false, Box::new(content))
+    };
+    vec![
+        // Line breaks only: the most lines per character.
+        case(
+            "newlines",
+            chars.min(lines - 1),
+            false,
+            Box::new(|i, n| format!("{i}{}", "\n".repeat(n.saturating_sub(i.to_string().len())))),
+        ),
+        cycling("words, max lines", WORDS, true),
+        case(
+            "one line",
+            chars,
+            false,
+            Box::new(|i, n| words(i, n, usize::MAX)),
+        ),
+        // The board's text spread over every object.
+        case(
+            "small texts",
+            total / lawh_core::board::MAX_OBJECTS,
+            false,
+            Box::new(|i, n| words(i, n, 75)),
+        ),
+        // Characters the bundled font has no glyph for.
+        cycling("cjk", "漢字仮名交じり文", false),
+        // Combining marks stacked on one letter.
+        cycling(
+            "combining",
+            "a\u{301}\u{302}\u{303}\u{304}\u{305}\u{306}\u{307}",
+            false,
+        ),
+        // Right-to-left and left-to-right words in turn: a run per word.
+        cycling("bidi", "ab אב ", false),
+        // The direction changing at every character: a run per character.
+        cycling("bidi per char", "aא", false),
+        cycling("bidi per char, max lines", "aא", true),
+        // The script changing at every character.
+        cycling("scripts per char", "aαа漢ا", false),
+        // Arabic, which joins its letters.
+        cycling("arabic", "سلام عليكم ", false),
+        // Emoji joined into families, which the font doesn't have.
+        cycling("emoji", "👨\u{200D}👩\u{200D}👧\u{FE0F}", false),
+        // Formulas that fail, drawn as their source.
+        case(
+            "failing math, newlines",
+            chars.min(lines - 1),
+            true,
+            Box::new(|i, n| {
+                let head = format!("#x{i}");
+                let breaks = n.saturating_sub(head.len());
+                format!("{head}{}", "\n".repeat(breaks))
+            }),
+        ),
+        case(
+            "failing math, words",
+            chars,
+            true,
+            Box::new(move |i, n| format!("#x{}", words(i, n.saturating_sub(2), per_line(n)))),
+        ),
+    ]
+}
+
+/// The costliest boards of text and failing math the text caps allow, for the cases whose name
+/// starts with one of the comma-separated `kinds` (all if empty): as many texts as the
+/// board-wide cap and the object cap leave, each as long as the per-text caps allow, all
+/// different (so no layout is shared), stacked on one spot so every one of them is on screen
+/// in every view.
+fn text_worst_boards(
+    chars: usize,
+    lines: usize,
+    total: usize,
+    kinds: &str,
+) -> Vec<(String, lawh_core::Board)> {
+    use lawh_core::{Board, Object, ObjectId, Point, Shape};
+
+    let mut boards = Vec::new();
+    for case in text_cases(chars, lines, total) {
+        if !kinds.is_empty() && !kinds.split(',').any(|k| case.name.starts_with(k)) {
+            continue;
+        }
+        let per_text = case.per_text.max(1);
+        let count = (total / per_text).min(lawh_core::board::MAX_OBJECTS);
+        let mut board = Board::new();
+        for i in 0..count {
+            let text = (case.content)(i, per_text);
+            let shape = if case.math {
+                Shape::Math {
+                    at: Point::ZERO,
+                    src: text,
+                }
+            } else {
+                Shape::Text {
+                    at: Point::ZERO,
+                    text,
+                }
+            };
+            board
+                .insert(Object::new(ObjectId::new(format!("o{i}")).unwrap(), shape))
+                .unwrap();
+        }
+        boards.push((format!("{} {count}x{per_text}", case.name), board));
+    }
+    boards
+}
+
+/// Opening and drawing the worst boards of text the text caps allow ([`text_worst_boards`]), which
+/// `lawh_core::board::{MAX_TEXT_CHARS, MAX_TEXT_LINES, MAX_BOARD_TEXT_CHARS}` are chosen from:
+/// reading the file, `board_bounds` on a new renderer (it lays out every text, as the app does on
+/// open) with its extra peak memory, then frames fitted, at zoom 0.1, 1 and 20 at the texts'
+/// corner, at 1920x1080 and at 2880x1800 with scale factor 2 (resized/steady, as
+/// [`frame_budget_worst_cases`]). Failing math is compiled first, so it is drawn as its source.
+/// Run one case per process for clean memory numbers; `LAWH_BENCH_KINDS` picks cases by name
+/// prefix, `LAWH_CAP_CHARS`, `LAWH_CAP_LINES` and `LAWH_CAP_TOTAL` try other caps.
+/// `LAWH_BENCH_KINDS=newlines nice -n 19 cargo test --release -p lawh-render --test bench -- --ignored --nocapture text_caps`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn text_caps_worst_cases() {
+    use std::fmt::Write as _;
+
+    let (chars, lines, total) = text_caps();
+    println!("caps: {chars} chars and {lines} lines a text, {total} chars a board");
+    let kinds = std::env::var("LAWH_BENCH_KINDS").unwrap_or_default();
+    let mut worst_frame = (Duration::ZERO, String::new());
+    let mut worst_open = (Duration::ZERO, String::new());
+    for (name, board) in text_worst_boards(chars, lines, total, &kinds) {
+        let file = lawh_core::to_lawh(&board);
+        let t = Instant::now();
+        let read = lawh_core::from_lawh(&file);
+        let parsed = t.elapsed();
+        if let Ok(read) = read {
+            assert_eq!(read, board);
+        } else {
+            println!("{name}: the file does not read back: {read:?}");
+        }
+
+        let mut renderer = Renderer::new_trusted();
+        let has_math = board
+            .objects()
+            .iter()
+            .any(|o| matches!(o.shape, lawh_core::Shape::Math { .. }));
+        if has_math {
+            renderer.resolve_math(&board);
+        }
+        // Not math: a new renderer for the bounds, as on open.
+        let mut fresh = Renderer::new_trusted();
+        black_box(fresh.board_bounds(&lawh_core::Board::default()));
+        let rss_before = status_mib("VmRSS:");
+        reset_peak_rss();
+        let t = Instant::now();
+        let bounds = fresh.board_bounds(&board).unwrap();
+        let bounded = t.elapsed();
+        let peak_extra = status_mib("VmHWM:") - rss_before;
+        let kept_extra = status_mib("VmRSS:") - rss_before;
+        drop(fresh);
+        if bounded > worst_open.0 {
+            worst_open = (bounded, name.clone());
+        }
+        println!(
+            "{name:<34} file {:>8} bytes, read {:.1} ms | board_bounds {:.1} ms, +{:.0} MiB peak, +{:.0} MiB kept",
+            file.len(),
+            ms(parsed),
+            ms(bounded),
+            peak_extra,
+            kept_extra,
+        );
+        renderer.board_bounds(&board);
+        for (width, height, scale) in [(1920u16, 1080u16, 1.0), (2880, 1800, 2.0)] {
+            let mut line = format!("    {width}x{height}@{scale}");
+            let fit = Viewport::fit(bounds, width, height, scale);
+            let corner = |zoom: f64| {
+                let vp = Viewport::new(kurbo::Point::ZERO, zoom, width, height, scale);
+                let unit = vp.px_per_unit();
+                // The texts' top-left corner a little in from the view's.
+                let center = kurbo::Point::new(
+                    f64::from(width) / 2.0 / unit - 1.0,
+                    f64::from(height) / 2.0 / unit - 1.0,
+                );
+                Viewport::new(center, zoom, width, height, scale)
+            };
+            for (label, vp) in [
+                ("fit", fit),
+                ("z0.1", corner(0.1)),
+                ("z1", corner(1.0)),
+                ("z20", corner(20.0)),
+            ] {
+                let (resized, median) = resized_and_steady(&mut renderer, &board, &vp);
+                let stats = renderer.last_frame();
+                write!(
+                    line,
+                    " | {label} {:.1}/{:.1} ms ({}d {}g)",
+                    ms(resized),
+                    ms(median),
+                    stats.drawn,
+                    stats.downgraded,
+                )
+                .unwrap();
+                let slowest = resized.max(median);
+                if slowest > worst_frame.0 {
+                    worst_frame = (slowest, format!("{name} {width}x{height} {label}"));
+                }
+            }
+            println!("{line}");
+        }
+    }
+    println!(
+        "worst board_bounds: {:.1} ms ({}); worst frame: {:.1} ms ({})",
+        ms(worst_open.0),
+        worst_open.1,
+        ms(worst_frame.0),
+        worst_frame.1
+    );
+}
+
+/// Time to read `.lawh` files of `LAWH_READ_BYTES` bytes (default `MAX_FILE_BYTES`) that hold
+/// no objects, or few: the cost of `from_lawh` alone, which grows with the file, not the board.
+/// `LAWH_READ_BYTES=1048576 nice -n 19 cargo test --release -p lawh-render --test bench -- --ignored --nocapture read_time`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn read_time_of_filler_files() {
+    let max: usize = std::env::var("LAWH_READ_BYTES")
+        .map_or(lawh_core::format::MAX_FILE_BYTES, |v| {
+            v.trim().parse().unwrap()
+        });
+    let header = "lawh version=1\n";
+    let fill = |unit: &str| {
+        let mut s = header.to_owned();
+        while s.len() + unit.len() <= max {
+            s.push_str(unit);
+        }
+        s
+    };
+    let cases = [
+        ("spaces", fill(" ")),
+        ("block comments", fill("/* lorem ipsum dolor sit amet */\n")),
+        ("line breaks", fill("\n")),
+        ("short line comments", fill("//\n")),
+        (
+            "line comments",
+            fill("// lorem ipsum dolor sit amet consectetur adipiscing elit\n"),
+        ),
+        ("slashdashed nodes", fill("/-r\n")),
+        ("slashdashed rects", fill("/-rect id=r1 x=0 y=0 w=1 h=1\n")),
+        (
+            "slashdashed texts",
+            fill(&format!("/-text id=t1 x=0 y=0 \"{}\"\n", "a".repeat(1000))),
+        ),
+    ];
+    for (name, src) in cases {
+        let t = Instant::now();
+        let read = lawh_core::from_lawh(&src);
+        println!(
+            "{name:<20} {:>8} bytes: {:>8.1} ms ({})",
+            src.len(),
+            ms(t.elapsed()),
+            if read.is_ok() { "read" } else { "error" }
+        );
     }
 }

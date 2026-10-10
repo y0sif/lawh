@@ -8,7 +8,7 @@
 use std::fmt::Write as _;
 
 use insta::assert_snapshot;
-use lawh_core::board::{MAX_OBJECTS, MAX_TEXT_CHARS};
+use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES};
 use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
 use lawh_core::{FormatError, from_lawh};
 
@@ -446,6 +446,74 @@ fn text_over_the_length_limit() {
         "x".repeat(MAX_TEXT_CHARS + 1)
     ));
     assert_snapshot!(e.to_string());
+}
+
+#[test]
+fn text_over_the_line_limit() {
+    for kind in ["text", "math"] {
+        // Escaped line breaks, and a KDL multi-line string: one byte a line break.
+        let escaped = "\\n".repeat(MAX_TEXT_LINES - 1);
+        let lines = vec!["x"; MAX_TEXT_LINES].join("\n");
+        for at_limit in [format!("\"{escaped}\""), format!("\"\"\"\n{lines}\n\"\"\"")] {
+            let ok = format!("{HEADER}{kind} id=t1 x=0 y=0 {at_limit}\n");
+            assert_eq!(from_lawh(&ok).map(|b| b.len()), Ok(1), "{kind}");
+        }
+        for over in [
+            format!("\"{escaped}\\r\""),
+            format!("\"\"\"\n{lines}\nx\n\"\"\""),
+        ] {
+            let e = body_err(&format!("{kind} id=t1 x=0 y=0 {over}\n"));
+            assert_eq!(
+                e,
+                FormatError::TooManyLines {
+                    line: 2,
+                    column: 20,
+                    kind: kind.to_owned()
+                }
+            );
+        }
+    }
+    let e = body_err(&format!(
+        "text id=t1 x=0 y=0 \"{}\"\n",
+        "\\n".repeat(MAX_TEXT_LINES)
+    ));
+    assert_snapshot!(e.to_string());
+}
+
+#[test]
+fn too_much_text() {
+    // Texts and math sources count together; the error points at the content over the limit.
+    let full = MAX_BOARD_TEXT_CHARS / MAX_TEXT_CHARS;
+    let left = MAX_BOARD_TEXT_CHARS - full * MAX_TEXT_CHARS;
+    let mut src = HEADER.to_owned();
+    for i in 0..full {
+        let kind = if i % 2 == 0 { "text" } else { "math" };
+        writeln!(
+            src,
+            "{kind} id=t{i} x=0 y=0 \"{}\"",
+            "π".repeat(MAX_TEXT_CHARS)
+        )
+        .unwrap();
+    }
+    writeln!(src, "circle id=c1 x=0 y=0 r=1").unwrap();
+    let at_limit = format!("{src}math x=0 y=0 id=m1 \"{}\"\n", "x".repeat(left));
+    let board = from_lawh(&at_limit).unwrap();
+    assert_eq!(board.text_chars(), MAX_BOARD_TEXT_CHARS);
+    let e = err(&format!(
+        "{src}math x=0 y=0 id=m1 \"{}\"\n",
+        "x".repeat(left + 1)
+    ));
+    assert_eq!(
+        e,
+        FormatError::TooMuchText {
+            line: full + 3,
+            column: 20
+        }
+    );
+    assert_snapshot!(e.to_string());
+    // Empty text still fits on a full board.
+    let empty = format!("{at_limit}text id=t-empty x=0 y=0 \"\"\n");
+    assert_eq!(from_lawh(&empty).map(|b| b.len()), Ok(full + 3));
 }
 
 /// `n` circles, one per line, with ids `c0`, `c1`, ...

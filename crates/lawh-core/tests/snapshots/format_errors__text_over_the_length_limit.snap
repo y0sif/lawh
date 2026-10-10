@@ -2,4 +2,4 @@
 source: crates/lawh-core/tests/format_errors.rs
 expression: e.to_string()
 ---
-2:20: the content of `text` is longer than 100000 characters
+2:20: the content of `text` is longer than 5000 characters

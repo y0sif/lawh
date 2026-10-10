@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+11:20: too much text; a board holds at most 40000 characters of text and math in all

@@ -21,6 +21,8 @@
 //! [`MAX_COMMENT_DEPTH`] levels, and numbers, texts and the object count to the board's limits
 //! ([`MAX_COORDINATE`](crate::board::MAX_COORDINATE), [`MAX_SIZE`](crate::board::MAX_SIZE),
 //! [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS),
+//! [`MAX_TEXT_LINES`](crate::board::MAX_TEXT_LINES),
+//! [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS),
 //! [`MAX_OBJECTS`](crate::board::MAX_OBJECTS)).
 
 mod error;

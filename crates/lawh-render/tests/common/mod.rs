@@ -24,12 +24,12 @@ pub fn pixel(buf: &[u8], width: u16, x: u16, y: u16) -> [u8; 4] {
 
 /// A board at the limits `lawh-core` allows: shapes as large and as far out as a `.lawh` file
 /// may hold them (coordinates ±1e6, sizes 1e6), one text of the longest length on one line and
-/// one spread over many lines, and math at the far edge.
+/// one of the most lines, and math at the far edge.
 pub fn limits_board() -> Board {
-    use lawh_core::board::MAX_TEXT_CHARS;
+    use lawh_core::board::{MAX_TEXT_CHARS, MAX_TEXT_LINES};
     let words = "lorem ipsum dolor sit amet ".repeat(MAX_TEXT_CHARS / 27 + 1);
     let one_line: String = words.chars().take(MAX_TEXT_CHARS).collect();
-    let many_lines = "line\\n".repeat(MAX_TEXT_CHARS / 5);
+    let many_lines = vec!["lorem ips"; MAX_TEXT_LINES].join("\\n");
     from_lawh(&format!(
         "lawh version=1\n\
          ellipse id=e1 x=0 y=0 rx=1000000 ry=1000000\n\

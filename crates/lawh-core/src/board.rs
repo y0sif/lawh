@@ -3,7 +3,8 @@
 //! Coordinates are grid units (`f64`) with y growing down, like a screen.
 //!
 //! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`]), every
-//! text within [`MAX_TEXT_CHARS`] and the number of objects within [`MAX_OBJECTS`], so bounds,
+//! text within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`], all its text together within
+//! [`MAX_BOARD_TEXT_CHARS`] and the number of objects within [`MAX_OBJECTS`], so bounds,
 //! zoom-to-fit and rendering never meet values that overflow or allocate without limit. The file
 //! reader enforces the same limits.
 
@@ -74,8 +75,46 @@ pub const MAX_COORDINATE: f64 = 1_000_000.0;
 /// absolute value), so the board rejects it instead of storing it.
 pub const MAX_SIZE: f64 = 1_000_000.0;
 
-/// Most characters (Unicode scalar values) in the content of a text or math object.
-pub const MAX_TEXT_CHARS: usize = 100_000;
+/// Most characters (Unicode scalar values) in the content of one text or math object.
+///
+/// Real whiteboard text is labels and short paragraphs, and math sources are shorter still: a
+/// paragraph is about 1,000 characters. Every text is laid out again whenever it changes, and a
+/// text of 5,000 characters that changes script at every character (the costliest kind
+/// measured, see [`MAX_BOARD_TEXT_CHARS`]) takes about 9 ms to lay out. Math sources count the
+/// same: one that fails to compile is drawn as its source.
+pub const MAX_TEXT_CHARS: usize = 5_000;
+
+/// Most lines in the content of one text or math object: one more than its line breaks.
+///
+/// Line feed, carriage return, CRLF (one break), vertical tab, form feed, next line (U+0085),
+/// line separator (U+2028) and paragraph separator (U+2029) each break a line, as they do in
+/// KDL and in the renderer's text layout. 500 lines of text are about 300 grid units tall, far
+/// past any note on a whiteboard. A line costs about 0.5 us and 190 bytes to lay out even when
+/// it is empty, so a text of nothing but line breaks is the cheapest way to make many lines;
+/// [`MAX_BOARD_TEXT_CHARS`] bounds them on the whole board.
+pub const MAX_TEXT_LINES: usize = 500;
+
+/// Most characters of text and math source on one board, all objects together.
+///
+/// Opening a board lays out every text and every formula's source (drawn until the formula
+/// compiles) to find the board's bounds, and a frame looks at every text on screen. Measured
+/// with `text_caps_worst_cases` in lawh-render's `tests/bench.rs` (Linux `x86_64`, release,
+/// 2026-10-11) on the worst boards these caps allow, all text stacked on one spot:
+///
+/// | board | laying out on open | extra memory | slowest frame |
+/// |---|---|---|---|
+/// | 8 texts of 5,000 characters, the direction changing at every one, 455 lines each | 69 ms | +10 MiB | 13 ms |
+/// | 8 texts of 5,000 characters, the script changing at every one | 68 ms | +14 MiB | 9 ms |
+/// | 80 texts of 499 line breaks | 22 ms | +9 MiB | 8 ms |
+/// | 500 texts of 80 characters of words | 26 ms | +4 MiB | 19 ms |
+/// | 80 failing formulas of 499 line breaks, drawn as their source | 25 ms | +9 MiB | 9 ms |
+/// | before these caps: 83 texts of 100,000 line breaks (an 8.3 MB file) | 4,203 ms | +1,475 MiB | 167 ms |
+///
+/// Laying out costs from 0.4 us a character for plain words to 1.7 us for text that changes
+/// script or direction at every character, so the cap keeps opening under about 100 ms even
+/// then, and frames stay well inside the renderer's budget. Real boards hold a few thousand
+/// characters of text.
+pub const MAX_BOARD_TEXT_CHARS: usize = 40_000;
 
 /// Most objects a board holds.
 ///
@@ -91,8 +130,9 @@ pub const MAX_TEXT_CHARS: usize = 100_000;
 /// | 1,000 (before the cap) | 130 ms | 141 ms | 49 ms |
 ///
 /// The renderer has a frame budget on top of this, so the cap errs on the generous side of a
-/// 50 ms frame. Real boards hold tens to hundreds of objects. Text is bounded per object by
-/// [`MAX_TEXT_CHARS`], not by this: a 75-character line costs about 0.4 ms to draw fitted.
+/// 50 ms frame. Real boards hold tens to hundreds of objects. Text is bounded by
+/// [`MAX_TEXT_CHARS`], [`MAX_TEXT_LINES`] and [`MAX_BOARD_TEXT_CHARS`], not by this: a
+/// 75-character line costs about 0.4 ms to draw fitted.
 pub const MAX_OBJECTS: usize = 500;
 
 /// True when `v` is a coordinate the board accepts. False for NaN.
@@ -105,10 +145,39 @@ pub(crate) fn is_valid_size(v: f64) -> bool {
     v > 0.0 && v <= MAX_SIZE
 }
 
-/// True when `s` has at most [`MAX_TEXT_CHARS`] characters.
-pub(crate) fn is_valid_text(s: &str) -> bool {
-    // Only the bytes could make it too long, so skip counting short strings.
-    s.len() <= MAX_TEXT_CHARS || s.chars().nth(MAX_TEXT_CHARS).is_none()
+/// Why a text or math content is over a per-object cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextProblem {
+    /// More than [`MAX_TEXT_CHARS`] characters.
+    TooLong,
+    /// More than [`MAX_TEXT_LINES`] lines.
+    TooManyLines,
+}
+
+/// The number of characters in `s` when it is within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`].
+/// Stops counting at the first cap passed.
+pub(crate) fn check_text(s: &str) -> Result<usize, TextProblem> {
+    let mut chars = 0;
+    let mut lines = 1;
+    let mut after_cr = false;
+    for c in s.chars() {
+        chars += 1;
+        if chars > MAX_TEXT_CHARS {
+            return Err(TextProblem::TooLong);
+        }
+        match c {
+            '\n' if after_cr => {}
+            '\n' | '\r' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}' => {
+                lines += 1;
+                if lines > MAX_TEXT_LINES {
+                    return Err(TextProblem::TooManyLines);
+                }
+            }
+            _ => {}
+        }
+        after_cr = c == '\r';
+    }
+    Ok(chars)
 }
 
 /// One object on the board.
@@ -198,9 +267,16 @@ impl Shape {
             .is_none_or(|s| s.into_iter().all(is_valid_size))
     }
 
-    /// The text or math content has at most [`MAX_TEXT_CHARS`] characters.
+    /// The text or math content has at most [`MAX_TEXT_CHARS`] characters and at most
+    /// [`MAX_TEXT_LINES`] lines. True for kinds without content.
     pub fn content_in_range(&self) -> bool {
-        self.content().is_none_or(is_valid_text)
+        self.content().is_none_or(|s| check_text(s).is_ok())
+    }
+
+    /// Characters (Unicode scalar values) of text or math source: what the shape counts
+    /// towards [`MAX_BOARD_TEXT_CHARS`]. 0 for kinds without content.
+    pub fn content_chars(&self) -> usize {
+        self.content().map_or(0, |s| s.chars().count())
     }
 }
 
@@ -219,6 +295,14 @@ pub enum BoardError {
     InvalidSize(ObjectId),
     #[error("object `{0}` has more than {max} characters of text", max = MAX_TEXT_CHARS)]
     TextTooLong(ObjectId),
+    #[error("object `{0}` has more than {max} lines of text", max = MAX_TEXT_LINES)]
+    TooManyLines(ObjectId),
+    #[error(
+        "object `{0}` would be too much text: a board holds at most {max} characters of text \
+         and math in all",
+        max = MAX_BOARD_TEXT_CHARS
+    )]
+    TooMuchText(ObjectId),
     #[error("object `{0}` would be one too many: a board holds at most {max} objects", max = MAX_OBJECTS)]
     TooManyObjects(ObjectId),
 }
@@ -229,6 +313,8 @@ pub struct Board {
     objects: Vec<Object>,
     /// Position of each id in `objects`.
     index: HashMap<ObjectId, usize>,
+    /// Characters of text and math source in `objects`, for [`MAX_BOARD_TEXT_CHARS`].
+    text_chars: usize,
 }
 
 impl Board {
@@ -260,7 +346,8 @@ impl Board {
     /// Adds `object` on top of the others.
     ///
     /// Fails if its id is already used, any of its numbers is not finite or outside the limits
-    /// ([`MAX_COORDINATE`], [`MAX_SIZE`]), its text is longer than [`MAX_TEXT_CHARS`], or the
+    /// ([`MAX_COORDINATE`], [`MAX_SIZE`]), its text is longer than [`MAX_TEXT_CHARS`] or
+    /// [`MAX_TEXT_LINES`], it would take the board's text past [`MAX_BOARD_TEXT_CHARS`], or the
     /// board already holds [`MAX_OBJECTS`] objects.
     pub fn insert(&mut self, object: Object) -> Result<(), BoardError> {
         let shape = &object.shape;
@@ -274,10 +361,13 @@ impl Board {
             Some(BoardError::CoordinateOutOfRange)
         } else if !shape.sizes_in_range() {
             Some(BoardError::InvalidSize)
-        } else if !shape.content_in_range() {
-            Some(BoardError::TextTooLong)
         } else {
-            None
+            match shape.content().map(check_text) {
+                Some(Err(TextProblem::TooLong)) => Some(BoardError::TextTooLong),
+                Some(Err(TextProblem::TooManyLines)) => Some(BoardError::TooManyLines),
+                Some(Ok(chars)) if !self.has_room_for_text(chars) => Some(BoardError::TooMuchText),
+                Some(Ok(_)) | None => None,
+            }
         };
         if let Some(error) = problem {
             return Err(error(object.id));
@@ -291,9 +381,21 @@ impl Board {
         self.objects.len() >= MAX_OBJECTS
     }
 
+    /// Characters of text and math source on the board, all objects together; at most
+    /// [`MAX_BOARD_TEXT_CHARS`].
+    pub fn text_chars(&self) -> usize {
+        self.text_chars
+    }
+
+    /// True when `chars` more characters of text fit within [`MAX_BOARD_TEXT_CHARS`].
+    pub fn has_room_for_text(&self, chars: usize) -> bool {
+        chars <= MAX_BOARD_TEXT_CHARS.saturating_sub(self.text_chars)
+    }
+
     /// Adds an object the caller has already checked as [`Board::insert`] does, the object
-    /// count included.
+    /// count and the board's text included.
     pub(crate) fn push_checked(&mut self, object: Object) {
+        self.text_chars = self.text_chars.saturating_add(object.shape.content_chars());
         self.index.insert(object.id.clone(), self.objects.len());
         self.objects.push(object);
     }
@@ -507,15 +609,6 @@ mod tests {
         let mut board = Board::new();
         // Multi-byte characters: the limit counts characters, not bytes.
         let longest = "é".repeat(MAX_TEXT_CHARS);
-        let text = |name: &str, text: String| {
-            Object::new(
-                id(name),
-                Shape::Text {
-                    at: Point::ZERO,
-                    text,
-                },
-            )
-        };
         board.insert(text("t1", longest.clone())).unwrap();
         assert_eq!(
             board.insert(text("t2", format!("{longest}x"))),
@@ -530,6 +623,92 @@ mod tests {
             Err(BoardError::TextTooLong(id("m1")))
         );
         assert_eq!(board.len(), 1);
+    }
+
+    fn text(name: &str, text: String) -> Object {
+        Object::new(
+            id(name),
+            Shape::Text {
+                at: Point::ZERO,
+                text,
+            },
+        )
+    }
+
+    #[test]
+    fn insert_rejects_text_over_the_line_limit() {
+        let mut board = Board::new();
+        // Every kind of line break counts, CRLF once.
+        let breaks = [
+            "\n", "\r", "\r\n", "\u{B}", "\u{C}", "\u{85}", "\u{2028}", "\u{2029}",
+        ];
+        let most: String = breaks
+            .iter()
+            .cycle()
+            .take(MAX_TEXT_LINES - 1)
+            .copied()
+            .collect();
+        board.insert(text("t1", most.clone())).unwrap();
+        assert_eq!(
+            board.insert(text("t2", format!("{most}\n"))),
+            Err(BoardError::TooManyLines(id("t2")))
+        );
+        // A CR then an LF far apart are two breaks.
+        assert_eq!(
+            board.insert(text(
+                "t3",
+                format!("{}\rx\n", "\n".repeat(MAX_TEXT_LINES - 2))
+            )),
+            Err(BoardError::TooManyLines(id("t3")))
+        );
+        board
+            .insert(text("t4", "\r\n".repeat(MAX_TEXT_LINES - 1)))
+            .unwrap();
+        let math = Shape::Math {
+            at: Point::ZERO,
+            src: "x\n".repeat(MAX_TEXT_LINES),
+        };
+        assert_eq!(
+            board.insert(Object::new(id("m1"), math)),
+            Err(BoardError::TooManyLines(id("m1")))
+        );
+        assert_eq!(board.len(), 2);
+    }
+
+    #[test]
+    fn insert_stops_at_the_board_text_limit() {
+        let mut board = Board::new();
+        let full = MAX_BOARD_TEXT_CHARS / MAX_TEXT_CHARS;
+        for i in 0..full {
+            board
+                .insert(text(&format!("t{i}"), "é".repeat(MAX_TEXT_CHARS)))
+                .unwrap();
+        }
+        let left = MAX_BOARD_TEXT_CHARS - full * MAX_TEXT_CHARS;
+        let math = |name: &str, n: usize| {
+            Object::new(
+                id(name),
+                Shape::Math {
+                    at: Point::ZERO,
+                    src: "x".repeat(n),
+                },
+            )
+        };
+        assert_eq!(
+            board.insert(math("m1", left + 1)),
+            Err(BoardError::TooMuchText(id("m1")))
+        );
+        board.insert(math("m2", left)).unwrap();
+        assert_eq!(board.text_chars(), MAX_BOARD_TEXT_CHARS);
+        assert!(!board.has_room_for_text(1));
+        // Objects without text still fit, and so does empty text.
+        board.insert(circle("c1", 1.0)).unwrap();
+        board.insert(text("empty", String::new())).unwrap();
+        assert_eq!(
+            board.insert(text("t-last", "x".to_owned())),
+            Err(BoardError::TooMuchText(id("t-last")))
+        );
+        assert_eq!(board.len(), full + 3);
     }
 
     #[test]
@@ -563,7 +742,16 @@ mod tests {
         );
         assert_eq!(
             BoardError::TextTooLong(id("t1")).to_string(),
-            "object `t1` has more than 100000 characters of text"
+            "object `t1` has more than 5000 characters of text"
+        );
+        assert_eq!(
+            BoardError::TooManyLines(id("t1")).to_string(),
+            "object `t1` has more than 500 lines of text"
+        );
+        assert_eq!(
+            BoardError::TooMuchText(id("t1")).to_string(),
+            "object `t1` would be too much text: a board holds at most 40000 characters of text \
+             and math in all"
         );
         assert_eq!(
             BoardError::TooManyObjects(id("c1")).to_string(),

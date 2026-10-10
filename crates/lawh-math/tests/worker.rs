@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use lawh_math::{DEFAULT_TIMEOUT, MathEngine, MathError, MathStatus, WorkerCommand};
+use lawh_math::{DEFAULT_TIMEOUT, MathEngine, MathError, MathItem, MathStatus, WorkerCommand};
 
 fn worker() -> WorkerCommand {
     WorkerCommand::new(env!("CARGO_BIN_EXE_lawh-math-worker"))
@@ -294,6 +294,29 @@ fn big_real_formulas_lay_out_in_the_worker() {
 }
 
 #[test]
+fn layouts_of_small_items_come_back_from_the_worker() {
+    // Each rotated em space is an empty filled path: 10 bytes on the wire, under the 21 of a
+    // glyph run, which the item count used to be checked against. It came back `Crashed`.
+    let src = r#"#for i in range(2000) { rotate(1deg, text("\u{2003}")) }"#;
+    // Generous: a debug worker on a busy machine is slow.
+    let timeout = Duration::from_secs(30);
+    let in_process = MathEngine::new().with_timeout(timeout).layout(src).unwrap();
+    let empty_paths = in_process
+        .items
+        .iter()
+        .filter(|item| matches!(item, MathItem::Path { path, .. } if path.elements().is_empty()))
+        .count();
+    assert_eq!(empty_paths, 2000);
+    let worker = MathEngine::with_worker(worker()).with_timeout(timeout);
+    let from_worker = worker.layout_blocking(src);
+    assert!(
+        from_worker.as_ref() == Ok(&in_process),
+        "{:?}",
+        from_worker.map(|layout| layout.items.len())
+    );
+}
+
+#[test]
 fn layout_in_worker_mode_goes_through_the_worker() {
     let engine = engine();
     let first = engine.layout("A = pi r^2").unwrap();
@@ -363,4 +386,47 @@ fn run_repro_directory() {
         );
     }
     assert!(engine.layout_blocking("A = pi r^2").is_ok());
+}
+
+/// The review's churn: 40 different formulas at the glyph cap, each a run per glyph (about
+/// 2 MB cached), all asked for on every frame as if all were on screen: together they don't fit
+/// in `MAX_CACHED_LAYOUT_BYTES`. Prints how many compiles it takes to settle and what is left
+/// as outlines. Before `MathStatus::Evicted` this never settled (2,099 compiles in 55 s).
+/// `nice -n 19 cargo test --release -p lawh-math --test worker -- --ignored --nocapture churn`
+#[test]
+#[ignore = "a measurement, not a check; slow in debug"]
+fn measure_churn_of_formulas_that_do_not_fit_the_cache() {
+    let worker = MathEngine::with_worker(worker()).with_timeout(Duration::from_secs(10));
+    let sources: Vec<String> = (0..40)
+        .map(|k| format!("#for i in range({}) {{ box(width: 0pt)[x] }}", 24_999 - k))
+        .collect();
+    let started = Instant::now();
+    let mut last_change = (Instant::now(), worker.compiles());
+    let mut frames = 0;
+    let statuses = loop {
+        frames += 1;
+        let statuses: Vec<MathStatus> = sources.iter().map(|src| worker.request(src)).collect();
+        if worker.compiles() != last_change.1 {
+            last_change = (Instant::now(), worker.compiles());
+        }
+        let settled = !statuses.contains(&MathStatus::Pending)
+            && last_change.0.elapsed() > lawh_math::RECOMPILE_COOLDOWN * 2;
+        if settled || started.elapsed() > Duration::from_secs(300) {
+            break statuses;
+        }
+        std::thread::sleep(Duration::from_millis(16));
+    };
+    let count = |f: fn(&MathStatus) -> bool| statuses.iter().filter(|s| f(s)).count();
+    println!(
+        "{} compiles, the last {:.1} s after the first frame; {} frames in {:.1} s; \
+         {} ready, {} outlines, {} failed",
+        worker.compiles(),
+        last_change.0.duration_since(started).as_secs_f64(),
+        frames,
+        started.elapsed().as_secs_f64(),
+        count(|s| matches!(s, MathStatus::Ready(_))),
+        count(|s| matches!(s, MathStatus::Evicted(_))),
+        count(|s| matches!(s, MathStatus::Failed(_))),
+    );
+    assert!(worker.compiles() <= 80, "{}", worker.compiles());
 }

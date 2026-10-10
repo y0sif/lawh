@@ -1,7 +1,9 @@
 //! Errors from reading a `.lawh` file.
 
 use super::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
-use crate::board::{MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS};
+use crate::board::{
+    MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS, MAX_TEXT_LINES,
+};
 
 /// Why a `.lawh` file could not be read.
 ///
@@ -182,6 +184,22 @@ pub enum FormatError {
         kind: String,
     },
 
+    /// The content of a `text` or `math` node has more than [`MAX_TEXT_LINES`] lines.
+    #[error("{line}:{column}: the content of `{kind}` has more than {MAX_TEXT_LINES} lines")]
+    TooManyLines {
+        line: usize,
+        column: usize,
+        kind: String,
+    },
+
+    /// More than [`MAX_BOARD_TEXT_CHARS`] characters of text and math source in the whole file.
+    /// Points at the content that goes over the limit.
+    #[error(
+        "{line}:{column}: too much text; a board holds at most {MAX_BOARD_TEXT_CHARS} characters \
+         of text and math in all"
+    )]
+    TooMuchText { line: usize, column: usize },
+
     /// More than [`MAX_OBJECTS`] objects. Points at the first object over the limit.
     #[error("{line}:{column}: too many objects; a board holds at most {MAX_OBJECTS}")]
     TooManyObjects { line: usize, column: usize },
@@ -220,7 +238,9 @@ impl FormatError {
             | Self::TooManyObjects { line, column }
             | Self::CoordinateOutOfRange { line, column, .. }
             | Self::InvalidSize { line, column, .. }
-            | Self::TextTooLong { line, column, .. } => (*line, *column),
+            | Self::TextTooLong { line, column, .. }
+            | Self::TooManyLines { line, column, .. }
+            | Self::TooMuchText { line, column } => (*line, *column),
             Self::FileTooLarge { .. } => (1, 1),
         }
     }

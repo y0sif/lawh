@@ -13,7 +13,9 @@
 //! ([`worker_main`]) with a memory cap, and kills it when a compile takes too
 //! long or restarts it when it crashes. [`MathEngine::new`] compiles in this
 //! process, for trusted input only. Either way [`MathEngine`] caches outcomes,
-//! within [`MAX_CACHED_LAYOUT_BYTES`] and [`MAX_CACHED_FAILURES`].
+//! within [`MAX_CACHED_LAYOUT_BYTES`] and [`MAX_CACHED_FAILURES`], and stops
+//! compiling a formula whose layout keeps being pushed out of the cache
+//! ([`MathStatus::Evicted`]).
 //!
 //! A layout that reaches past [`MAX_LAYOUT_EXTENT_PT`], or holds more than
 //! [`MAX_LAYOUT_GLYPHS`] glyphs or [`MAX_LAYOUT_PATH_ELEMENTS`] path elements,
@@ -32,7 +34,8 @@ mod world;
 
 pub use engine::{
     DEFAULT_TIMEOUT, MAX_CACHED_FAILURE_BYTES, MAX_CACHED_FAILURES, MAX_CACHED_LAYOUT_BYTES,
-    MAX_ERROR_MESSAGE_BYTES, MAX_WORKERS, MathEngine, MathStatus, MathWaker,
+    MAX_COMPILES_PER_FORMULA, MAX_ERROR_MESSAGE_BYTES, MAX_FORMULA_RECORDS, MAX_WORKERS,
+    MathEngine, MathStatus, MathWaker, RECOMPILE_COOLDOWN,
 };
 pub use fonts::{FontAsset, fonts};
 pub use process::WorkerCommand;
@@ -117,6 +120,33 @@ pub struct MathLayout {
     pub ink: kurbo::Rect,
     /// What to draw, back to front.
     pub items: Vec<MathItem>,
+}
+
+/// What a formula's layout measures, without what it draws: the engine keeps
+/// this after dropping the layout itself from its cache
+/// ([`MathStatus::Evicted`]), so a formula can still be placed, culled and
+/// drawn as an outline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MathSummary {
+    /// [`MathLayout::width`].
+    pub width: f64,
+    /// [`MathLayout::height`].
+    pub height: f64,
+    /// [`MathLayout::baseline`].
+    pub baseline: f64,
+    /// [`MathLayout::ink`]: cull and fit with this joined with the box.
+    pub ink: kurbo::Rect,
+    /// Glyphs, counted as [`MAX_LAYOUT_GLYPHS`] counts them.
+    pub glyphs: usize,
+    /// Path elements, counted as [`MAX_LAYOUT_PATH_ELEMENTS`] counts them.
+    pub path_elements: usize,
+}
+
+impl MathSummary {
+    /// The summary of `layout`.
+    pub fn of(layout: &MathLayout) -> Self {
+        layout::summary(layout)
+    }
 }
 
 /// One drawable piece of a formula.
