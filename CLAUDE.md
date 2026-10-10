@@ -39,6 +39,10 @@ nice -n 19 cargo clippy --all-targets -- -D warnings
 
 ## Docs
 
+- `docs/architecture.md`: crates, key-press data flow, board model, open design questions (2D cursor, Typst time budget).
+- `docs/tech-stack.md`: every planned dependency with version, licence and reason, plus rejected options. Update it when adding a dependency.
 - `docs/landscape.md`: competitors and differentiation (feeds README, comparison, FAQ).
+- `docs/comparison.md`, `docs/faq.md`: public-facing; keep claims about other tools sourced.
+- `SECURITY.md`: the Typst sandbox (no files, no network, bundled fonts) is a hard rule.
 - `docs/research/`: layer-vs-own audit, hands-on trial kit, KDL spike.
 - `docs/BRAND.md`, `docs/DESIGN.md`: git-ignored maintainer notes. Read them when present.
