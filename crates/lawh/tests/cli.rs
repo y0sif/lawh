@@ -199,7 +199,7 @@ fn oversized_file_is_refused_before_it_is_read() {
     assert_eq!(
         stderr(&out),
         format!(
-            "lawh: {}:1:1: the file is 1073741824 bytes; lawh reads files of up to 8388608 bytes\n",
+            "lawh: {}:1:1: the file is 1073741824 bytes; lawh reads files of up to 1048576 bytes\n",
             board.0.display()
         )
     );
@@ -208,11 +208,11 @@ fn oversized_file_is_refused_before_it_is_read() {
 
 #[test]
 fn file_one_byte_over_the_limit_reports_the_same_error_as_the_reader() {
-    let board = TempBoard::sparse("over", 8 * 1024 * 1024 + 1);
+    let board = TempBoard::sparse("over", 1024 * 1024 + 1);
     let out = lawh(&[board.0.as_os_str()]);
     assert_eq!(out.status.code(), Some(1));
     let err = lawh_core::FormatError::FileTooLarge {
-        bytes: 8 * 1024 * 1024 + 1,
+        bytes: 1024 * 1024 + 1,
     };
     assert_eq!(stderr(&out), format!("lawh: {}:{err}\n", board.0.display()));
 }

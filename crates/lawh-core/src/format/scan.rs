@@ -7,8 +7,7 @@
 //! documents:
 //!
 //! - Nodes have no children: the scan stops at the first `{` outside strings and comments.
-//! - Block comments nest at most [`MAX_COMMENT_DEPTH`] deep, and the `*` and `/` inside them are
-//!   blanked before kdl reads the text, so kdl reads each comment as a single token.
+//! - Block comments nest at most [`MAX_COMMENT_DEPTH`] deep.
 //! - A slashdash `/-` may not apply to another slashdash.
 //! - Anything kdl would reject stops the scan. kdl then reads only the text before it plus the
 //!   one bad token, to word the error, so its error recovery has nothing to recurse over.
@@ -16,6 +15,18 @@
 //! The scan rejects a few exotic forms that kdl accepts (`/- /-`, a keyword running straight
 //! into the next token), and it never accepts text kdl rejects. Property tests below compare the
 //! two on random text.
+//!
+//! Once checked, everything kdl would skip is blanked: comments, slashdashed nodes and entries,
+//! line continuations, runs of spaces, and the newlines between nodes. Each run of them becomes
+//! an empty block comment `/*   */` of the same length (spaces when shorter than `/**/`), so kdl
+//! reads the nodes the file keeps, each ended by its own `;` or newline, and empty comments.
+//!
+//! kdl is slow on filler. In release it takes about 1.2 us a byte of line comment, 2.1 to 4 us a
+//! byte of slashdashed nodes or properties and 0.4 us a newline. It reads spaces at 0.03 us a
+//! byte between nodes and 0.14 us after a node's last entry, and the inside of a block comment
+//! about five times faster, without the recursion once per `*` and `/` it does on a written
+//! comment. Byte offsets do not change, and line and column are always counted in the source, so
+//! error positions stay exact.
 
 use std::borrow::Cow;
 
@@ -27,8 +38,8 @@ const MAX_BAD_TOKEN: usize = 1024;
 
 /// What [`scan`] found.
 pub(super) struct Scan<'a> {
-    /// The text kdl reads: the source with `*` and `/` inside block comments replaced by
-    /// spaces. Byte offsets are the same as in the source.
+    /// The text kdl reads: the source with everything kdl would skip blanked (see the module
+    /// docs). Byte offsets are the same as in the source.
     pub(super) text: Cow<'a, str>,
     /// Why the scan stopped before the end, if it did.
     pub(super) stop: Option<Stop>,
@@ -63,30 +74,43 @@ pub(super) fn scan(src: &str) -> Scan<'_> {
     let mut scanner = Scanner {
         src,
         pos: 0,
-        comments: Vec::new(),
+        blanks: Vec::new(),
     };
     let stop = scanner.document().err();
     Scan {
-        text: blank_comments(src, &scanner.comments),
+        text: blank(src, &scanner.blanks),
         stop,
     }
 }
 
-/// Replaces every `*` and `/` inside the given comment interiors with a space.
-fn blank_comments<'a>(src: &'a str, comments: &[(usize, usize)]) -> Cow<'a, str> {
-    let inside = |&(start, end): &(usize, usize)| src.get(start..end).unwrap_or_default();
-    if !comments.iter().any(|c| inside(c).contains(['*', '/'])) {
+/// Blanks the given ranges of `src`, which are in order, do not overlap, and start and end on
+/// character boundaries: each becomes an empty block comment `/*   */` of the same length, or
+/// spaces when shorter than `/**/`.
+fn blank<'a>(src: &'a str, ranges: &[(usize, usize)]) -> Cow<'a, str> {
+    let bytes = src.as_bytes();
+    let unchanged = |&(start, end): &(usize, usize)| {
+        end.saturating_sub(start) < "/**/".len()
+            && bytes
+                .get(start..end)
+                .is_none_or(|r| r.iter().all(|&b| b == b' '))
+    };
+    if ranges.iter().all(unchanged) {
         return Cow::Borrowed(src);
     }
     let mut text = String::with_capacity(src.len());
     let mut from = 0;
-    for comment in comments {
-        text.push_str(src.get(from..comment.0).unwrap_or_default());
-        text.extend(inside(comment).chars().map(|c| match c {
-            '*' | '/' => ' ',
-            c => c,
-        }));
-        from = comment.1;
+    for &(start, end) in ranges {
+        text.push_str(src.get(from..start).unwrap_or_default());
+        let len = end.saturating_sub(start);
+        match len.checked_sub("/**/".len()) {
+            Some(inside) => {
+                text.push_str("/*");
+                text.extend(std::iter::repeat_n(' ', inside));
+                text.push_str("*/");
+            }
+            None => text.extend(std::iter::repeat_n(' ', len)),
+        }
+        from = end;
     }
     text.push_str(src.get(from..).unwrap_or_default());
     Cow::Owned(text)
@@ -217,8 +241,17 @@ struct Scanner<'a> {
     src: &'a str,
     /// Byte offset of the next character.
     pos: usize,
-    /// Byte ranges between each block comment's `/*` and `*/`, in order.
-    comments: Vec<(usize, usize)>,
+    /// Byte ranges kdl skips, to blank: in order, not overlapping, and merged when nothing but
+    /// spaces lies between two of them.
+    blanks: Vec<(usize, usize)>,
+}
+
+/// Where the scanner was, to go back to: its position, how many ranges it had to blank and the
+/// last of them, which [`Scanner::blank`] may have extended since.
+struct Mark {
+    pos: usize,
+    blanks: usize,
+    last: Option<(usize, usize)>,
 }
 
 impl<'a> Scanner<'a> {
@@ -240,6 +273,44 @@ impl<'a> Scanner<'a> {
 
     fn at_end(&self) -> bool {
         self.pos >= self.src.len()
+    }
+
+    fn mark(&self) -> Mark {
+        Mark {
+            pos: self.pos,
+            blanks: self.blanks.len(),
+            last: self.blanks.last().copied(),
+        }
+    }
+
+    /// Goes back to `mark`, dropping the ranges to blank found since.
+    fn reset(&mut self, mark: &Mark) {
+        self.pos = mark.pos;
+        self.blanks.truncate(mark.blanks);
+        if let (Some(last), Some(saved)) = (self.blanks.last_mut(), mark.last) {
+            *last = saved;
+        }
+    }
+
+    /// Blanks `from..pos`, which replaces the ranges found since there were `count`. Spaces
+    /// between it and the range before are blanked too, so kdl reads one comment, not many.
+    fn blank(&mut self, from: usize, count: usize) {
+        self.blanks.truncate(count);
+        if from >= self.pos {
+            return;
+        }
+        match self.blanks.last_mut() {
+            Some(last)
+                if last.1 >= from
+                    || self
+                        .src
+                        .get(last.1..from)
+                        .is_some_and(|gap| gap.chars().all(is_space)) =>
+            {
+                last.1 = last.1.max(self.pos);
+            }
+            _ => self.blanks.push((from, self.pos)),
+        }
     }
 
     /// Length of the newline at byte `at`, if there is one. CRLF counts as one newline.
@@ -312,19 +383,22 @@ impl<'a> Scanner<'a> {
         }
     }
 
-    /// Line space and slashdashed nodes before a node.
+    /// Line space and slashdashed nodes before a node, all blanked: newlines between nodes are
+    /// line space, and the node before, if any, has already read its own terminator.
     fn leading(&mut self) -> Step {
         loop {
+            let (from, count) = (self.pos, self.blanks.len());
             if self.line_space()? {
+                self.blank(from, count);
                 continue;
             }
             if !self.starts("/-") {
                 return Ok(());
             }
-            let dash = self.pos;
             self.pos += 2;
             while self.line_space()? {}
-            self.node(Some(dash))?;
+            self.node(Some(from))?;
+            self.blank(from, count);
         }
     }
 
@@ -375,7 +449,7 @@ impl<'a> Scanner<'a> {
                 Some(c) if is_newline(c) || c == ';' => return Ok(()),
                 Some(_) if !spaced || self.starts("//") => return Ok(()),
                 Some(_) if self.starts("/-") => {
-                    let entry_dash = self.pos;
+                    let (entry_dash, count) = (self.pos, self.blanks.len());
                     self.pos += 2;
                     while self.line_space()? {}
                     if self.peek() == Some('{') {
@@ -386,6 +460,8 @@ impl<'a> Scanner<'a> {
                         return Err(self.error(self.pos, "`/-` cannot follow another `/-`", None));
                     }
                     self.entry()?;
+                    // Newlines included: the space before the entry keeps the node going.
+                    self.blank(entry_dash, count);
                 }
                 Some(_) => self.entry()?,
             }
@@ -408,11 +484,10 @@ impl<'a> Scanner<'a> {
         }
         // A string is a property name when `=` follows.
         self.after_token(true)?;
-        let (after, comments) = (self.pos, self.comments.len());
+        let after = self.mark();
         self.node_space()?;
         if self.peek() != Some('=') {
-            self.pos = after;
-            self.comments.truncate(comments);
+            self.reset(&after);
             return Ok(());
         }
         self.pos += 1;
@@ -731,16 +806,23 @@ impl<'a> Scanner<'a> {
     }
 
     /// node-space*: spaces, block comments and line continuations. True if it read any.
+    ///
+    /// The run is blanked whole once it is as long as `/**/`: inside a node, kdl reads a run of
+    /// spaces several times over.
     fn node_space(&mut self) -> Step<bool> {
-        let start = self.pos;
+        let (start, count) = (self.pos, self.blanks.len());
         loop {
             match self.peek() {
                 Some(c) if is_space(c) => self.pos += c.len_utf8(),
                 Some('/') if self.starts("/*") => self.block_comment()?,
                 Some('\\') => self.line_continuation()?,
-                _ => return Ok(self.pos > start),
+                _ => break,
             }
         }
+        if self.pos - start >= "/**/".len() {
+            self.blank(start, count);
+        }
+        Ok(self.pos > start)
     }
 
     /// Some line-space: node-space, a newline or a line comment. True if it read any.
@@ -758,8 +840,10 @@ impl<'a> Scanner<'a> {
         Ok(true)
     }
 
-    /// `\` then spaces and comments up to the end of the line (kdl's escline).
+    /// `\` then spaces and comments up to the end of the line (kdl's escline), blanked with its
+    /// newline: it is node space, as spaces are.
     fn line_continuation(&mut self) -> Step {
+        let (start, count) = (self.pos, self.blanks.len());
         self.pos += 1;
         loop {
             match self.peek() {
@@ -775,25 +859,32 @@ impl<'a> Scanner<'a> {
         } else if !self.at_end() {
             return Err(self.reject(self.pos, "expected a newline after `\\`"));
         }
+        self.blank(start, count);
         Ok(())
     }
 
-    /// `//` through the next newline, or to the end of the file.
+    /// `//` through the next newline, or to the end of the file. The comment is blanked, its
+    /// newline is not: it may end a node.
     fn line_comment(&mut self) {
+        let (start, count) = (self.pos, self.blanks.len());
         match self.rest().find(is_newline) {
-            None => self.pos = self.src.len(),
+            None => {
+                self.pos = self.src.len();
+                self.blank(start, count);
+            }
             Some(i) => {
                 self.pos += i;
+                self.blank(start, count);
                 self.pos += self.newline_at(self.pos).unwrap_or(1);
             }
         }
     }
 
-    /// `/* ... */`, nested at most [`MAX_COMMENT_DEPTH`] deep.
+    /// `/* ... */`, nested at most [`MAX_COMMENT_DEPTH`] deep. Blanked with any newlines inside:
+    /// it is node space, as spaces are.
     fn block_comment(&mut self) -> Step {
-        let open = self.pos;
+        let (open, count) = (self.pos, self.blanks.len());
         self.pos += 2;
-        let inside = self.pos;
         let mut depth = 1;
         loop {
             let Some(i) = self.rest().find(['*', '/']) else {
@@ -804,7 +895,7 @@ impl<'a> Scanner<'a> {
                 self.pos += 2;
                 depth -= 1;
                 if depth == 0 {
-                    self.comments.push((inside, self.pos - 2));
+                    self.blank(open, count);
                     return Ok(());
                 }
             } else if self.starts("/*") {
@@ -868,13 +959,60 @@ mod tests {
         }
     }
 
+    /// Comments, slashdashed nodes and entries, line continuations, long runs of spaces and the
+    /// newlines between nodes become empty block comments of the same length, merged across
+    /// spaces. Each kept node keeps its terminator.
     #[test]
-    fn comments_are_blanked_in_place() {
-        let src = "a /* x * y / z /* in */ */ b // c * /\n";
-        let scan = scan(src);
-        assert_eq!(scan.stop, None);
-        assert_eq!(scan.text, "a /* x   y   z    in    */ b // c * /\n");
-        assert!(matches!(super::scan("a b").text, Cow::Borrowed(_)));
+    fn filler_is_blanked_in_place() {
+        for (src, text) in [
+            (
+                "a /* x * y / z /* in */ */ b // c * /\n",
+                "a/*                      */b /*    */\n",
+            ),
+            (
+                "// c\n/-a 1\n\n/- b \"s\"\r\nc /-x=1 /-\n 2 3; d \\ // e\n f\n/-g",
+                "/*                  */c /*       */ 3; d/*     */f\n   ",
+            ),
+            (
+                "\u{FEFF}// é\r\na // d\r\nb /*\n*/ c",
+                "\u{FEFF}/*   */a /**/\r\nb/*   */c",
+            ),
+            ("a /-x=1 /-y=2 b", "a /*       */ b"),
+        ] {
+            let scan = scan(src);
+            assert_eq!(scan.stop, None, "{src:?}");
+            assert_eq!(scan.text, text, "{src:?}");
+            let (kept, original) = (
+                KdlDocument::parse_v2(&scan.text),
+                KdlDocument::parse_v2(src),
+            );
+            assert_eq!(
+                outline(&kept.unwrap()),
+                outline(&original.unwrap()),
+                "{src:?}"
+            );
+        }
+        assert!(matches!(scan("a b").text, Cow::Borrowed(_)));
+        assert!(matches!(scan("a\n   b").text, Cow::Borrowed(_)));
+    }
+
+    /// Ranges to blank merge, so filler between nodes, or after a node's name, blanks as one
+    /// range, and kdl reads one comment.
+    #[test]
+    fn filler_is_one_range() {
+        let blanks = |src: &str| {
+            let mut scanner = Scanner {
+                src,
+                pos: 0,
+                blanks: Vec::new(),
+            };
+            assert_eq!(scanner.document(), Ok(()));
+            scanner.blanks
+        };
+        let between = format!("a\n{}b", "// c\n/-d 1\n/* e */\n\n".repeat(1000));
+        assert_eq!(blanks(&between), [(2, between.len() - 1)]);
+        let in_node = format!("a{} // c\nb", " /-x=0 \\\n /- 1     /* e */".repeat(1000));
+        assert_eq!(blanks(&in_node), [(2, in_node.len() - 2)]);
     }
 
     /// Flat KDL that hand-written files may use.
@@ -964,6 +1102,7 @@ mod tests {
         " ",
         " ",
         " ",
+        "    ",
         "\n",
         "\n",
         "\t",
@@ -1249,7 +1388,10 @@ mod tests {
             let text = scan.text.get(..end).unwrap_or_default();
             let doc = KdlDocument::parse_v2(text);
             prop_assert!(doc.is_ok(), "scan passed {:?}: {:?}", text, doc);
-            if let (Ok(doc), Ok(original)) = (doc, KdlDocument::parse_v2(src.get(..end).unwrap_or_default())) {
+            // The source too: blanking must not hide text kdl rejects.
+            let original = KdlDocument::parse_v2(src.get(..end).unwrap_or_default());
+            prop_assert!(original.is_ok(), "scan passed {:?}: {:?}", src, original);
+            if let (Ok(doc), Ok(original)) = (doc, original) {
                 prop_assert_eq!(outline(&doc), outline(&original));
             }
         }

@@ -6,11 +6,12 @@
 #![cfg(test)]
 
 use std::fmt::Write as _;
+use std::time::{Duration, Instant};
 
 use insta::assert_snapshot;
 use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES};
 use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
-use lawh_core::{FormatError, from_lawh};
+use lawh_core::{Board, FormatError, from_lawh};
 
 const HEADER: &str = "lawh version=1\n";
 
@@ -669,7 +670,7 @@ fn forbidden_character_outside_a_string() {
 // threads, so a scan that let them through to kdl would overflow it.
 
 /// Reads `src` on a thread with a 2 MiB stack.
-fn read_on_small_stack(src: String) -> Result<lawh_core::Board, FormatError> {
+fn read_on_small_stack(src: String) -> Result<Board, FormatError> {
     std::thread::Builder::new()
         .stack_size(2 * 1024 * 1024)
         .spawn(move || from_lawh(&src))
@@ -749,7 +750,7 @@ fn long_block_comment_is_read() {
     // kdl reads each `*` and `/` inside a comment one level deeper; the scan blanks them.
     let src = format!(
         "{HEADER}circle /* {}*/ id=c1 x=0 y=0 r=1\n",
-        "** // ".repeat(200_000)
+        "** // ".repeat(150_000)
     );
     assert_eq!(read_on_small_stack(src).map(|b| b.len()), Ok(1));
 }
@@ -781,5 +782,204 @@ fn repeated_bad_tokens_end_at_the_first() {
     ] {
         let e = read_on_small_stack(format!("{HEADER}{body}")).unwrap_err();
         assert!(matches!(e, FormatError::Syntax { .. }), "{e:?}");
+    }
+}
+
+// --- Filler: comments, slashdashed text, spaces ---
+//
+// The scan blanks filler before kdl reads the file, which kdl reads at 0.4 to 4 us a byte, and
+// keeps every byte offset.
+
+/// Text that fills a file of `bytes` bytes after the header with copies of `unit`.
+fn filler(unit: &str, bytes: usize) -> String {
+    let mut src = HEADER.to_owned();
+    while src.len() + unit.len() <= bytes {
+        src.push_str(unit);
+    }
+    src
+}
+
+#[test]
+fn filler_up_to_the_size_limit_reads_quickly() {
+    // In debug on the maintainer's laptop (2026-10-11), each file read in 85 and 317 ms blanked,
+    // 1.5 and 3.5 s before. `read_time_at_the_size_limit` below has the release times.
+    for unit in [
+        "// lorem ipsum dolor sit amet consectetur adipiscing elit\n",
+        "/-r\n",
+    ] {
+        let src = filler(unit, MAX_FILE_BYTES);
+        assert!(src.len() + unit.len() > MAX_FILE_BYTES);
+        let mut best = Duration::MAX;
+        for _ in 0..3 {
+            let started = Instant::now();
+            assert_eq!(from_lawh(&src), Ok(Board::new()), "{unit:?}");
+            best = best.min(started.elapsed());
+        }
+        assert!(best < Duration::from_secs(1), "{unit:?}: {best:?}");
+    }
+}
+
+/// The error's line and column, the line counted from the body after the header, and its message
+/// without them.
+fn place(e: &FormatError, lines_before: usize) -> (usize, usize, String) {
+    let message = e.to_string();
+    let (_, message) = message.split_once(": ").unwrap();
+    (e.line() - lines_before, e.column(), message.to_owned())
+}
+
+#[test]
+fn errors_after_filler_keep_their_position() {
+    let bodies = [
+        // kdl words it, the scan words it, the reader finds it.
+        "circle id=c1 x=1. y=0 r=3\n",
+        "circle id=c1 x=1.5.5 y=0 r=3\n",
+        "text id=t1 x=0 y=0 \"a\\xb\"\n",
+        "polygon id=p1 sides=6\n",
+        "circle id=c1 x=0 y=0 r=1 // é日😀 \n  rect id=r1 x=0 y=0 w=-1 h=1\n",
+        // Inside a slashdashed node, and after filler inside a node on the same line.
+        "/-rect id=r1 x=1.5.5\n",
+        "circle /-x=é id=c1 /-\"日\"=1 x=1. y=0\n",
+        "circle id=c1 /-x=0 /-\n\n y=0 x=0 /* é\n */ y=0 r=1 color=red\n",
+    ];
+    let fillers = [
+        (format!("// {}\n", "é".repeat(50_000)), 1),
+        ("// 日\r\n\r\n".repeat(1000), 2000),
+        (
+            "/-rect id=r1 x=0 \\\n  y=0 w=1 h=1\r\n/-text id=t1 x=0 y=0 \"\"\"\n  日😀\n  \"\"\"\n"
+                .repeat(1000),
+            5000,
+        ),
+    ];
+    for body in bodies {
+        let alone = place(&body_err(body), 0);
+        for (filler, lines) in &fillers {
+            let after = place(&body_err(&format!("{filler}{body}")), *lines);
+            assert_eq!(after, alone, "{body:?}");
+        }
+    }
+    // Columns count characters, not bytes, on lines that hold filler.
+    let e = body_err(&format!(
+        "{}circle /-x=é id=c1 /-\"日\"=1 x=1. y=0\n",
+        fillers[0].0
+    ));
+    assert_eq!((e.line(), e.column()), (3, 32));
+    let e = body_err("circle id=c1 /-x=0 /-\n\n y=0 x=0 /* é\n */ y=0 r=1 color=red\n");
+    assert_eq!(
+        e,
+        FormatError::UnknownProperty {
+            line: 5,
+            column: 13,
+            kind: "circle".to_owned(),
+            property: "color".to_owned()
+        }
+    );
+}
+
+// --- Read time of filler ---
+
+/// The longest file a board within every cap writes: the most text, in characters the writer
+/// escapes as `\u{200B}`, the other objects arrows, every coordinate written with 25 characters.
+fn largest_board() -> String {
+    use lawh_core::{Object, ObjectId, Point, Shape, to_lawh};
+    // Written as `-0.0000010000000000000002`.
+    let at = -f64::from_bits(1e-6_f64.to_bits() + 1);
+    let mut board = Board::new();
+    for i in 0..MAX_OBJECTS {
+        let id = ObjectId::new(format!("a{i}")).unwrap();
+        let shape = if i < MAX_BOARD_TEXT_CHARS / MAX_TEXT_CHARS {
+            Shape::Text {
+                at: Point::new(at, at),
+                text: "\u{200B}".repeat(MAX_TEXT_CHARS),
+            }
+        } else {
+            Shape::Arrow {
+                a: Point::new(at, at),
+                b: Point::new(at, at),
+            }
+        };
+        board.insert(Object::new(id, shape)).unwrap();
+    }
+    to_lawh(&board)
+}
+
+/// Time to read files of `LAWH_READ_BYTES` bytes (default `MAX_FILE_BYTES`) of filler, the
+/// largest board the caps allow, and a file of objects past the cap.
+/// `nice -n 19 cargo test --release -p lawh-core --test format_errors -- --ignored --nocapture read_time`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn read_time_at_the_size_limit() {
+    let max: usize =
+        std::env::var("LAWH_READ_BYTES").map_or(MAX_FILE_BYTES, |v| v.trim().parse().unwrap());
+    // Filler after the header's last entry, on its own line.
+    let on_header = |unit: &str| {
+        let mut s = filler(unit, max - 1);
+        s.replace_range(HEADER.len() - 1..HEADER.len(), " ");
+        s.push('\n');
+        s
+    };
+    let cases = [
+        ("spaces", filler(" ", max)),
+        ("spaces in a node", on_header(" ")),
+        ("line breaks", filler("\n", max)),
+        (
+            "block comments",
+            filler("/* lorem ipsum dolor sit amet */\n", max),
+        ),
+        ("short line comments", filler("//\n", max)),
+        (
+            "line comments",
+            filler(
+                "// lorem ipsum dolor sit amet consectetur adipiscing elit\n",
+                max,
+            ),
+        ),
+        ("slashdashed nodes", filler("/-r\n", max)),
+        (
+            "slashdashed rects",
+            filler("/-rect id=r1 x=0 y=0 w=1 h=1\n", max),
+        ),
+        (
+            "slashdashed texts",
+            filler(
+                &format!("/-text id=t1 x=0 y=0 \"{}\"\n", "a".repeat(1000)),
+                max,
+            ),
+        ),
+        ("slashdashed props", on_header(" /-x=0")),
+        ("slashdashed props \\", on_header(" /-x=0 \\\n")),
+        (
+            "mixed",
+            filler(
+                "// note\n/* a block */\n/-rect id=r1 x=0 y=0 w=1 h=1 /-x=2\n  \n/-r\n/-\n  c\n",
+                max,
+            ),
+        ),
+        ("largest board", largest_board()),
+        ("circles past the cap", {
+            let mut s = HEADER.to_owned();
+            for i in 0.. {
+                let circle = format!("circle id=c{i} x=0 y=0 r=1\n");
+                if s.len() + circle.len() > max {
+                    break;
+                }
+                s.push_str(&circle);
+            }
+            s
+        }),
+    ];
+    for (name, src) in cases {
+        let mut best = Duration::MAX;
+        let mut read = None;
+        for _ in 0..3 {
+            let started = Instant::now();
+            read = Some(from_lawh(&src).map(|b| b.len()));
+            best = best.min(started.elapsed());
+        }
+        println!(
+            "{name:<22} {:>8} bytes: {:>8.1} ms ({:?})",
+            src.len(),
+            best.as_secs_f64() * 1000.0,
+            read.unwrap()
+        );
     }
 }
