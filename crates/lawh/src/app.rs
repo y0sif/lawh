@@ -18,16 +18,24 @@ use crate::view;
 /// Window size on open, in logical pixels.
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 800.0);
 
+/// Sent to the event loop by the math engine's waker when a formula finishes compiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MathReady;
+
 /// The open board and its window.
 pub struct App {
     board: Board,
     title: String,
+    /// Draws the board; its math engine never blocks a frame.
     renderer: Renderer,
     /// Created on the first `resumed`.
     gfx: Option<Gfx>,
-    /// `None` until the first frame fits the board in the window; after that it holds the user's
+    /// `None` until the next frame fits the board in the window; after that it holds the user's
     /// pan and zoom.
     viewport: Option<Viewport>,
+    /// The user has panned or zoomed. Until then the view is fitted again whenever a formula
+    /// finishes, since its real size replaces its placeholder's.
+    view_moved: bool,
     /// Last cursor position in physical pixels, once the cursor has been over the window.
     cursor: Option<Point>,
     left_down: bool,
@@ -48,13 +56,14 @@ struct Gfx {
 }
 
 impl App {
-    pub fn new(board: Board, title: String, started: Instant) -> Self {
+    pub fn new(board: Board, renderer: Renderer, title: String, started: Instant) -> Self {
         Self {
             board,
             title,
-            renderer: Renderer::new(),
+            renderer,
             gfx: None,
             viewport: None,
+            view_moved: false,
             cursor: None,
             left_down: false,
             middle_down: false,
@@ -92,8 +101,17 @@ impl App {
         }
         if let (Some(from), Some(vp)) = (from, self.viewport.as_mut()) {
             view::pan(vp, from, to);
+            self.view_moved = true;
             self.request_redraw();
         }
+    }
+
+    /// A formula finished compiling: draw it, fitting the view again if the user hasn't moved it.
+    fn math_ready(&mut self) {
+        if !self.view_moved && self.viewport.take().is_some() {
+            tracing::debug!("math finished; fitting the board to the window again");
+        }
+        self.request_redraw();
     }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) {
@@ -114,6 +132,7 @@ impl App {
             f64::from(vp.height) / 2.0,
         ));
         view::zoom_at(vp, at, factor);
+        self.view_moved = true;
         self.request_redraw();
     }
 
@@ -169,6 +188,7 @@ impl App {
         let frame_time = render_start.elapsed();
 
         self.frames += 1;
+        let math_pending = self.renderer.math_pending();
         if self.frames == 1 {
             tracing::info!(
                 since_start_ms = ms(self.started.elapsed()),
@@ -176,6 +196,7 @@ impl App {
                 width,
                 height,
                 scale_factor,
+                math_pending,
                 "first frame presented"
             );
         } else {
@@ -184,6 +205,7 @@ impl App {
                 frame_ms = ms(frame_time),
                 width,
                 height,
+                math_pending,
                 "frame"
             );
         }
@@ -214,7 +236,7 @@ impl Gfx {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<MathReady> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
             return;
@@ -226,6 +248,10 @@ impl ApplicationHandler for App {
             }
             Err(err) => self.fail(event_loop, err),
         }
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, MathReady: MathReady) {
+        self.math_ready();
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {

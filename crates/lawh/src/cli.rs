@@ -15,6 +15,10 @@ Options:
   -h, --help     Print this help
   -V, --version  Print the version";
 
+/// Hidden first argument that turns this process into the math worker (see
+/// `lawh_math::worker_main`). lawh starts itself with it; it isn't in the help.
+pub const MATH_WORKER_FLAG: &str = "--math-worker";
+
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {

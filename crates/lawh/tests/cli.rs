@@ -7,7 +7,7 @@
 #![cfg(test)]
 
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 fn lawh(args: &[&std::ffi::OsStr]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_lawh"))
@@ -32,10 +32,20 @@ struct TempBoard(PathBuf);
 
 impl TempBoard {
     fn new(name: &str, contents: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("lawh-cli-test-{}-{name}.lawh", std::process::id()));
+        let path = Self::path(name);
         std::fs::write(&path, contents).unwrap();
         Self(path)
+    }
+
+    /// A file of `len` bytes that takes no disk space: the size is set, nothing is written.
+    fn sparse(name: &str, len: u64) -> Self {
+        let path = Self::path(name);
+        std::fs::File::create(&path).unwrap().set_len(len).unwrap();
+        Self(path)
+    }
+
+    fn path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("lawh-cli-test-{}-{name}.lawh", std::process::id()))
     }
 }
 
@@ -63,7 +73,33 @@ fn help_prints_usage_on_stdout() {
     let out = lawh(&["--help".as_ref()]);
     assert_eq!(out.status.code(), Some(0));
     assert!(stdout(&out).starts_with("Usage: lawh <file.lawh>"));
+    assert!(!stdout(&out).contains("worker"), "{}", stdout(&out));
     assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn math_worker_flag_runs_the_worker_until_stdin_closes() {
+    let out = Command::new(env!("CARGO_BIN_EXE_lawh"))
+        .arg("--math-worker")
+        .stdin(Stdio::null())
+        .env("RUST_LOG", "debug")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    // Only the handshake: the worker logs and prints nothing else.
+    assert_eq!(stdout(&out), "lawh-math-worker 1\n");
+    assert_eq!(stderr(&out), "");
+}
+
+#[test]
+fn math_worker_flag_only_counts_first() {
+    let out = lawh(&["a.lawh".as_ref(), "--math-worker".as_ref()]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        stderr(&out).contains("unknown option '--math-worker'"),
+        "{}",
+        stderr(&out)
+    );
 }
 
 #[test]
@@ -127,4 +163,33 @@ fn format_error_reports_path_line_and_column() {
         )),
         "{err}"
     );
+}
+
+#[test]
+fn oversized_file_is_refused_before_it_is_read() {
+    // 1 GiB: the error must report this size, which only the file's metadata knows, and come
+    // back at once instead of after reading a gigabyte.
+    let board = TempBoard::sparse("huge", 1 << 30);
+    let started = std::time::Instant::now();
+    let out = lawh(&[board.0.as_os_str()]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        stderr(&out),
+        format!(
+            "lawh: {}:1:1: the file is 1073741824 bytes; lawh reads files of up to 8388608 bytes\n",
+            board.0.display()
+        )
+    );
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn file_one_byte_over_the_limit_reports_the_same_error_as_the_reader() {
+    let board = TempBoard::sparse("over", 8 * 1024 * 1024 + 1);
+    let out = lawh(&[board.0.as_os_str()]);
+    assert_eq!(out.status.code(), Some(1));
+    let err = lawh_core::FormatError::FileTooLarge {
+        bytes: 8 * 1024 * 1024 + 1,
+    };
+    assert_eq!(stderr(&out), format!("lawh: {}:{err}\n", board.0.display()));
 }

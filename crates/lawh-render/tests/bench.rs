@@ -31,7 +31,8 @@ fn area_1080p_frame_time() {
     };
 
     // First frame as the app sees it after opening a file: a new renderer,
-    // bounds for the fit (compiles the math), then one render.
+    // bounds for the fit, then one render. Neither waits for math: the
+    // formula is queued and drawn as a placeholder.
     let start = Instant::now();
     let mut renderer = Renderer::new();
     let created = start.elapsed();
@@ -55,7 +56,7 @@ fn area_1080p_frame_time() {
     let median = (times[FRAMES / 2 - 1] + times[FRAMES / 2]) / 2;
 
     println!(
-        "[{profile}] first frame {:.1} ms (Renderer::new {:.1} ms, bounds incl. math compile {:.1} ms, render {:.1} ms)",
+        "[{profile}] first frame {:.1} ms (Renderer::new {:.1} ms, bounds {:.1} ms, render {:.1} ms)",
         ms(first),
         ms(created),
         ms(bounded.saturating_sub(created)),
@@ -67,4 +68,55 @@ fn area_1080p_frame_time() {
         ms(times[0]),
         ms(times[FRAMES - 1]),
     );
+}
+
+/// Most a frame of [`common::limits_board`] may take in a release build.
+const LIMITS_BUDGET: Duration = Duration::from_millis(100);
+
+/// Frames of a board at the core's limits, at the app's highest zoom (20) and scale factor 2,
+/// looking at the places where its huge shapes cross the view. Asserts the release budget for
+/// every frame. Laying out the board's 200,000 characters of text happens once, when the board
+/// is opened, and is timed separately.
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn limits_frame_time() {
+    let board = common::limits_board();
+    let mut renderer = Renderer::new();
+    renderer.resolve_math(&board);
+    let t = Instant::now();
+    black_box(renderer.board_bounds(&board));
+    println!(
+        "limits: laying out the text once, for the bounds: {:.1} ms",
+        ms(t.elapsed())
+    );
+    let mut worst = Duration::ZERO;
+    for (x, y) in common::LIMITS_CENTERS {
+        let vp = Viewport::new(kurbo::Point::new(x, y), 20.0, 2560, 1600, 2.0);
+        let t = Instant::now();
+        black_box(renderer.render(&board, &vp));
+        let first = t.elapsed();
+        let mut times: Vec<Duration> = (0..5)
+            .map(|_| {
+                let t = Instant::now();
+                black_box(renderer.render(&board, &vp));
+                t.elapsed()
+            })
+            .collect();
+        times.sort();
+        println!(
+            "limits at ({x}, {y}), zoom 20, scale 2, 2560x1600: first {:.1} ms, then median {:.2} ms, max {:.2} ms",
+            ms(first),
+            ms(times[2]),
+            ms(times[4]),
+        );
+        worst = worst.max(first).max(times[4]);
+    }
+    if !cfg!(debug_assertions) {
+        assert!(
+            worst < LIMITS_BUDGET,
+            "worst frame {:.1} ms is over the {:.0} ms budget",
+            ms(worst),
+            ms(LIMITS_BUDGET)
+        );
+    }
 }

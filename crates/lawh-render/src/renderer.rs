@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Stroke};
+use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape as _, Stroke};
 use lawh_core::{Board, Object, Shape};
-use lawh_math::{MATH_FONT_SIZE_PT, MathEngine, MathItem, MathLayout};
+use lawh_math::{MATH_FONT_SIZE_PT, MathEngine, MathItem, MathLayout, MathStatus};
 use parley::PositionedLayoutItem;
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::peniko::{Blob, FontData};
@@ -21,12 +21,32 @@ const INK: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x1F, 0x1F, 0x1F);
 const GRID: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
 /// The source of math that failed to compile.
 const ERROR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC0, 0x39, 0x2B);
+/// The source of math that is still compiling, as a placeholder.
+const PENDING: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x9A, 0x9A, 0x94);
+
+/// How far from its origin a glyph's outline may reach, in ems. Glyphs whose
+/// origin is further than this outside the image aren't drawn.
+const GLYPH_REACH_EM: f64 = 3.0;
+
+/// Glyphs whose em is larger than this many physical pixels aren't drawn. A
+/// text em at the largest drawable zoom is 5,000 pixels; only math that asks
+/// for an absurd font size gets near this.
+const MAX_GLYPH_EM_PX: f64 = 100_000.0;
 
 /// Typst's default text colour; math drawn in it is drawn in [`INK`] instead.
 const TYPST_BLACK: [u8; 4] = [0, 0, 0, 255];
 
 /// Grid units per Typst pt of math.
 const MATH_SCALE: f64 = TEXT_SIZE_UNITS / MATH_FONT_SIZE_PT;
+
+/// Whether a frame waits for math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MathWait {
+    /// Never: math still compiling is drawn as a placeholder. For the window.
+    No,
+    /// For every formula, so the image is the same every time. For exports.
+    Yes,
+}
 
 /// Draws boards into a pixel buffer it owns, at any pan and zoom.
 ///
@@ -40,6 +60,8 @@ pub struct Renderer {
     math: MathEngine,
     /// `vello_cpu` handles for [`lawh_math::fonts`], by the same index.
     math_fonts: Vec<FontData>,
+    /// Math blocks the last frame drew as placeholders.
+    math_pending: usize,
 }
 
 impl Default for Renderer {
@@ -49,7 +71,18 @@ impl Default for Renderer {
 }
 
 impl Renderer {
+    /// A renderer that compiles math in this process ([`MathEngine::new`]).
+    /// For trusted boards only, such as tests and goldens: a formula that
+    /// overflows the stack takes this process down. Draw boards from files
+    /// with [`Renderer::with_math`] and a worker engine.
     pub fn new() -> Self {
+        Self::with_math(MathEngine::new())
+    }
+
+    /// A renderer that lays out math with `math`, typically
+    /// [`MathEngine::with_worker`] so untrusted formulas compile in a process
+    /// that can be killed.
+    pub fn with_math(math: MathEngine) -> Self {
         let math_fonts = lawh_math::fonts()
             .iter()
             .map(|asset| FontData::new(Blob::new(Arc::new(asset.data)), asset.index))
@@ -59,17 +92,23 @@ impl Renderer {
             resources: Resources::new(),
             pixmap: Pixmap::new(1, 1),
             text: TextShaper::new(),
-            math: MathEngine::new(),
+            math,
             math_fonts,
+            math_pending: 0,
         }
     }
 
     /// Draws `board` through `vp` and returns the image: premultiplied RGBA8,
     /// row-major, `vp.width * vp.height * 4` bytes.
     ///
-    /// Math that is not cached yet is compiled here, which blocks for up to
-    /// the math engine's timeout. Math that fails shows its source in red.
+    /// Never waits for math. A formula not compiled yet is queued and its
+    /// source drawn in grey as a placeholder; the math engine's waker says
+    /// when to draw again. A formula that failed shows its source in red.
     pub fn render(&mut self, board: &Board, vp: &Viewport) -> &[u8] {
+        self.draw_frame(board, vp, MathWait::No)
+    }
+
+    fn draw_frame(&mut self, board: &Board, vp: &Viewport, wait: MathWait) -> &[u8] {
         let (width, height) = (vp.width, vp.height);
         if self.pixmap.width() != width || self.pixmap.height() != height {
             self.pixmap.resize(width, height);
@@ -87,25 +126,36 @@ impl Renderer {
         self.ctx.set_paint(PAPER);
         self.ctx
             .fill_rect(&Rect::new(0.0, 0.0, f64::from(width), f64::from(height)));
+        let mut pending = 0;
         if vp.is_drawable() {
             if let Some(dots) = draw::grid_dots(vp) {
                 self.ctx.set_paint(GRID);
                 self.ctx.fill_path(&dots);
             }
             let pad = draw::cull_padding_px(vp);
-            let screen = Rect::new(0.0, 0.0, f64::from(width), f64::from(height)).inflate(pad, pad);
+            let clip = Rect::new(0.0, 0.0, f64::from(width), f64::from(height)).inflate(pad, pad);
             let to_screen = vp.transform();
             for object in board.objects() {
+                // Asked once per object, so bounds and drawing agree.
+                let math = self.math_status(object, wait);
+                if matches!(math, Some(MathStatus::Pending)) {
+                    pending += 1;
+                }
                 let on_screen = self
-                    .object_bounds(object)
-                    .is_some_and(|b| to_screen.transform_rect_bbox(b).overlaps(screen));
+                    .bounds_with(object, math.as_ref())
+                    .map(|bounds| to_screen.transform_rect_bbox(bounds))
+                    .is_some_and(|bounds| bounds.is_finite() && bounds.overlaps(clip));
                 if on_screen {
-                    self.draw_object(object, vp);
+                    self.draw_object(object, math, vp, clip);
                 }
             }
         } else {
             tracing::debug!(?vp, "viewport not drawable; drawing the background only");
         }
+        if pending > 0 {
+            tracing::debug!(pending, "math still compiling; drawn as placeholders");
+        }
+        self.math_pending = pending;
         self.text.end_frame();
 
         self.ctx.flush();
@@ -114,6 +164,10 @@ impl Renderer {
     }
 
     /// Draws `board` through `vp` and encodes the image as PNG.
+    ///
+    /// Waits for every formula on the board first ([`Self::resolve_math`]),
+    /// so the image never has placeholders: math that doesn't compile in
+    /// time shows its source in red.
     pub fn render_png(&mut self, board: &Board, vp: &Viewport) -> Result<Vec<u8>, RenderError> {
         if vp.width == 0 || vp.height == 0 {
             return Err(RenderError::EmptyImage {
@@ -121,18 +175,41 @@ impl Renderer {
                 height: vp.height,
             });
         }
-        self.render(board, vp);
+        self.resolve_math(board);
+        self.draw_frame(board, vp, MathWait::Yes);
         self.pixmap
             .clone()
             .into_png()
             .map_err(|err| RenderError::Png(err.to_string()))
     }
 
+    /// Compiles every formula on `board` that isn't compiled yet, waiting
+    /// for each (up to the math engine's timeout and restart margin). After
+    /// it, [`Self::board_bounds`] and [`Self::render`] see the final math.
+    /// For exports and tests; the window never waits.
+    pub fn resolve_math(&self, board: &Board) {
+        for object in board.objects() {
+            if let Shape::Math { src, .. } = &object.shape
+                && let Err(err) = self.math.layout_blocking(src)
+            {
+                tracing::debug!(id = %object.id, %err, "math did not lay out");
+            }
+        }
+    }
+
+    /// How many math blocks the last [`Self::render`] drew as placeholders
+    /// because they were still compiling.
+    pub fn math_pending(&self) -> usize {
+        self.math_pending
+    }
+
     /// The smallest rectangle, in grid units, holding every object on the
     /// board, text and math extents included; `None` for an empty board.
     ///
-    /// Strokes and arrowheads have a fixed pixel size, so they aren't
-    /// included; [`Viewport::fit`] leaves a margin for them.
+    /// Never waits for math: a formula still compiling counts with the
+    /// extents of its source text. Call [`Self::resolve_math`] first for
+    /// final bounds. Strokes and arrowheads have a fixed pixel size, so they
+    /// aren't included; [`Viewport::fit`] leaves a margin for them.
     pub fn board_bounds(&mut self, board: &Board) -> Option<Rect> {
         board
             .objects()
@@ -141,9 +218,30 @@ impl Renderer {
             .reduce(|a, b| a.union(b))
     }
 
-    /// The bounds of one object in grid units, as in [`Self::board_bounds`].
+    /// The bounds of one object in grid units, as in [`Self::board_bounds`];
+    /// `None` for an object with no finite bounds.
     pub fn object_bounds(&mut self, object: &Object) -> Option<Rect> {
-        match &object.shape {
+        let math = self.math_status(object, MathWait::No);
+        self.bounds_with(object, math.as_ref())
+    }
+
+    /// Where a math object's formula stands; `None` for other objects.
+    fn math_status(&self, object: &Object, wait: MathWait) -> Option<MathStatus> {
+        let Shape::Math { src, .. } = &object.shape else {
+            return None;
+        };
+        Some(match wait {
+            MathWait::No => self.math.request(src),
+            MathWait::Yes => match self.math.layout_blocking(src) {
+                Ok(layout) => MathStatus::Ready(layout),
+                Err(err) => MathStatus::Failed(err),
+            },
+        })
+    }
+
+    /// An object's bounds, given its math status from [`Self::math_status`].
+    fn bounds_with(&mut self, object: &Object, math: Option<&MathStatus>) -> Option<Rect> {
+        let bounds = match &object.shape {
             Shape::Ellipse { center, rx, ry } => {
                 let (rx, ry) = (rx.abs(), ry.abs());
                 Some(Rect::new(
@@ -156,14 +254,16 @@ impl Renderer {
             Shape::Rect { origin, w, h } => Some(Rect::from_origin_size(*origin, (*w, *h)).abs()),
             Shape::Line { a, b } | Shape::Arrow { a, b } => Some(Rect::from_points(*a, *b)),
             Shape::Text { at, text } => self.text_bounds(*at, text),
-            Shape::Math { at, src } => match self.math.layout(src) {
-                Ok(layout) => Some(Rect::from_origin_size(
+            Shape::Math { at, src } => match math {
+                Some(MathStatus::Ready(layout)) => Some(Rect::from_origin_size(
                     *at,
                     (layout.width * MATH_SCALE, layout.height * MATH_SCALE),
                 )),
-                Err(_) => self.text_bounds(*at, src),
+                // Still compiling or failed: the source is drawn as text.
+                _ => self.text_bounds(*at, src),
             },
-        }
+        };
+        bounds.filter(Rect::is_finite)
     }
 
     fn text_bounds(&mut self, at: Point, text: &str) -> Option<Rect> {
@@ -177,34 +277,48 @@ impl Renderer {
         ))
     }
 
-    fn draw_object(&mut self, object: &Object, vp: &Viewport) {
+    /// Draws one object whose bounds reach into `clip` (screen pixels).
+    fn draw_object(
+        &mut self,
+        object: &Object,
+        math: Option<MathStatus>,
+        vp: &Viewport,
+        clip: Rect,
+    ) {
         match &object.shape {
             Shape::Ellipse { center, rx, ry } => {
-                self.stroke_px(&draw::ellipse(vp, *center, *rx, *ry), vp);
+                self.stroke_px(draw::ellipse(vp, *center, *rx, *ry, clip), vp);
             }
-            Shape::Rect { origin, w, h } => self.stroke_px(&draw::rect(vp, *origin, *w, *h), vp),
-            Shape::Line { a, b } => self.stroke_px(&draw::line(vp, *a, *b), vp),
+            Shape::Rect { origin, w, h } => {
+                self.stroke_px(draw::rect(vp, *origin, *w, *h, clip), vp);
+            }
+            Shape::Line { a, b } => self.stroke_px(draw::line(vp, *a, *b, clip), vp),
             Shape::Arrow { a, b } => {
-                let (shaft, head) = draw::arrow(vp, *a, *b);
-                self.stroke_px(&shaft, vp);
+                let (shaft, head) = draw::arrow(vp, *a, *b, clip);
+                self.stroke_px(shaft, vp);
                 if let Some(head) = head {
+                    self.ctx.set_transform(Affine::IDENTITY);
                     self.ctx.set_paint(INK);
                     self.ctx.fill_path(&head);
                 }
             }
-            Shape::Text { at, text } => self.draw_text(*at, text, INK, vp),
-            Shape::Math { at, src } => match self.math.layout(src) {
-                Ok(layout) => self.draw_math(*at, &layout, vp),
-                Err(err) => {
+            Shape::Text { at, text } => self.draw_text(*at, text, INK, vp, clip),
+            Shape::Math { at, src } => match math {
+                Some(MathStatus::Ready(layout)) => self.draw_math(*at, &layout, vp, clip),
+                Some(MathStatus::Failed(err)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");
-                    self.draw_text(*at, src, ERROR, vp);
+                    self.draw_text(*at, src, ERROR, vp, clip);
                 }
+                Some(MathStatus::Pending) | None => self.draw_text(*at, src, PENDING, vp, clip),
             },
         }
     }
 
     /// Strokes a path given in screen pixels with the fixed outline width.
-    fn stroke_px(&mut self, path: &BezPath, vp: &Viewport) {
+    fn stroke_px(&mut self, path: Option<BezPath>, vp: &Viewport) {
+        let Some(path) = path else {
+            return;
+        };
         self.ctx.set_transform(Affine::IDENTITY);
         self.ctx.set_paint(INK);
         self.ctx.set_stroke(
@@ -212,18 +326,35 @@ impl Renderer {
                 .with_caps(Cap::Round)
                 .with_join(Join::Round),
         );
-        self.ctx.stroke_path(path);
+        self.ctx.stroke_path(&path);
     }
 
-    fn draw_text(&mut self, at: Point, text: &str, color: AlphaColor<Srgb>, vp: &Viewport) {
+    /// Draws text with its top-left corner at `at`, skipping glyphs too far
+    /// outside `clip` to reach into it.
+    fn draw_text(
+        &mut self,
+        at: Point,
+        text: &str,
+        color: AlphaColor<Srgb>,
+        vp: &Viewport,
+        clip: Rect,
+    ) {
         let Some(layout) = self.text.layout(text) else {
             return;
         };
-        self.ctx.set_transform(
-            vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(text_scale()),
-        );
+        let transform =
+            vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(text_scale());
+        let Some(near) = glyph_area(f64::from(LAYOUT_EM) * text_scale(), vp, clip) else {
+            return;
+        };
+        self.ctx.set_transform(transform);
         self.ctx.set_paint(color);
         for line in layout.lines() {
+            // Text is only scaled and moved, so a line's screen height depends on its baseline.
+            let baseline = transform * Point::new(0.0, f64::from(line.metrics().baseline));
+            if !(near.y0..=near.y1).contains(&baseline.y) {
+                continue;
+            }
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                     continue;
@@ -236,11 +367,20 @@ impl Renderer {
                     .font_size(run.font_size())
                     .hint(false)
                     .normalized_coords(coords)
-                    .fill_glyphs(glyph_run.positioned_glyphs().map(|glyph| Glyph {
-                        id: glyph.id,
-                        x: glyph.x,
-                        y: glyph.y,
-                    }));
+                    .fill_glyphs(
+                        glyph_run
+                            .positioned_glyphs()
+                            .filter(|glyph| {
+                                near.contains(
+                                    transform * Point::new(f64::from(glyph.x), f64::from(glyph.y)),
+                                )
+                            })
+                            .map(|glyph| Glyph {
+                                id: glyph.id,
+                                x: glyph.x,
+                                y: glyph.y,
+                            }),
+                    );
                 if let Err(err) = drawn {
                     tracing::debug!(?err, "some text glyphs failed to draw");
                 }
@@ -248,10 +388,12 @@ impl Renderer {
         }
     }
 
-    fn draw_math(&mut self, at: Point, layout: &MathLayout, vp: &Viewport) {
-        self.ctx.set_transform(
-            vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(MATH_SCALE),
-        );
+    /// Draws a formula with its top-left corner at `at`, skipping glyphs and
+    /// paths that can't reach into `clip`.
+    fn draw_math(&mut self, at: Point, layout: &MathLayout, vp: &Viewport, clip: Rect) {
+        let transform =
+            vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(MATH_SCALE);
+        self.ctx.set_transform(transform);
         for item in &layout.items {
             match item {
                 MathItem::Glyphs {
@@ -264,22 +406,38 @@ impl Renderer {
                         tracing::warn!(font, "math glyphs reference an unknown font");
                         continue;
                     };
+                    let Some(near) = glyph_area(size * MATH_SCALE, vp, clip) else {
+                        continue;
+                    };
                     self.ctx.set_paint(math_color(*fill));
                     let drawn = self
                         .ctx
                         .glyph_run(&mut self.resources, font_data)
                         .font_size(to_f32(*size))
                         .hint(false)
-                        .fill_glyphs(glyphs.iter().map(|glyph| Glyph {
-                            id: glyph.id,
-                            x: to_f32(glyph.x),
-                            y: to_f32(glyph.y),
-                        }));
+                        .fill_glyphs(
+                            glyphs
+                                .iter()
+                                .filter(|glyph| {
+                                    near.contains(transform * Point::new(glyph.x, glyph.y))
+                                })
+                                .map(|glyph| Glyph {
+                                    id: glyph.id,
+                                    x: to_f32(glyph.x),
+                                    y: to_f32(glyph.y),
+                                }),
+                        );
                     if let Err(err) = drawn {
                         tracing::debug!(?err, "some math glyphs failed to draw");
                     }
                 }
                 MathItem::Path { path, fill, stroke } => {
+                    let reach = stroke.map_or(0.0, |(width, _)| width.abs());
+                    let on_screen =
+                        transform.transform_rect_bbox(path.bounding_box().inflate(reach, reach));
+                    if !(on_screen.is_finite() && on_screen.overlaps(clip)) {
+                        continue;
+                    }
                     if let Some(fill) = fill {
                         self.ctx.set_paint(math_color(*fill));
                         self.ctx.fill_path(path);
@@ -293,6 +451,19 @@ impl Renderer {
             }
         }
     }
+}
+
+/// Where on screen a glyph's origin must be for any of it to reach into
+/// `clip`, for glyphs of `em_units` grid units; `None` when glyphs that size
+/// aren't drawn at all (non-finite, or past [`MAX_GLYPH_EM_PX`]).
+fn glyph_area(em_units: f64, vp: &Viewport, clip: Rect) -> Option<Rect> {
+    let em_px = (em_units * vp.px_per_unit()).abs();
+    if !(em_px.is_finite() && em_px <= MAX_GLYPH_EM_PX) {
+        tracing::debug!(em_px, "glyphs too large to draw");
+        return None;
+    }
+    let reach = GLYPH_REACH_EM * em_px;
+    Some(clip.inflate(reach, reach))
 }
 
 /// Grid units per layout unit of text.
