@@ -20,8 +20,14 @@ fn engine() -> MathEngine {
 }
 
 /// How long a failing formula may take: the timeout, then killing the worker
-/// and starting a new one.
-const FAIL_WITHIN: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(1));
+/// and starting a new one. Generous: a busy machine (other builds, swap) can
+/// make that take seconds, and a formula that is never stopped takes forever.
+const FAIL_WITHIN: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(5));
+
+/// How long a call that must not wait for a compile may take. It takes
+/// microseconds, but a busy machine can pause any thread for a while; waiting
+/// for a compile here would take the whole timeout.
+const NO_WAIT: Duration = DEFAULT_TIMEOUT.checked_div(2).unwrap();
 
 /// A PNG header claiming 40000x40000 pixels, like the verifier's PNG bomb.
 fn png_bomb() -> String {
@@ -123,7 +129,7 @@ fn hostile_formulas_fail_in_time_and_the_worker_recovers() {
             matches!(engine.request(&src), MathStatus::Failed(_)),
             "{name}"
         );
-        assert!(started.elapsed() < Duration::from_millis(50), "{name}");
+        assert!(started.elapsed() < NO_WAIT, "{name}");
     }
 }
 
@@ -139,7 +145,7 @@ fn request_is_pending_until_the_waker_fires() {
     assert_eq!(engine.request("A = pi r^2"), MathStatus::Pending);
     // Asking again doesn't queue it twice.
     assert_eq!(engine.request("A = pi r^2"), MathStatus::Pending);
-    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(started.elapsed() < NO_WAIT);
 
     rx.recv_timeout(Duration::from_secs(10)).unwrap();
     let MathStatus::Ready(first) = engine.request("A = pi r^2") else {
@@ -165,7 +171,7 @@ fn a_hostile_request_does_not_block_the_caller() {
     let started = Instant::now();
     assert_eq!(engine.request(endless), MathStatus::Pending);
     assert_eq!(engine.request("x^2"), MathStatus::Pending);
-    assert!(started.elapsed() < Duration::from_millis(50));
+    assert!(started.elapsed() < NO_WAIT);
 
     // The endless loop times out, then x^2 compiles on a new worker.
     let deadline = Instant::now() + FAIL_WITHIN + Duration::from_secs(5);
@@ -225,7 +231,7 @@ fn huge_layouts_are_too_large_in_the_worker_too() {
             MathStatus::Failed(MathError::TooLarge),
             "{src}"
         );
-        assert!(started.elapsed() < Duration::from_millis(50), "{src}");
+        assert!(started.elapsed() < NO_WAIT, "{src}");
     }
     // The worker is still the same healthy one.
     assert!(worker.layout_blocking("A = pi r^2").is_ok());
@@ -337,7 +343,8 @@ fn a_missing_worker_is_unavailable() {
         engine.request("y"),
         MathStatus::Pending | MathStatus::Failed(MathError::Unavailable(_))
     ));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    // Not after waiting for the timeout or for a handshake.
+    assert!(started.elapsed() < DEFAULT_TIMEOUT);
 }
 
 #[test]

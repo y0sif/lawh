@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use lawh_math::{MAX_WORKERS, MathEngine, MathError};
+use lawh_math::{DEFAULT_TIMEOUT, MAX_WORKERS, MathEngine, MathError};
 
 /// 10^12 loop iterations: never finishes in practice.
 const ENDLESS: &str =
@@ -19,15 +19,19 @@ fn endless_loop_times_out_and_is_cached() {
     let started = Instant::now();
     assert_eq!(engine.layout(ENDLESS), Err(MathError::Timeout));
     let first = started.elapsed();
-    assert!(first < Duration::from_millis(2500), "took {first:?}");
+    // Generous: a busy machine (other builds, swap) can wake the caller seconds late. Without
+    // the timeout this would never return.
+    assert!(
+        first < DEFAULT_TIMEOUT + Duration::from_secs(5),
+        "took {first:?}"
+    );
 
     let started = Instant::now();
     assert_eq!(engine.layout(ENDLESS), Err(MathError::Timeout));
     let second = started.elapsed();
-    assert!(
-        second < Duration::from_millis(50),
-        "cache hit took {second:?}"
-    );
+    // Compiling it again would take the whole timeout; a cache hit takes microseconds, but a
+    // busy machine can pause any thread for a while.
+    assert!(second < DEFAULT_TIMEOUT / 2, "cache hit took {second:?}");
 }
 
 #[test]

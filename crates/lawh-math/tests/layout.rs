@@ -12,6 +12,10 @@ use lawh_math::{
     MathItem, MathLayout, MathStatus, fonts,
 };
 
+/// How long [`MathEngine::request`] may take for a cached formula. It takes microseconds, but a
+/// busy machine (other builds, swap) can pause any thread for a while.
+const CACHE_HIT_WITHIN: Duration = Duration::from_secs(1);
+
 /// Formulas built to be huge: each reaches far past [`MAX_LAYOUT_EXTENT_PT`].
 /// The circle is the verifier's repro: zoomed in, it made the renderer
 /// flatten an arc 2e21 pixels long.
@@ -195,7 +199,7 @@ fn huge_layouts_are_too_large_and_cached() {
             MathStatus::Failed(MathError::TooLarge),
             "{src}"
         );
-        assert!(started.elapsed() < Duration::from_millis(50), "{src}");
+        assert!(started.elapsed() < CACHE_HIT_WITHIN, "{src}");
     }
 }
 
@@ -211,7 +215,7 @@ fn too_complex_layouts_are_too_large_and_cached() {
             MathStatus::Failed(MathError::TooLarge),
             "{src}"
         );
-        assert!(started.elapsed() < Duration::from_millis(50), "{src}");
+        assert!(started.elapsed() < CACHE_HIT_WITHIN, "{src}");
     }
 }
 

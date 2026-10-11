@@ -2,7 +2,8 @@
 
 use super::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
 use crate::board::{
-    MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS, MAX_TEXT_LINES,
+    MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_ID_CHARS, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
+    MAX_TEXT_LINES,
 };
 
 /// Why a `.lawh` file could not be read.
@@ -99,6 +100,11 @@ pub enum FormatError {
         column: usize,
         id: String,
     },
+
+    /// An id longer than [`MAX_ID_CHARS`] characters, whatever its characters. The id is not
+    /// kept: it may be as long as the file.
+    #[error("{line}:{column}: object id is longer than {MAX_ID_CHARS} characters")]
+    IdTooLong { line: usize, column: usize },
 
     /// Two objects with the same id.
     #[error("{line}:{column}: object id `{id}` is already used earlier in the file")]
@@ -228,6 +234,7 @@ impl FormatError {
             | Self::MissingProperty { line, column, .. }
             | Self::WrongType { line, column, .. }
             | Self::InvalidId { line, column, .. }
+            | Self::IdTooLong { line, column }
             | Self::DuplicateId { line, column, .. }
             | Self::Children { line, column, .. }
             | Self::MissingText { line, column, .. }

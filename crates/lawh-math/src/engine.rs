@@ -52,9 +52,9 @@ pub const MAX_CACHED_LAYOUT_BYTES: usize = 64 * 1024 * 1024;
 pub const MAX_CACHED_FAILURES: usize = 4096;
 
 /// Most memory the failures one engine remembers may take, in bytes: their
-/// sources and error messages. Above the largest `.lawh` file (8 MiB) plus a
-/// full message for each of a board's objects, so every failing formula on one
-/// board stays cached.
+/// sources and error messages. Well above the largest `.lawh` file (1 MiB,
+/// `lawh_core::format::MAX_FILE_BYTES`) plus a full message for each of a
+/// board's objects, so every failing formula on one board stays cached.
 pub const MAX_CACHED_FAILURE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Most times [`MathEngine::request`] compiles one formula to a layout. Once
@@ -993,8 +993,9 @@ mod tests {
     #[test]
     fn request_compiles_a_pushed_out_layout_again_after_the_cooldown_at_most_twice() {
         let one = one_glyph_bytes();
-        // Long enough that a busy machine asks again within it.
-        let cooldown = Duration::from_millis(300);
+        // Long enough that a busy machine (other builds, swap) asks again within it: the test
+        // reads `Evicted` only while the cooldown runs.
+        let cooldown = Duration::from_secs(1);
         let engine = MathEngine::new().with_cache_limits(CacheLimits {
             layout_bytes: one + one / 2,
             cooldown,

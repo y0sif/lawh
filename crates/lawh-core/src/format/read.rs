@@ -8,7 +8,8 @@ use kurbo::Point;
 use super::scan::{Scan, Stop, scan};
 use super::{FormatError, MAX_FILE_BYTES};
 use crate::board::{
-    Board, Object, ObjectId, Shape, TextProblem, check_text, is_valid_coordinate, is_valid_size,
+    Board, BoardError, Object, ObjectId, Shape, TextProblem, check_text, is_valid_coordinate,
+    is_valid_size,
 };
 
 /// The format version this build reads and writes.
@@ -18,7 +19,7 @@ const VERSION: i128 = 1;
 ///
 /// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed, a file with
 /// more than [`MAX_OBJECTS`](crate::board::MAX_OBJECTS) objects at its first object over the
-/// limit, and one with more than
+/// limit (kdl never parses past it), and one with more than
 /// [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS) characters of text at the
 /// content that goes over it.
 pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
@@ -27,14 +28,16 @@ pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     }
     let Scan { text, stop } = scan(src);
     // A children block ends what kdl reads: the byte offset of its `{`, and the name of its
-    // owner when kdl drops that node (it is slashdashed).
-    let (end, children) = match stop {
-        None => (text.len(), None),
+    // owner when kdl drops that node (it is slashdashed). So does the first object past the
+    // limit: the byte offset where it starts.
+    let (end, children, too_many) = match stop {
+        None => (text.len(), None, None),
         Some(Stop::Children {
             brace,
             cut,
             dropped_owner,
-        }) => (cut, Some((brace, dropped_owner))),
+        }) => (cut, Some((brace, dropped_owner)), None),
+        Some(Stop::TooManyObjects { at }) => (at, None, Some(at)),
         Some(Stop::Rejected { at, end, message }) => {
             return Err(rejected(src, &text, at, end, message));
         }
@@ -54,6 +57,8 @@ pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     reader.header(header, owner_brace(objects.is_empty()))?;
     let mut board = Board::new();
     for (i, node) in objects.iter().enumerate() {
+        // The scan has stopped kdl before any object past the limit; this only guards against
+        // kdl reading a node the scan did not count.
         if board.is_full() {
             let (line, column) = line_column(src, node.span().offset());
             return Err(FormatError::TooManyObjects { line, column });
@@ -64,6 +69,10 @@ pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     if let Some((brace, Some(kind))) = children {
         let (line, column) = line_column(src, brace);
         return Err(FormatError::Children { line, column, kind });
+    }
+    if let Some(at) = too_many {
+        let (line, column) = line_column(src, at);
+        return Err(FormatError::TooManyObjects { line, column });
     }
     Ok(board)
 }
@@ -423,12 +432,15 @@ impl Reader<'_> {
                 expected: "a string such as `c1`",
             });
         };
-        ObjectId::new(s.as_str()).map_err(|_| {
+        ObjectId::new(s.as_str()).map_err(|e| {
             let (line, column) = self.at(entry.span().offset());
-            FormatError::InvalidId {
-                line,
-                column,
-                id: s.clone(),
+            match e {
+                BoardError::IdTooLong(_) => FormatError::IdTooLong { line, column },
+                _ => FormatError::InvalidId {
+                    line,
+                    column,
+                    id: s.clone(),
+                },
             }
         })
     }

@@ -9,7 +9,9 @@ use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
 use insta::assert_snapshot;
-use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES};
+use lawh_core::board::{
+    MAX_BOARD_TEXT_CHARS, MAX_ID_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES,
+};
 use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
 use lawh_core::{Board, FormatError, from_lawh};
 
@@ -251,6 +253,28 @@ fn invalid_ids() {
         assert!(matches!(e, FormatError::InvalidId { .. }), "{e:?}");
         assert_snapshot!(name, e.to_string());
     }
+}
+
+#[test]
+fn id_over_the_length_limit() {
+    let longest = "c".repeat(MAX_ID_CHARS);
+    let ok = format!("{HEADER}circle id={longest} x=0 y=0 r=1\n");
+    assert_eq!(from_lawh(&ok).map(|b| b.len()), Ok(1));
+    let e = body_err(&format!("circle id={longest}1 x=0 y=0 r=1\n"));
+    assert_eq!(e, FormatError::IdTooLong { line: 2, column: 8 });
+    assert_snapshot!(e.to_string());
+    // Too long whatever its characters; the id is not repeated in the message.
+    let e = body_err(&format!(
+        "rect x=0 id=\"{}\" y=0 w=1 h=1\n",
+        "é ".repeat(40_000)
+    ));
+    assert_eq!(
+        e,
+        FormatError::IdTooLong {
+            line: 2,
+            column: 10
+        }
+    );
 }
 
 #[test]
@@ -526,6 +550,19 @@ fn circles(n: usize) -> String {
     out
 }
 
+/// A file of as many [`circles`] as fit in `bytes`.
+fn circles_filling(bytes: usize) -> String {
+    let mut src = HEADER.to_owned();
+    for i in 0.. {
+        let circle = format!("circle id=c{i} x=0 y=0 r=1\n");
+        if src.len() + circle.len() > bytes {
+            break;
+        }
+        src.push_str(&circle);
+    }
+    src
+}
+
 #[test]
 fn objects_at_the_limit_are_read() {
     let board = from_lawh(&format!("{HEADER}{}", circles(MAX_OBJECTS))).unwrap();
@@ -551,6 +588,29 @@ fn too_many_objects() {
         }
     );
     assert_snapshot!(e.to_string());
+}
+
+#[test]
+fn objects_past_the_limit_are_not_parsed() {
+    // The scan stops at the first object over the limit, so kdl parses 501 nodes, not all
+    // 36,541. In debug on the maintainer's laptop (2026-10-11) this read takes 25 ms, and took
+    // 1.7 s when kdl parsed the whole file; the bound is generous for a busy machine.
+    let src = circles_filling(MAX_FILE_BYTES);
+    assert!(src.len() + 30 > MAX_FILE_BYTES);
+    let mut best = Duration::MAX;
+    for _ in 0..3 {
+        let started = Instant::now();
+        let e = err(&src);
+        best = best.min(started.elapsed());
+        assert_eq!(
+            e,
+            FormatError::TooManyObjects {
+                line: MAX_OBJECTS + 2,
+                column: 1
+            }
+        );
+    }
+    assert!(best < Duration::from_secs(1), "{best:?}");
 }
 
 #[test]
@@ -803,6 +863,9 @@ fn filler(unit: &str, bytes: usize) -> String {
 fn filler_up_to_the_size_limit_reads_quickly() {
     // In debug on the maintainer's laptop (2026-10-11), each file read in 85 and 317 ms blanked,
     // 1.5 and 3.5 s before. `read_time_at_the_size_limit` below has the release times.
+    // The bound is generous: with five busy threads a core, the second read in 1.6 s at best of
+    // three. That the scan blanks the filler is checked exactly by the tests in `scan.rs`; this
+    // catches a read that grows much slower.
     for unit in [
         "// lorem ipsum dolor sit amet consectetur adipiscing elit\n",
         "/-r\n",
@@ -815,7 +878,7 @@ fn filler_up_to_the_size_limit_reads_quickly() {
             assert_eq!(from_lawh(&src), Ok(Board::new()), "{unit:?}");
             best = best.min(started.elapsed());
         }
-        assert!(best < Duration::from_secs(1), "{unit:?}: {best:?}");
+        assert!(best < Duration::from_secs(5), "{unit:?}: {best:?}");
     }
 }
 
@@ -878,14 +941,15 @@ fn errors_after_filler_keep_their_position() {
 // --- Read time of filler ---
 
 /// The longest file a board within every cap writes: the most text, in characters the writer
-/// escapes as `\u{200B}`, the other objects arrows, every coordinate written with 25 characters.
+/// escapes as `\u{200B}`, the other objects arrows, every coordinate written with 25 characters
+/// and every id 64 digits, which the writer quotes.
 fn largest_board() -> String {
     use lawh_core::{Object, ObjectId, Point, Shape, to_lawh};
     // Written as `-0.0000010000000000000002`.
     let at = -f64::from_bits(1e-6_f64.to_bits() + 1);
     let mut board = Board::new();
     for i in 0..MAX_OBJECTS {
-        let id = ObjectId::new(format!("a{i}")).unwrap();
+        let id = ObjectId::new(format!("{i:0>MAX_ID_CHARS$}")).unwrap();
         let shape = if i < MAX_BOARD_TEXT_CHARS / MAX_TEXT_CHARS {
             Shape::Text {
                 at: Point::new(at, at),
@@ -955,17 +1019,7 @@ fn read_time_at_the_size_limit() {
             ),
         ),
         ("largest board", largest_board()),
-        ("circles past the cap", {
-            let mut s = HEADER.to_owned();
-            for i in 0.. {
-                let circle = format!("circle id=c{i} x=0 y=0 r=1\n");
-                if s.len() + circle.len() > max {
-                    break;
-                }
-                s.push_str(&circle);
-            }
-            s
-        }),
+        ("circles past the cap", circles_filling(max)),
     ];
     for (name, src) in cases {
         let mut best = Duration::MAX;

@@ -4,9 +4,9 @@
 //!
 //! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`]), every
 //! text within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`], all its text together within
-//! [`MAX_BOARD_TEXT_CHARS`] and the number of objects within [`MAX_OBJECTS`], so bounds,
-//! zoom-to-fit and rendering never meet values that overflow or allocate without limit. The file
-//! reader enforces the same limits.
+//! [`MAX_BOARD_TEXT_CHARS`], the number of objects within [`MAX_OBJECTS`] and every id within
+//! [`MAX_ID_CHARS`], so bounds, zoom-to-fit and rendering never meet values that overflow or
+//! allocate without limit. The file reader enforces the same limits.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -16,15 +16,19 @@ use kurbo::Point;
 
 /// A stable object id such as `c1` or `t2`. It also appears in the file.
 ///
-/// Valid ids are non-empty and use only ASCII letters, digits, `_` and `-`.
+/// Valid ids are non-empty, at most [`MAX_ID_CHARS`] characters long, and use only ASCII
+/// letters, digits, `_` and `-`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ObjectId(String);
 
 impl ObjectId {
-    /// Checks `id` and wraps it.
+    /// Checks `id` and wraps it. An id over [`MAX_ID_CHARS`] is too long whatever its
+    /// characters.
     pub fn new(id: impl Into<String>) -> Result<Self, BoardError> {
         let id = id.into();
-        if is_valid_id(&id) {
+        if id.len() > MAX_ID_CHARS && id.chars().count() > MAX_ID_CHARS {
+            Err(BoardError::IdTooLong(id))
+        } else if is_valid_id(&id) {
             Ok(Self(id))
         } else {
             Err(BoardError::InvalidId(id))
@@ -56,6 +60,13 @@ impl AsRef<str> for ObjectId {
         &self.0
     }
 }
+
+/// Most characters in an object id.
+///
+/// Ids name objects in the file and in messages, where `c1` or `title-2` is typical. The cap
+/// keeps a hand-edited file from putting an id of a megabyte into every message and lookup that
+/// names its object.
+pub const MAX_ID_CHARS: usize = 64;
 
 fn is_valid_id(id: &str) -> bool {
     !id.is_empty() && id.bytes().all(is_id_byte)
@@ -285,6 +296,9 @@ impl Shape {
 pub enum BoardError {
     #[error("invalid object id {0:?}: use only ASCII letters, digits, `_` and `-`")]
     InvalidId(String),
+    /// The id, which is not shown: it may be very long.
+    #[error("object id is longer than {MAX_ID_CHARS} characters")]
+    IdTooLong(String),
     #[error("an object with id `{0}` is already on the board")]
     DuplicateId(ObjectId),
     #[error("object `{0}` has a coordinate or size that is not a finite number")]
@@ -402,7 +416,8 @@ impl Board {
 
     /// The first unused id of the form `{prefix}{n}`, counting from 1.
     ///
-    /// Characters that are not allowed in ids are dropped from `prefix`.
+    /// Characters that are not allowed in ids are dropped from `prefix`, and its end is cut so
+    /// the id fits in [`MAX_ID_CHARS`].
     pub fn fresh_id(&self, prefix: &str) -> ObjectId {
         let prefix: String = prefix
             .chars()
@@ -410,7 +425,13 @@ impl Board {
             .collect();
         let mut n: usize = 1;
         loop {
-            let id = ObjectId(format!("{prefix}{n}"));
+            let n_text = n.to_string();
+            // ASCII only, so any byte offset is a character boundary.
+            let keep = prefix.len().min(MAX_ID_CHARS.saturating_sub(n_text.len()));
+            let id = ObjectId(format!(
+                "{}{n_text}",
+                prefix.get(..keep).unwrap_or_default()
+            ));
             if !self.contains(&id) {
                 return id;
             }
@@ -450,6 +471,32 @@ mod tests {
                 "{bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn ids_are_at_most_max_id_chars_long() {
+        let longest = "a".repeat(MAX_ID_CHARS);
+        assert_eq!(
+            ObjectId::new(longest.as_str()).map(|id| id.0),
+            Ok(longest.clone())
+        );
+        for over in [format!("{longest}b"), format!("{longest} "), "é".repeat(65)] {
+            assert_eq!(
+                ObjectId::new(over.as_str()),
+                Err(BoardError::IdTooLong(over.clone())),
+                "{over:?}"
+            );
+        }
+        // Too long is counted in characters: 64 of them in 128 bytes is only invalid.
+        let wide = "é".repeat(MAX_ID_CHARS);
+        assert_eq!(
+            ObjectId::new(wide.as_str()),
+            Err(BoardError::InvalidId(wide.clone()))
+        );
+        assert_eq!(
+            BoardError::IdTooLong("x".repeat(1000)).to_string(),
+            "object id is longer than 64 characters"
+        );
     }
 
     #[test]
@@ -777,5 +824,19 @@ mod tests {
         assert_eq!(board.fresh_id("a b.c"), id("abc1"));
         assert_eq!(board.fresh_id(""), id("1"));
         assert_eq!(board.fresh_id("é"), id("1"));
+    }
+
+    #[test]
+    fn fresh_id_cuts_a_long_prefix_to_fit() {
+        let mut board = Board::new();
+        let prefix = "p".repeat(MAX_ID_CHARS + 10);
+        for n in 1..=10 {
+            let fresh = board.fresh_id(&prefix);
+            let digits = n.to_string();
+            let cut = "p".repeat(MAX_ID_CHARS - digits.len());
+            assert_eq!(fresh.as_str(), format!("{cut}{digits}"));
+            // `circle` checks the id again.
+            board.insert(circle(fresh.as_str(), 1.0)).unwrap();
+        }
     }
 }

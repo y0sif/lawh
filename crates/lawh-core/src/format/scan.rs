@@ -9,6 +9,8 @@
 //! - Nodes have no children: the scan stops at the first `{` outside strings and comments.
 //! - Block comments nest at most [`MAX_COMMENT_DEPTH`] deep.
 //! - A slashdash `/-` may not apply to another slashdash.
+//! - At most [`MAX_OBJECTS`] nodes follow the first (the header): the scan stops at the first
+//!   node past them, so kdl never reads more objects than a board holds.
 //! - Anything kdl would reject stops the scan. kdl then reads only the text before it plus the
 //!   one bad token, to word the error, so its error recovery has nothing to recurse over.
 //!
@@ -32,6 +34,7 @@ use std::borrow::Cow;
 
 use super::read::line_column;
 use super::{FormatError, MAX_COMMENT_DEPTH};
+use crate::board::MAX_OBJECTS;
 
 /// The most bytes of a bad token handed to kdl to word an error.
 const MAX_BAD_TOKEN: usize = 1024;
@@ -58,6 +61,9 @@ pub(super) enum Stop {
         cut: usize,
         dropped_owner: Option<String>,
     },
+    /// The node at byte `at` is the first past [`MAX_OBJECTS`] objects, the header not counted.
+    /// kdl reads `text[..at]`, so the objects before it are checked first.
+    TooManyObjects { at: usize },
     /// Text kdl would reject, starting at byte `at`. kdl reads `text[..end]`, which ends after
     /// the bad token, to word the error; `message` is used if kdl accepts it.
     Rejected {
@@ -366,16 +372,21 @@ impl<'a> Scanner<'a> {
         Stop::Rejected { at, end, message }
     }
 
-    /// `bom? nodes`, with each node checked in turn.
+    /// `bom? nodes`, with each node checked in turn, up to the header and [`MAX_OBJECTS`] objects.
     fn document(&mut self) -> Step {
         if self.peek() == Some('\u{FEFF}') {
             self.pos += '\u{FEFF}'.len_utf8();
         }
+        let mut nodes = 0;
         loop {
             self.leading()?;
             if self.at_end() {
                 return Ok(());
             }
+            if nodes > MAX_OBJECTS {
+                return Err(Stop::TooManyObjects { at: self.pos });
+            }
+            nodes += 1;
             self.node(None)?;
             if !(self.at_end() || self.terminator()) {
                 return Err(self.reject(self.pos, "expected the end of the node"));
@@ -1080,6 +1091,21 @@ mod tests {
         );
         // Braces inside strings and comments are text.
         assert_eq!(stop("a \"{\" #\"}\"# /* { */ // {"), None);
+    }
+
+    #[test]
+    fn objects_past_the_limit_stop_the_scan() {
+        // The header and as many objects as a board holds.
+        let full = "c\n".repeat(MAX_OBJECTS + 1);
+        assert_eq!(scan(&full).stop, None);
+        // Slashdashed nodes and comments don't count; the next node does.
+        let over = format!("{full}/-c\n// c\n  c x=1 {{");
+        assert_eq!(
+            scan(&over).stop,
+            Some(Stop::TooManyObjects {
+                at: full.len() + "/-c\n// c\n  ".len()
+            })
+        );
     }
 
     #[test]

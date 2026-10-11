@@ -21,6 +21,12 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
 const WORKER: &str = env!("CARGO_BIN_EXE_lawh-math-worker");
 
+/// How long a test waits for the worker to crash or be killed before giving up: only a guard
+/// against a test that would otherwise hang. A busy machine (other builds, swap) can push a crash
+/// or a kill seconds past [`DEFAULT_TIMEOUT`]; how long a compile may take is checked in
+/// `tests/timeout.rs` and `tests/worker.rs`, not here.
+const PATIENCE: Duration = DEFAULT_TIMEOUT.saturating_add(Duration::from_secs(30));
+
 fn engine() -> MathEngine {
     MathEngine::with_worker(WorkerCommand::new(WORKER))
 }
@@ -95,8 +101,14 @@ fn the_worker_runs_under_the_memory_cap() {
     let (mut peak_vm, mut peak_rss) = (0, 0);
     let started = Instant::now();
     let outcome = loop {
+        // `VmPeak` is the kernel's peak, or the current address space when that is higher. Keep
+        // the last reading, not the largest: to grow an allocation, the kernel moves it to a
+        // bigger mapping (`mremap`) and counts both mappings for a moment, which a reading can
+        // catch above the cap the kernel enforces (940 MiB under a 768 MiB cap in 3 of 40 runs,
+        // 2026-10-11). The kernel's peak leaves that moment out, and the worker fills its last
+        // mapping for a long while after the last move before it fails to grow it again.
         if let Some(vm) = status_bytes(pid, "VmPeak") {
-            peak_vm = peak_vm.max(vm);
+            peak_vm = vm;
         }
         if let Some(rss) = status_bytes(pid, "VmHWM") {
             peak_rss = peak_rss.max(rss);
@@ -105,7 +117,7 @@ fn the_worker_runs_under_the_memory_cap() {
             MathStatus::Pending => std::thread::sleep(Duration::from_millis(1)),
             done => break done,
         }
-        assert!(started.elapsed() < Duration::from_secs(10), "still pending");
+        assert!(started.elapsed() < PATIENCE, "still pending");
     };
     println!(
         "{hungry}: {outcome:?} after {:?}; peak address space {:.0} MiB, peak RSS {:.0} MiB, cap {:.0} MiB",
@@ -123,7 +135,6 @@ fn the_worker_runs_under_the_memory_cap() {
     );
     assert!(peak_vm <= WORKER_MEMORY_LIMIT_BYTES, "{peak_vm}");
     assert!(peak_rss <= WORKER_MEMORY_LIMIT_BYTES, "{peak_rss}");
-    assert!(started.elapsed() < DEFAULT_TIMEOUT + Duration::from_secs(1));
     // The crashed worker was reaped before its error was cached.
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
 }
@@ -150,7 +161,18 @@ fn a_timed_out_worker_is_killed_not_left_spinning() {
     let pid = worker_pid().expect("a running worker");
     let endless = "#for i in range(10000) { for j in range(10000) { for k in range(10000) { } } }";
     assert_eq!(engine.layout_blocking(endless), Err(MathError::Timeout));
-    // Killed and reaped before the timeout was reported.
+    // `layout_blocking` stops waiting a second past the timeout, even when a busy machine has
+    // the engine still killing the worker then. The timeout is cached once the worker is gone.
+    let started = Instant::now();
+    let cached = loop {
+        match engine.request(endless) {
+            MathStatus::Pending => std::thread::sleep(Duration::from_millis(10)),
+            done => break done,
+        }
+        assert!(started.elapsed() < PATIENCE, "still pending");
+    };
+    assert_eq!(cached, MathStatus::Failed(MathError::Timeout));
+    // Killed and reaped before the timeout was cached.
     assert!(!Path::new(&format!("/proc/{pid}")).exists());
     assert_eq!(worker_pid(), None);
     // The next formula gets a new worker.

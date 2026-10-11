@@ -19,13 +19,15 @@
 //! recurses on nested blocks, nested comments and error recovery, so hostile files could
 //! otherwise overflow the stack. The scan also blanks comments, slashdashed text and other
 //! filler, which kdl reads up to a hundred times slower than spaces. Files are limited to
-//! [`MAX_FILE_BYTES`], block comments to [`MAX_COMMENT_DEPTH`] levels, and numbers, texts and
-//! the object count to the board's limits
+//! [`MAX_FILE_BYTES`], block comments to [`MAX_COMMENT_DEPTH`] levels, and numbers, texts, ids
+//! and the object count to the board's limits
 //! ([`MAX_COORDINATE`](crate::board::MAX_COORDINATE), [`MAX_SIZE`](crate::board::MAX_SIZE),
 //! [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS),
 //! [`MAX_TEXT_LINES`](crate::board::MAX_TEXT_LINES),
 //! [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS),
-//! [`MAX_OBJECTS`](crate::board::MAX_OBJECTS)).
+//! [`MAX_ID_CHARS`](crate::board::MAX_ID_CHARS),
+//! [`MAX_OBJECTS`](crate::board::MAX_OBJECTS)). The scan counts the objects, so kdl never parses
+//! more than a board holds.
 
 mod error;
 mod read;
@@ -34,21 +36,22 @@ mod write;
 
 /// Largest `.lawh` file [`from_lawh`] reads, in bytes (1 MiB).
 ///
-/// The largest board the caps allow writes 384,441 bytes: 40,000 characters of text the writer
-/// escapes as `\u{200B}`, and 492 arrows with 25-character coordinates. The limit leaves room
-/// for hand-written comments on top of that.
+/// The largest board the caps allow writes 415,551 bytes: 40,000 characters of text the writer
+/// escapes as `\u{200B}`, 492 arrows with 25-character coordinates, and ids of 64 digits, which
+/// the writer quotes. The limit leaves room for hand-written comments on top of that.
 ///
 /// Reading time grows with the file, not the board. Measured with `read_time_at_the_size_limit`
 /// in `tests/format_errors.rs` (Linux `x86_64`, release, 2026-10-11) on 1 MiB files:
 ///
 /// | file | read |
 /// |---|---|
-/// | the largest board the caps allow (384 KB) | 54 ms |
+/// | the largest board the caps allow (416 KB) | 68 ms |
 /// | line comments, block comments or spaces | 8 to 10 ms |
 /// | line breaks, slashdashed nodes, or a mix of filler | 22 to 33 ms |
 /// | slashdashed properties on one node | 57 ms |
 /// | the same filler before the scan blanked it | up to 4.1 s |
-/// | 500 objects, then more up to the limit (kdl reads them all before the cap is checked) | 1.1 s |
+/// | 500 circles, then more up to the limit (the scan stops kdl at the 501st) | 15 ms |
+/// | the same circles when kdl read them all before the cap was checked | 1.1 s |
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 
 /// Deepest nesting of block comments `/* /* */ */` in a `.lawh` file.
