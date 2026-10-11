@@ -2,8 +2,9 @@
 //!
 //! A typed character goes in at the cursor, with Alt held too: characters a keyboard layout
 //! types with `AltGr` arrive as plain characters, never as chords, so Alt with a character is
-//! taken as the character. Ctrl and Cmd chords type nothing in M2. `<CR>` breaks the line with `\n`, `<Tab>` types a tab. `<BS>` and
-//! `<Del>` delete a grapheme before or after the cursor, joining lines at a line break.
+//! taken as the character. Ctrl and Cmd chords type nothing in M2. `<CR>` breaks the line with
+//! `\n`, `<Tab>` types a tab. `<BS>` and `<Del>` delete a grapheme before or after the cursor,
+//! joining lines at a line break.
 //! `<Left>` and `<Right>` move by a grapheme within the line, `<Up>` and `<Down>` by a line
 //! keeping the column, `<Home>` and `<End>` to the line's ends. `<Esc>` ends the session (see
 //! `text.rs`). Other keys do nothing.

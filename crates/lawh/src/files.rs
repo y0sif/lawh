@@ -106,6 +106,41 @@ pub fn write_target(
     }
 }
 
+/// The writes of one batch of the engine's effects: those one key or timeout asked for.
+///
+/// The board does not change while the app does a batch's effects (the engine changes it only
+/// while it takes a key, a timeout or a click), so every write of a batch writes the same bytes:
+/// the board is turned into text once, at the first write, and each file is written once. A
+/// later write to a file the batch has written already gets that write's result, without
+/// writing again; the app still reports it to the engine. A key asks for at most
+/// [`MAX_WRITES_PER_KEY`](lawh_core::engine::MAX_WRITES_PER_KEY) writes, so the files are few.
+#[derive(Debug, Default)]
+pub struct WriteBatch {
+    /// The board as text, once a write has needed it.
+    contents: Option<String>,
+    /// Each file written, and how the write went.
+    written: Vec<(PathBuf, Result<(), String>)>,
+}
+
+impl WriteBatch {
+    /// Writes the board's text (`contents` makes it, the first time) to `target` with `write`,
+    /// unless this batch has written `target` already: then how that write went.
+    pub fn write(
+        &mut self,
+        target: PathBuf,
+        contents: impl FnOnce() -> String,
+        write: impl FnOnce(&Path, &[u8]) -> io::Result<()>,
+    ) -> Result<(), String> {
+        if let Some((_, result)) = self.written.iter().find(|(file, _)| *file == target) {
+            return result.clone();
+        }
+        let contents = self.contents.get_or_insert_with(contents);
+        let result = write(&target, contents.as_bytes()).map_err(|err| err.to_string());
+        self.written.push((target, result.clone()));
+        result
+    }
+}
+
 /// Writes `contents` to `path` so that the file is either the old one or the new one, never
 /// half written: into a new temporary file in the same directory, flushed to disk, then renamed
 /// over `path`, and on Unix the directory flushed too, so the rename survives a power cut. On an
@@ -325,6 +360,50 @@ mod tests {
         let name = engine_name(&real);
         assert_ne!(Path::new(&name), real);
         assert_eq!(write_target(&name, Some((&name, &real)), None), real);
+    }
+
+    #[test]
+    fn a_batch_makes_the_text_once_and_writes_each_file_once() {
+        let mut batch = WriteBatch::default();
+        let mut made = 0;
+        let mut written = Vec::new();
+        let mut results = Vec::new();
+        for name in [
+            "a.lawh", "b.lawh", "a.lawh", "bad.lawh", "b.lawh", "bad.lawh",
+        ] {
+            let result = batch.write(
+                PathBuf::from(name),
+                || {
+                    made += 1;
+                    "board".to_owned()
+                },
+                |target, bytes| {
+                    written.push((target.to_owned(), bytes.to_vec()));
+                    if target == Path::new("bad.lawh") {
+                        Err(io::Error::other("disk full"))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            results.push(result);
+        }
+        assert_eq!(made, 1);
+        let board = b"board".to_vec();
+        assert_eq!(
+            written,
+            [
+                (PathBuf::from("a.lawh"), board.clone()),
+                (PathBuf::from("b.lawh"), board.clone()),
+                (PathBuf::from("bad.lawh"), board),
+            ]
+        );
+        // Every write has its result, a failed one too, in order.
+        let failed = Err("disk full".to_owned());
+        assert_eq!(
+            results,
+            [Ok(()), Ok(()), Ok(()), failed.clone(), Ok(()), failed]
+        );
     }
 
     /// The directory's file names, sorted.

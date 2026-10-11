@@ -38,7 +38,11 @@ enum Found {
 
 impl Engine {
     /// The Visual selection: the objects whose bounds lie inside [`Engine::visual_rect`], in
-    /// z-order. Empty outside Visual mode.
+    /// z-order, as measured after the last key. Empty outside Visual mode.
+    ///
+    /// Every key that moves the cursor in Visual mode pays for the new selection before it
+    /// moves (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)), so a motion that runs out of work part
+    /// way still leaves the selection matching the rectangle.
     pub fn selection(&self) -> &[ObjectId] {
         &self.selection
     }
@@ -62,7 +66,12 @@ impl Engine {
         }
     }
 
+    /// `v`: Visual mode from the cursor. Measuring the board for the selection counts as work:
+    /// when the key runs out, it stays in Normal mode.
     pub(super) fn enter_visual(&mut self, measure: &mut dyn Measure) {
+        if !self.charge(self.layout_work()) {
+            return;
+        }
         self.visual = Some(self.cursor_region(measure));
         self.mode = Mode::Visual;
         self.select(measure);
@@ -77,25 +86,29 @@ impl Engine {
         }
     }
 
-    /// Selects the objects whose bounds lie inside the Visual rectangle, edges included.
-    /// Measuring the board counts as work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)): when the
-    /// key has run out, nothing is selected.
+    /// Selects the objects whose bounds lie inside the Visual rectangle, edges included. It
+    /// measures the board: the caller has counted that work already
+    /// ([`Engine::layout_work`]), so the selection is made even once the key has run out.
     fn select(&mut self, measure: &mut dyn Measure) {
+        let layout = self.layout(measure);
+        self.select_in(&layout, measure);
+    }
+
+    /// [`Engine::select`] with the bounds of every object, in z-order, measured already.
+    fn select_in(&mut self, layout: &[Rect], measure: &mut dyn Measure) {
         self.selection.clear();
-        if !self.charge(self.layout_work()) {
-            return;
-        }
         let Some(rect) = self.visual_rect(measure) else {
             return;
         };
         let inside =
-            |b: Rect| rect.x0 <= b.x0 && b.x1 <= rect.x1 && rect.y0 <= b.y0 && b.y1 <= rect.y1;
+            |b: &Rect| rect.x0 <= b.x0 && b.x1 <= rect.x1 && rect.y0 <= b.y0 && b.y1 <= rect.y1;
         let selected = self
             .board
             .objects()
             .iter()
-            .filter(|o| inside(bounds(o, measure)))
-            .map(|o| o.id.clone())
+            .zip(layout)
+            .filter(|(_, b)| inside(b))
+            .map(|(o, _)| o.id.clone())
             .collect();
         self.selection = selected;
     }
@@ -114,9 +127,13 @@ impl Engine {
             Lookup::Prefix => return Vec::new(),
             Lookup::Nothing => {}
             Lookup::Found(Found::Motion(motion)) => {
-                let count = motion.count(self.pending.count);
-                self.motion(motion, count, measure);
-                self.select(measure);
+                // The selection after the motion is paid for first: a motion cut short by the
+                // work budget still moves the cursor, and the selection must follow it.
+                if self.charge(self.layout_work()) {
+                    let count = motion.count(self.pending.count);
+                    self.motion(motion, count, measure);
+                    self.select(measure);
+                }
             }
             Lookup::Found(Found::Command(Visual::Operator(operator))) => {
                 self.visual_operate(operator, measure);
@@ -133,7 +150,17 @@ impl Engine {
 
     /// Deletes or yanks the selection as one change and returns to Normal mode. `.` cannot
     /// repeat a Visual change in M2, so a delete forgets the last change.
+    ///
+    /// The selection is made again from the bounds measured for the change, so it is what the
+    /// rectangle holds now, at no extra work. When the key runs out of work before measuring,
+    /// it only leaves Visual mode.
     fn visual_operate(&mut self, operator: Operator, measure: &mut dyn Measure) {
+        if !self.charge(self.layout_work()) {
+            self.leave_visual();
+            return;
+        }
+        let bounds = self.layout(measure);
+        self.select_in(&bounds, measure);
         let selected: Vec<usize> = self
             .selection
             .iter()
@@ -144,10 +171,6 @@ impl Engine {
             self.info("nothing selected");
             return;
         }
-        if !self.charge(self.layout_work()) {
-            return;
-        }
-        let bounds = self.layout(measure);
         if self.take_objects(operator, selected, &bounds) {
             self.repeat.forget();
         }

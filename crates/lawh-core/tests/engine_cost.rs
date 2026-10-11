@@ -259,6 +259,29 @@ fn a_mapping_that_undoes_and_redoes_a_deep_history_stops_within_the_work_budget(
 }
 
 #[test]
+fn a_visual_motion_cut_short_by_the_work_budget_keeps_the_selection() {
+    // `10000J` walks to the bottom, then `10000K` runs out part way back up. Before, the
+    // selection was left empty while the rectangle still spanned objects, and `d` then said
+    // "nothing selected".
+    let mut r = run_with_rc("xmap Q 10000J10000K10000J\n", column(), "ggvQ");
+    assert_eq!(message(&r), Some(TOO_MUCH_WORK));
+    assert_eq!(r.engine.mode(), lawh_core::Mode::Visual);
+    let Cursor::Object(at) = r.engine.cursor().clone() else {
+        panic!("{:?}", r.engine.cursor());
+    };
+    let k: usize = at.as_str()[1..].parse().unwrap();
+    assert!((1..499).contains(&k), "{at}");
+    // The rectangle spans `r0` to the cursor's rectangle, and so does the selection.
+    let spanned: Vec<ObjectId> = (0..=k).map(|i| id(&format!("r{i}"))).collect();
+    assert_eq!(r.engine.selection(), spanned.as_slice());
+    r.feed("d");
+    assert_eq!(message(&r), None);
+    assert_eq!(r.engine.board().len(), 499 - k);
+    assert!(spanned.iter().all(|i| !r.engine.board().contains(i)));
+    assert!(r.engine.board().contains(&id(&format!("r{}", k + 1))));
+}
+
+#[test]
 fn a_mapping_of_w_over_a_full_board_stops_within_the_work_budget() {
     // Before the budget: 2.2 s in release.
     let (mut r, elapsed) = timed(&rc_repeating("w", 255), texts(), "ggQ");

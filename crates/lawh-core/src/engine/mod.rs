@@ -23,8 +23,9 @@
 //! [`Engine::source`] reads both from a lawhrc.
 //!
 //! One typed key may set off many commands, through mappings, `.` and counts. It does at most
-//! [`MAX_KEY_WORK`] work (see `work.rs`): past it, the command under way stops where it is and
-//! the rest of the key's keys are dropped, with a message.
+//! [`MAX_KEY_WORK`] work (see `work.rs`) and asks for at most [`MAX_WRITES_PER_KEY`] writes:
+//! past either, the command under way stops where it is and the rest of the key's keys are
+//! dropped, with a message.
 
 mod block;
 mod cmdline;
@@ -55,7 +56,7 @@ use kurbo::{Point, Rect};
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, parse_command};
 pub use cursor::{Cursor, anchor, round3};
-pub use exec::MAX_PENDING_WRITES;
+pub use exec::{MAX_PENDING_WRITES, MAX_WRITES_PER_KEY};
 pub use keymap::{
     MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MapKey, MapMode,
 };
@@ -111,6 +112,10 @@ pub enum Effect {
     /// atomically, then report back with [`Engine::write_done`]. When `quit_after` is set and
     /// the write went well, `write_done` returns [`Effect::Quit`], unless the write was a copy
     /// and the board's own file still lacks its changes; the app does not quit by itself.
+    ///
+    /// One key or timeout asks for at most [`MAX_WRITES_PER_KEY`] writes, and the board does not
+    /// change while the app does them: the app may write each file once for them all, as long as
+    /// it reports every write, in order.
     Write { path: String, quit_after: bool },
     /// Quit the app. Only sent when quitting is allowed.
     Quit,
@@ -245,8 +250,9 @@ impl Engine {
 
     /// A mouse click at board point `at`, on object `hit` if any. It ends an Insert session
     /// (as one undo step), block-Normal mode, Visual mode and the command line, drops pending
-    /// keys (those waiting for a mapping too), and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units).
-    /// A point that is not finite leaves the cursor where it is.
+    /// keys (those waiting for a mapping too), and puts the cursor on `hit`, or else on the grid
+    /// point nearest `at` (whole units). A point that is not finite leaves the cursor where it
+    /// is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
         self.reset_work();
         if self.session.is_some() {

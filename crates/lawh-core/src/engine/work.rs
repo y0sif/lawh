@@ -22,8 +22,13 @@
 //! in a text block counts its work once it has run, so it may pass the budget by its own work,
 //! which is at most a few milliseconds. Nothing more runs for that key: the typeahead is dropped
 //! and the message says so. The budget starts again with the next typed key, timeout or click.
+//!
+//! Writes are counted apart, since the app does them and they cost it far more than they cost
+//! the engine: a key may ask for at most [`MAX_WRITES_PER_KEY`], and one past it stops the key
+//! the same way.
 
 use super::Engine;
+use super::exec::MAX_WRITES_PER_KEY;
 use super::text_motion::{Line, indicators_before, line_at};
 
 /// Most work one typed key (or a timeout) may do: 100,000,000 units, a unit being about a
@@ -90,11 +95,18 @@ pub(super) const STEP_WORK: usize = 1_300;
 /// The message when a key runs out of work.
 const TOO_MUCH_WORK: &str = "that key did too much work; the rest of it was dropped";
 
+/// The message when a key asks for one write too many.
+fn too_many_writes() -> String {
+    format!("that key asked for more than {MAX_WRITES_PER_KEY} writes; the rest of it was dropped")
+}
+
 /// The work done for the key being run.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Work {
     spent: usize,
-    /// The key ran out of work: nothing more runs for it.
+    /// Writes asked for (see [`MAX_WRITES_PER_KEY`]).
+    writes: usize,
+    /// The key ran out of work, or asked for too many writes: nothing more runs for it.
     over: bool,
 }
 
@@ -132,7 +144,25 @@ impl Engine {
         }
     }
 
-    /// The key being run has run out of work (see [`Engine::charge`]).
+    /// Counts a write for the key being run. False when the key has asked for
+    /// [`MAX_WRITES_PER_KEY`] already, or has run out of work: then the write is not counted and
+    /// the key stops as [`Engine::charge`] stops it, with its own message.
+    pub(super) fn charge_write(&mut self) -> bool {
+        if self.work.over {
+            return false;
+        }
+        if self.work.writes >= MAX_WRITES_PER_KEY {
+            self.work.over = true;
+            self.keymap.flush();
+            self.error(too_many_writes());
+            return false;
+        }
+        self.work.writes += 1;
+        true
+    }
+
+    /// The key being run has run out of work, or asked for too many writes (see
+    /// [`Engine::charge`], [`Engine::charge_write`]).
     pub(super) fn out_of_work(&self) -> bool {
         self.work.over
     }

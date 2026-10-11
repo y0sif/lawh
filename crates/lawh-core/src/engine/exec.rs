@@ -17,14 +17,39 @@ use crate::board::{
 };
 use crate::key::Key;
 
-/// Most writes that may wait for the app to report them with [`Engine::write_done`] (16).
+/// Most writes one typed key (or a timeout) may ask for: 4.
+///
+/// For each write the engine asks for, the app turns the board into text, writes it to a new
+/// file, flushes it to disk and renames it, unless it wrote the same file for the same key
+/// already. One write took 2.76 ms on an SSD, most of it the flush. Before this cap, a mapping
+/// such as `nmap Q :w<CR>Q` asked for 1,000 writes (stopped only by
+/// [`MAX_MAP_DEPTH`](super::MAX_MAP_DEPTH)), 2.8 s of frozen window, and one of 85 `:w<CR>`
+/// then itself for 9,945 (stopped by [`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS)), 27 s.
+/// [`MAX_KEY_WORK`](super::MAX_KEY_WORK) does not bound them: the engine's part of a write is
+/// only reading its `:` line (39,780 units for those 9,945).
+///
+/// Four writes take about 11 ms, about what a key that runs out of work takes in release, and
+/// leave room for a mapping that writes the board and a copy or two (`:w<CR>:w copy.lawh<CR>`).
+/// A write past the cap is refused, and the key stops as when it runs out of work: nothing more
+/// runs for it (a `:wq` or `:x` refused does not quit), the typeahead is dropped and the message
+/// says so. The count starts again with the next typed key, timeout or click.
+pub const MAX_WRITES_PER_KEY: usize = 4;
+
+/// Most writes that may wait for the app to report them with [`Engine::write_done`]: as many as
+/// one key may ask for ([`MAX_WRITES_PER_KEY`]).
 ///
 /// The app writes and reports right after the key that asked, so only the writes of one key
-/// wait together: a mapping such as `:w<CR>:w copy.lawh<CR>` asks for two. Each is matched to
-/// its report by path, oldest first, so every one can mark the board saved. Past the cap the
-/// oldest is forgotten: its report then reads as a write the engine did not ask for, which
-/// neither marks the board saved nor quits, the safe side.
-pub const MAX_PENDING_WRITES: usize = 16;
+/// wait together, and they all fit: a mapping such as `:w<CR>:w copy.lawh<CR>` asks for two.
+/// Each report is matched to the oldest write waiting with the same path, so every write can
+/// mark the board saved.
+///
+/// Only an app that leaves writes unreported fills the queue: then the oldest write is
+/// forgotten to make room. Reports are still matched oldest first, so when another write
+/// waiting has the forgotten one's path, the forgotten write's report takes that one, and it is
+/// the newest report for the path that finds no write waiting. A report that finds none reads
+/// as a write the engine did not ask for, which neither marks the board saved nor quits, the
+/// safe side.
+pub const MAX_PENDING_WRITES: usize = MAX_WRITES_PER_KEY;
 
 /// A write the engine asked the app for, until the app reports back.
 #[derive(Debug, Clone)]
@@ -208,19 +233,20 @@ impl Engine {
     /// Asks the app to write the board to `file`, or to the board's own file. An unnamed board
     /// takes `file` as its name; a named board writes a copy to it. `quit`: quit after the
     /// write, forced (`Some(true)`) or not.
+    ///
+    /// The key's writes are counted: past [`MAX_WRITES_PER_KEY`] the write is refused (the
+    /// board keeps its name, or lack of one) and the key stops.
     fn write(&mut self, file: Option<&str>, quit: Option<bool>) -> Vec<Effect> {
-        let path = match (file, &self.file_name) {
-            (Some(file), None) => {
-                self.file_name = Some(file.to_owned());
-                file.to_owned()
-            }
-            (Some(file), Some(_)) => file.to_owned(),
-            (None, Some(name)) => name.clone(),
-            (None, None) => {
-                self.error("no file name: :w <file> names the board");
-                return Vec::new();
-            }
+        let Some(path) = file.or(self.file_name.as_deref()).map(str::to_owned) else {
+            self.error("no file name: :w <file> names the board");
+            return Vec::new();
         };
+        if !self.charge_write() {
+            return Vec::new();
+        }
+        if self.file_name.is_none() {
+            self.file_name = Some(path.clone());
+        }
         let quit_after = quit.is_some();
         if self.pending_writes.len() >= MAX_PENDING_WRITES {
             self.pending_writes.pop_front();

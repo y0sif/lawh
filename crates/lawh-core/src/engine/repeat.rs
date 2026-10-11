@@ -26,10 +26,11 @@ use crate::key::{Key, KeyCode};
 /// all.
 ///
 /// An insert session records every key typed in it, so a long one could hold any number of
-/// keys. The largest text worth typing in one go is [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS)
-/// characters, and this leaves as much again for moving and correcting. A longer session cannot
-/// be repeated (`.` then does nothing), and a count stops replaying once it would pass this,
-/// which keeps `10000i` before a long session cheap.
+/// keys. The largest text worth typing in one go is
+/// [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS) characters, and this leaves as much again for
+/// moving and correcting. A longer session cannot be repeated (`.` then does nothing), and a
+/// count stops replaying once it would pass this, which keeps `10000i` before a long session
+/// cheap.
 pub const MAX_REPEAT_KEYS: usize = 10_000;
 
 /// A change `.` can repeat.

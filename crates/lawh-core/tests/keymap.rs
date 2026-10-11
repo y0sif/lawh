@@ -17,7 +17,7 @@ use insta::assert_snapshot;
 use lawh_core::engine::{
     Effect, Engine, Escape, MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS,
     MAX_PENDING_KEYS, MAX_PENDING_WRITES, MAX_RC_BYTES, MAX_RC_WARNINGS, MAX_REPEAT_KEYS,
-    RcWarning,
+    MAX_WRITES_PER_KEY, RcWarning,
 };
 use lawh_core::{Board, Cursor, Key, Mode, ObjectId, Point, Shape};
 
@@ -690,6 +690,97 @@ fn at_most_max_pending_writes_wait_for_their_reports() {
     let mut r = named("", &format!(":ci 1<CR>:w<CR>{}", copies(1)));
     r.write_done("a.lawh", Ok(()));
     assert!(!r.engine.is_modified());
+}
+
+/// The writes `r`'s keys asked for, and quits.
+fn writes_and_quits(r: &Run) -> (usize, usize) {
+    let writes = r
+        .effects
+        .iter()
+        .filter(|e| matches!(e, Effect::Write { .. }));
+    let quits = r.effects.iter().filter(|e| **e == Effect::Quit);
+    (writes.count(), quits.count())
+}
+
+/// The message when one key asks for more than [`MAX_WRITES_PER_KEY`] writes.
+fn too_many_writes() -> String {
+    format!("that key asked for more than {MAX_WRITES_PER_KEY} writes; the rest of it was dropped")
+}
+
+/// Reports each of `r`'s writes as done, to the path it named.
+fn report_writes(r: &mut Run) {
+    let paths: Vec<String> = r
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Write { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+    for path in paths {
+        r.write_done(&path, Ok(()));
+    }
+}
+
+#[test]
+fn one_key_asks_for_at_most_max_writes_per_key_writes() {
+    // A mapping that writes, then runs itself. Before the cap: 1,000 writes, stopped by
+    // MAX_MAP_DEPTH, 2.8 s for the app at 2.76 ms a write.
+    let rc = "nmap Q :w<CR>Q\n";
+    let mut r = named(rc, ":ci 1<CR>Q");
+    assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 0));
+    assert_eq!(error(&r), too_many_writes());
+    // The key stopped: the typeahead is dropped and the command line closed.
+    assert_eq!(r.engine.pending(), "");
+    assert_eq!(r.engine.mode(), Mode::Normal);
+    report_writes(&mut r);
+    assert!(!r.engine.is_modified());
+    // The next keys work, and the next `Q` writes again.
+    r.effects.clear();
+    r.feed(":ci 2<CR>");
+    assert_eq!(r.engine.board().len(), 2);
+    assert!(r.engine.is_modified());
+    r.feed("Q");
+    assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 0));
+    report_writes(&mut r);
+    assert!(!r.engine.is_modified());
+
+    // 85 writes, then itself. Before the cap: 9,945 writes, stopped by MAX_EXPANDED_KEYS, 27 s
+    // for the app, on 39,780 units of work.
+    let rc = format!("nmap Q {}Q\n", ":w<CR>".repeat(85));
+    let mut r = named(&rc, "Q");
+    assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 0));
+    assert_eq!(error(&r), too_many_writes());
+    assert_eq!(r.engine.pending(), "");
+    r.effects.clear();
+    r.feed("x:ci 1<CR>");
+    assert_eq!(r.engine.board().len(), 1);
+    assert_eq!(message(&r), None);
+}
+
+#[test]
+fn a_wq_or_x_past_max_writes_per_key_does_not_quit() {
+    let full = ":w<CR>".repeat(MAX_WRITES_PER_KEY);
+    for last in [":wq<CR>", ":x<CR>", ":wq!<CR>", ":x!<CR>"] {
+        let mut r = named(&format!("nnoremap Q {full}{last}\n"), ":ci 1<CR>Q");
+        assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 0), "{last}");
+        assert_eq!(error(&r), too_many_writes(), "{last}");
+        report_writes(&mut r);
+        assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 0), "{last}");
+        // Typed alone, it writes and quits.
+        r.effects.clear();
+        r.feed(":ci 2<CR>");
+        r.feed(last);
+        assert_eq!(writes_and_quits(&r), (1, 0), "{last}");
+        report_writes(&mut r);
+        assert_eq!(writes_and_quits(&r), (1, 1), "{last}");
+    }
+    // As many writes as the cap, the last of them `:wq`, quit.
+    let rhs = format!("{}:wq<CR>", ":w<CR>".repeat(MAX_WRITES_PER_KEY - 1));
+    let mut r = named(&format!("nnoremap Q {rhs}\n"), ":ci 1<CR>Q");
+    assert_eq!(message(&r), None);
+    report_writes(&mut r);
+    assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 1));
 }
 
 // Reading a lawhrc.

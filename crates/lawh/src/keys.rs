@@ -12,8 +12,9 @@
 //! - Cmd (the Super or Windows key elsewhere) and a character is `<D-x>`.
 //!
 //! The one key the app takes before the engine is Cmd+Q on macOS ([`is_close_request`]); every
-//! other chord goes to the engine, Super+Q elsewhere included. When app shortcuts come, they go through one modifier setting
-//! (Ctrl, or Cmd on macOS) as `CLAUDE.md` says, and are taken before the engine sees the key.
+//! other chord goes to the engine, Super+Q elsewhere included. When app shortcuts come, they go
+//! through one modifier setting (Ctrl, or Cmd on macOS) as `CLAUDE.md` says, and are taken before
+//! the engine sees the key.
 //!
 //! The caller drops key releases and synthetic presses (the keys winit reports as held when the
 //! window gains focus); repeats are kept, so a held `j` keeps moving.

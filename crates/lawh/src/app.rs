@@ -6,8 +6,9 @@
 //! status line over it. The mouse pans (drag), zooms (wheel) and selects (click).
 
 use std::collections::VecDeque;
+use std::io;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -249,48 +250,27 @@ impl App {
         }
     }
 
-    /// Does what the engine asked for.
+    /// Does what the engine asked for: the writes (see [`do_writes`]), then quitting or arming
+    /// the timer.
     fn apply(&mut self, event_loop: &ActiveEventLoop, effects: Vec<Effect>) {
-        let mut queue = VecDeque::from(effects);
-        while let Some(effect) = queue.pop_front() {
-            match effect {
-                Effect::Write { path, .. } => {
-                    let result = self.write(&path);
-                    queue.extend(self.engine.write_done(&path, result));
-                }
-                Effect::Quit => {
-                    tracing::info!("quitting");
-                    self.quitting = true;
-                    self.timer.cancel();
-                    event_loop.exit();
-                    return;
-                }
-                Effect::ArmTimer { ms } => self.timer.arm(Instant::now(), ms),
-            }
-        }
-    }
-
-    /// Writes the board for `:w` to `path`, as the engine names it.
-    fn write(&self, path: &str) -> Result<(), String> {
         let opened = self
             .file
             .as_ref()
             .map(|(name, real)| (name.as_str(), real.as_path()));
-        let target = files::write_target(path, opened, self.launch_dir.as_deref());
-        let started = Instant::now();
-        match files::write_atomic(&target, to_lawh(self.engine.board()).as_bytes()) {
-            Ok(()) => {
-                tracing::info!(
-                    path = %target.display(),
-                    ms = ms(started.elapsed()),
-                    "board written"
-                );
-                Ok(())
-            }
-            Err(err) => {
-                tracing::warn!(path = %target.display(), %err, "could not write the board");
-                Err(err.to_string())
-            }
+        let launch_dir = self.launch_dir.as_deref();
+        let after = do_writes(
+            &mut self.engine,
+            effects,
+            |path| files::write_target(path, opened, launch_dir),
+            write_board,
+        );
+        if after.quit {
+            tracing::info!("quitting");
+            self.quitting = true;
+            self.timer.cancel();
+            event_loop.exit();
+        } else if let Some(ms) = after.timer_ms {
+            self.timer.arm(Instant::now(), ms);
         }
     }
 
@@ -684,6 +664,62 @@ fn rgba_to_0rgb(rgba: &[u8], out: &mut [u32]) {
     }
 }
 
+/// What is left of a batch of effects once its writes are done.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AfterWrites {
+    /// The engine allows quitting ([`Effect::Quit`]).
+    quit: bool,
+    /// Arm the engine's timer for this many milliseconds ([`Effect::ArmTimer`]).
+    timer_ms: Option<u64>,
+}
+
+/// Does the writes `effects` ask for, those of one key or timeout, reporting each to `engine`
+/// in order with [`Engine::write_done`] (which may add [`Effect::Quit`] after them), and returns
+/// what else the effects ask for. `target` gives the file a write's path names; `write` writes
+/// it. The writes go through one [`files::WriteBatch`]: the board is turned into text once and
+/// each file is written once, but every write is reported, so the engine's writes waiting for
+/// their reports all get one. Stops at [`Effect::Quit`].
+fn do_writes(
+    engine: &mut Engine,
+    effects: Vec<Effect>,
+    target: impl Fn(&str) -> PathBuf,
+    mut write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+) -> AfterWrites {
+    let mut batch = files::WriteBatch::default();
+    let mut after = AfterWrites::default();
+    let mut queue = VecDeque::from(effects);
+    while let Some(effect) = queue.pop_front() {
+        match effect {
+            Effect::Write { path, .. } => {
+                let board = engine.board();
+                let result = batch.write(target(&path), || to_lawh(board), &mut write);
+                queue.extend(engine.write_done(&path, result));
+            }
+            Effect::Quit => {
+                after.quit = true;
+                break;
+            }
+            Effect::ArmTimer { ms } => after.timer_ms = Some(ms),
+        }
+    }
+    after
+}
+
+/// Writes the board's text, `contents`, to `target` for `:w`, logging how it went.
+fn write_board(target: &Path, contents: &[u8]) -> io::Result<()> {
+    let started = Instant::now();
+    let written = files::write_atomic(target, contents);
+    match &written {
+        Ok(()) => tracing::info!(
+            path = %target.display(),
+            ms = ms(started.elapsed()),
+            "board written"
+        ),
+        Err(err) => tracing::warn!(path = %target.display(), %err, "could not write the board"),
+    }
+    written
+}
+
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
@@ -730,6 +766,78 @@ mod tests {
         timer.arm(now + Duration::from_millis(500), 1000);
         assert!(!timer.fire(now + Duration::from_millis(1200)));
         assert!(timer.fire(now + Duration::from_millis(1500)));
+    }
+
+    /// An engine for a board named `a.lawh` with one circle, and `Q` mapped to `rhs`.
+    fn named_with_q(rhs: &str) -> Engine {
+        let board = from_lawh("lawh version=1\ncircle id=c1 x=0 y=0 r=1\n").unwrap();
+        let mut engine = Engine::new(board).with_file_name(Some("a.lawh".to_owned()));
+        assert_eq!(engine.source(&format!("nnoremap Q {rhs}\n")), []);
+        engine
+    }
+
+    /// The file a write names, as given.
+    fn as_given(path: &str) -> PathBuf {
+        PathBuf::from(path)
+    }
+
+    /// Types `script` (Vim notation): the effects its keys ask for.
+    fn type_keys(engine: &mut Engine, script: &str) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for key in parse_keys(script).unwrap() {
+            effects.extend(engine.feed(key, &mut FixedMeasure));
+        }
+        effects
+    }
+
+    #[test]
+    fn a_batch_writes_each_file_once_and_reports_every_write() {
+        // Four writes, the most one key may ask for: the board's own file three times, a copy
+        // once. Each file is written once, and every write is reported: `:wq` then quits.
+        let mut engine = named_with_q(":w<CR>:w b.lawh<CR>:w<CR>:wq<CR>");
+        type_keys(&mut engine, ":ci 2<CR>");
+        assert!(engine.is_modified());
+        let effects = type_keys(&mut engine, "Q");
+        assert_eq!(effects.len(), 4, "{effects:?}");
+        let mut written = Vec::new();
+        let after = do_writes(&mut engine, effects, as_given, |target, bytes| {
+            written.push((target.to_owned(), bytes.to_vec()));
+            Ok(())
+        });
+        let bytes = to_lawh(engine.board()).into_bytes();
+        assert_eq!(
+            written,
+            [
+                (PathBuf::from("a.lawh"), bytes.clone()),
+                (PathBuf::from("b.lawh"), bytes),
+            ]
+        );
+        assert_eq!(
+            after,
+            AfterWrites {
+                quit: true,
+                timer_ms: None
+            }
+        );
+        assert!(!engine.is_modified());
+    }
+
+    #[test]
+    fn a_failed_write_is_tried_once_and_wq_does_not_quit() {
+        let mut engine = named_with_q(":w<CR>:wq<CR>");
+        type_keys(&mut engine, ":ci 2<CR>");
+        let effects = type_keys(&mut engine, "Q");
+        let mut tries = 0;
+        let after = do_writes(&mut engine, effects, as_given, |_, _| {
+            tries += 1;
+            Err(io::Error::other("disk full"))
+        });
+        assert_eq!(tries, 1);
+        assert_eq!(after, AfterWrites::default());
+        assert!(engine.is_modified());
+        let message = engine.message().unwrap();
+        assert!(message.error);
+        assert_eq!(message.text, "cannot write \"a.lawh\": disk full");
     }
 
     #[test]

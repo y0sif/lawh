@@ -24,8 +24,8 @@ pub(crate) enum Side {
     Above,
 }
 
-/// The top-left corner for a box of `size` placed on side `on` of `reference`, clear of every box in
-/// `obstacles`, or `None` when there is no room within [`MAX_COORDINATE`].
+/// The top-left corner for a box of `size` placed on side `on` of `reference`, clear of every box
+/// in `obstacles`, or `None` when there is no room within [`MAX_COORDINATE`].
 ///
 /// Below: the box starts [`PLACE_GAP`] under `reference`, its left edge on `reference`'s. While
 /// it overlaps obstacles it moves down to [`PLACE_GAP`] under the lowest of them. Above is the
