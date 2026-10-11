@@ -20,7 +20,7 @@ const MAX_PX_PER_UNIT: f64 = 10_000.0;
 /// background is drawn. Real displays stay under 5. Stroke widths, arrowheads
 /// and the round joins `vello_cpu` builds for them grow with it, so an absurd
 /// one would make every outline absurdly costly.
-const MAX_SCALE_FACTOR: f64 = 32.0;
+pub(crate) const MAX_SCALE_FACTOR: f64 = 32.0;
 
 /// A view of the board: the board point at the centre of the image, the
 /// zoom, the image size in physical pixels and the window scale factor.

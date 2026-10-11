@@ -809,6 +809,11 @@ impl TextShaper {
             .and_then(|entry| entry.shaped.as_deref())
     }
 
+    /// The height of one line of text, in layout units.
+    pub(crate) fn line_height(&self) -> f32 {
+        self.line_height
+    }
+
     /// Estimated bytes of everything cached.
     #[cfg(test)]
     pub(crate) fn bytes(&self) -> usize {
@@ -880,7 +885,9 @@ impl TextShaper {
         );
     }
 
-    fn build(&mut self, text: &str) -> Layout<()> {
+    /// Lays `text` out as board text is laid out, without caching it: for status strings, which
+    /// have their own cache (`crate::status`).
+    pub(crate) fn build(&mut self, text: &str) -> Layout<()> {
         // No quantizing: positions stay fractional so text scales smoothly.
         let mut builder = self
             .layouts

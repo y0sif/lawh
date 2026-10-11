@@ -37,6 +37,14 @@ pub(crate) const RESIZED_FRAME_BUDGET_NS: f64 = 8e6;
 /// What a window frame may spend on the outlines of objects over the budget.
 pub(crate) const OUTLINE_BUDGET_NS: f64 = 3e6;
 
+/// What a window frame may spend highlighting the objects of a Visual selection
+/// (`Renderer::render_with`), apart from the frame's budget: the overlay is drawn after the
+/// board and isn't charged to it. A highlight is an outline around an object's bounds, so a
+/// full board selected with every object crossing the screen would take tens of milliseconds;
+/// past this, the rest of the selection isn't highlighted (the Visual rectangle still shows
+/// it). The same as the outlines' budget.
+pub(crate) const HIGHLIGHT_BUDGET_NS: f64 = 3e6;
+
 /// What an export may spend drawing objects. Exports don't need to be interactive, so this is
 /// far above anything a real board needs, but a hostile board still can't make one take minutes.
 pub(crate) const EXPORT_BUDGET_NS: f64 = 2e9;
@@ -129,6 +137,11 @@ impl Budget {
 
     pub(crate) fn export() -> Self {
         Self::new(EXPORT_BUDGET_NS)
+    }
+
+    /// For the highlights of a Visual selection.
+    pub(crate) fn highlights() -> Self {
+        Self::new(HIGHLIGHT_BUDGET_NS)
     }
 
     /// No limit, for measuring.

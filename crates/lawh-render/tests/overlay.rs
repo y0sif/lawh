@@ -1,0 +1,403 @@
+//! What the renderer tells the app about the board it draws: where the caret stands in a
+//! block, which object a click hits, the bounds the engine measures with, and what the overlay
+//! leaves of the board.
+
+// Lets the helpers below unwrap and panic like test functions (see clippy.toml).
+#![cfg(test)]
+
+mod common;
+
+use kurbo::{Point, Rect};
+use lawh_core::engine::Measure;
+use lawh_core::{Board, Object, ObjectId, Shape};
+use lawh_render::{
+    Caret, Overlay, OverlayCursor, Renderer, StatusLine, Viewport, status_bar_height_px,
+};
+
+/// Where the test texts start.
+const AT: Point = Point::new(2.0, 3.0);
+
+fn id(name: &str) -> ObjectId {
+    ObjectId::new(name).unwrap()
+}
+
+fn text(name: &str, at: Point, text: &str) -> Object {
+    Object::new(
+        id(name),
+        Shape::Text {
+            at,
+            text: text.to_owned(),
+        },
+    )
+}
+
+fn board_of(objects: impl IntoIterator<Item = Object>) -> Board {
+    let mut board = Board::new();
+    for object in objects {
+        board.insert(object).unwrap();
+    }
+    board
+}
+
+/// The caret before `byte` of a text `t1` holding `content` at [`AT`].
+fn caret_in(renderer: &mut Renderer, content: &str, byte: usize) -> Rect {
+    let board = board_of([text("t1", AT, content)]);
+    renderer.caret_rect(&board, &id("t1"), byte).unwrap()
+}
+
+/// The bounds of a text holding `content` at [`AT`].
+fn text_bounds(renderer: &mut Renderer, content: &str) -> Rect {
+    renderer.object_bounds(&text("t1", AT, content)).unwrap()
+}
+
+fn near(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-4
+}
+
+#[test]
+fn the_caret_stands_before_its_byte_one_line_high() {
+    let mut renderer = Renderer::new_trusted();
+    let line = text_bounds(&mut renderer, "hello world").height();
+    let start = caret_in(&mut renderer, "hello world", 0);
+    assert!(near(start.x0, AT.x) && near(start.y0, AT.y), "{start:?}");
+    assert!(
+        near(start.width(), 0.0) && near(start.height(), line),
+        "{start:?}"
+    );
+
+    // In the middle of a word: as far in as the text before it reaches.
+    let hello = text_bounds(&mut renderer, "hello").width();
+    let middle = caret_in(&mut renderer, "hello world", 5);
+    assert!(
+        near(middle.x0, AT.x + hello),
+        "{middle:?}, hello is {hello} wide"
+    );
+    assert!(near(middle.y0, AT.y) && near(middle.height(), line));
+
+    // At the end: at the right edge of the text's bounds. Past the end, the same.
+    let bounds = text_bounds(&mut renderer, "hello world");
+    let end = caret_in(&mut renderer, "hello world", 11);
+    assert!(near(end.x0, bounds.x1), "{end:?} {bounds:?}");
+    assert_eq!(caret_in(&mut renderer, "hello world", 999), end);
+}
+
+#[test]
+fn the_caret_on_a_second_line_stands_a_line_down() {
+    let mut renderer = Renderer::new_trusted();
+    let line = caret_in(&mut renderer, "ab\ncd", 0).height();
+    // The start of the second line.
+    let second = caret_in(&mut renderer, "ab\ncd", 3);
+    assert!(near(second.x0, AT.x), "{second:?}");
+    assert!(
+        near(second.y0, AT.y + line) && near(second.height(), line),
+        "{second:?}"
+    );
+    // The end of the first line, before its line break.
+    let ab = text_bounds(&mut renderer, "ab").width();
+    let first_end = caret_in(&mut renderer, "ab\ncd", 2);
+    assert!(
+        near(first_end.x0, AT.x + ab) && near(first_end.y0, AT.y),
+        "{first_end:?}"
+    );
+    // An empty last line.
+    let last = caret_in(&mut renderer, "ab\n", 3);
+    assert!(
+        near(last.x0, AT.x) && near(last.y0, AT.y + line),
+        "{last:?}"
+    );
+}
+
+#[test]
+fn the_caret_in_an_empty_text_is_one_line_high_at_its_corner() {
+    let mut renderer = Renderer::new_trusted();
+    let line = caret_in(&mut renderer, "x", 0).height();
+    assert!(line > 0.3, "{line}");
+    let empty = caret_in(&mut renderer, "", 0);
+    assert!(near(empty.x0, AT.x) && near(empty.y0, AT.y), "{empty:?}");
+    assert!(
+        near(empty.width(), 0.0) && near(empty.height(), line),
+        "{empty:?}"
+    );
+}
+
+#[test]
+fn a_combining_accent_is_one_step_for_the_caret() {
+    let mut renderer = Renderer::new_trusted();
+    // "e" + U+0301 COMBINING ACUTE ACCENT, then "x": the accent takes no room of its own.
+    let accented = "e\u{301}x";
+    let start = caret_in(&mut renderer, accented, 0);
+    assert!(near(start.x0, AT.x));
+    // Inside the grapheme: at its start.
+    assert_eq!(caret_in(&mut renderer, accented, 1), start);
+    // After it: where the caret after a plain "e" stands.
+    let after = caret_in(&mut renderer, accented, 3);
+    let plain = caret_in(&mut renderer, "ex", 1);
+    assert!(
+        after.x0 > AT.x && near(after.x0, plain.x0),
+        "{after:?} {plain:?}"
+    );
+    let end = caret_in(&mut renderer, accented, 4);
+    assert!(near(end.x0, text_bounds(&mut renderer, accented).x1));
+}
+
+#[test]
+fn only_texts_and_formulas_have_a_caret() {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    // A formula's caret is in its source, laid out as text.
+    let math = renderer.caret_rect(&board, &id("m1"), 0).unwrap();
+    assert!(near(math.x0, 5.0) && near(math.y0, 0.0), "{math:?}");
+    assert_eq!(renderer.caret_rect(&board, &id("c1"), 0), None);
+    assert_eq!(renderer.caret_rect(&board, &id("nope"), 0), None);
+}
+
+fn rect(name: &str, x: f64, y: f64, w: f64, h: f64) -> Object {
+    Object::new(
+        id(name),
+        Shape::Rect {
+            origin: Point::new(x, y),
+            w,
+            h,
+        },
+    )
+}
+
+#[test]
+fn a_click_hits_the_topmost_object_under_it() {
+    let board = board_of([
+        rect("r1", 0.0, 0.0, 4.0, 4.0),
+        rect("r2", 2.0, 2.0, 4.0, 4.0),
+        text("t1", Point::new(10.0, 0.0), "hello"),
+    ]);
+    let mut renderer = Renderer::new_trusted();
+    let hit = |renderer: &mut Renderer, x: f64, y: f64| {
+        renderer
+            .hit_test(&board, Point::new(x, y), 0.0)
+            .map(|id| id.as_str().to_owned())
+    };
+    assert_eq!(hit(&mut renderer, 3.0, 3.0).as_deref(), Some("r2"));
+    assert_eq!(hit(&mut renderer, 1.0, 1.0).as_deref(), Some("r1"));
+    assert_eq!(hit(&mut renderer, 5.0, 5.0).as_deref(), Some("r2"));
+    // Inside a text's laid-out bounds.
+    let hello = renderer.object_bounds(&board.objects()[2]).unwrap();
+    let inside = hello.center();
+    assert_eq!(
+        hit(&mut renderer, inside.x, inside.y).as_deref(),
+        Some("t1")
+    );
+    // Empty space, and points that aren't.
+    assert_eq!(hit(&mut renderer, 8.0, 8.0), None);
+    assert_eq!(hit(&mut renderer, hello.x1 + 0.1, inside.y), None);
+    assert_eq!(hit(&mut renderer, f64::NAN, 1.0), None);
+}
+
+#[test]
+fn a_thin_line_is_hit_within_the_tolerance() {
+    let board = board_of([Object::new(
+        id("l1"),
+        Shape::Line {
+            a: Point::new(0.0, 0.0),
+            b: Point::new(4.0, 0.0),
+        },
+    )]);
+    let mut renderer = Renderer::new_trusted();
+    let above = Point::new(2.0, -0.1);
+    assert_eq!(renderer.hit_test(&board, above, 0.05), None);
+    assert_eq!(renderer.hit_test(&board, above, 0.2), Some(id("l1")));
+    // Past its end, within the tolerance too.
+    assert_eq!(
+        renderer.hit_test(&board, Point::new(4.15, 0.0), 0.2),
+        Some(id("l1"))
+    );
+    // On the line itself, with no tolerance (or one that isn't a number).
+    for tolerance in [0.0, -1.0, f64::NAN] {
+        assert_eq!(
+            renderer.hit_test(&board, Point::new(2.0, 0.0), tolerance),
+            Some(id("l1")),
+            "{tolerance}"
+        );
+        assert_eq!(renderer.hit_test(&board, above, tolerance), None);
+    }
+}
+
+#[test]
+fn the_renderer_measures_objects_as_object_bounds_does() {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    for resolved in [false, true] {
+        if resolved {
+            renderer.resolve_math(&board);
+        }
+        for object in board.objects() {
+            let measured = Measure::bounds(&mut renderer, object);
+            assert!(measured.is_some(), "{}", object.id.as_str());
+            assert_eq!(
+                measured,
+                renderer.object_bounds(object),
+                "{} (math resolved: {resolved})",
+                object.id.as_str()
+            );
+        }
+    }
+    // Text and math boxes come from shaping and Typst, not a fixed width per character.
+    let t1 = board.get(&id("t1")).unwrap();
+    let fixed = lawh_core::FixedMeasure.bounds(t1).unwrap();
+    assert_ne!(Measure::bounds(&mut renderer, t1), Some(fixed));
+}
+
+#[test]
+fn the_overlay_leaves_the_board_as_render_draws_it_above_the_status_bar() {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    renderer.resolve_math(&board);
+    let bounds = renderer.board_bounds(&board).unwrap();
+    for scale in [1.0, 2.0] {
+        let vp = Viewport::fit(bounds, 400, 300, scale);
+        let plain = renderer.render(&board, &vp).to_vec();
+        let with = renderer
+            .render_with(&board, &vp, &Overlay::default())
+            .to_vec();
+        let bar = status_bar_height_px(scale) as usize;
+        let above = (300 - bar) * 400 * 4;
+        assert_eq!(plain[..above], with[..above], "scale {scale}");
+        // The bar itself, a shade darker than the paper, along the bottom.
+        let bottom = common::pixel(&with, 400, 200, 299);
+        assert_ne!(bottom, common::pixel(&plain, 400, 200, 299));
+        assert!(bottom[0] > 0xE0 && bottom[0] < 0xFA, "{bottom:?}");
+        assert_eq!(renderer.last_frame().drawn, board.len());
+    }
+}
+
+/// Pixels of the cursor's blue (#2563EB), anti-aliased edges aside.
+fn blue_pixels(buf: &[u8]) -> usize {
+    buf.as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[2] > 180 && px[0] < 120 && px[1] < 150)
+        .count()
+}
+
+#[test]
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the pixel looked at is inside a 600x300 image"
+)]
+fn the_caret_and_cursor_are_drawn_in_blue_where_they_are() {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    renderer.resolve_math(&board);
+    let vp = Viewport::new(Point::new(2.0, -4.0), 3.0, 600, 300, 1.0);
+    let t1 = id("t1");
+    let plain = renderer
+        .render_with(&board, &vp, &Overlay::default())
+        .to_vec();
+    assert_eq!(blue_pixels(&plain), 0);
+    // A bar caret in "Area": as tall as a line of text at zoom 3 (0.5 units an em, 120 px a
+    // unit), 2 px wide.
+    let overlay = Overlay {
+        caret: Some(Caret {
+            id: &t1,
+            byte: 2,
+            block: false,
+        }),
+        ..Overlay::default()
+    };
+    let caret = renderer.render_with(&board, &vp, &overlay).to_vec();
+    let bar = blue_pixels(&caret);
+    assert!((60..400).contains(&bar), "{bar}");
+    let at = renderer.caret_rect(&board, &t1, 2).unwrap();
+    let screen = vp.to_screen(Point::new(at.x0, at.center().y));
+    let (x, y) = (screen.x.round() as u16, screen.y.round() as u16);
+    let px = common::pixel(&caret, 600, x, y);
+    assert!(px[2] > 180 && px[0] < 120, "{px:?} at {x},{y}");
+    // The grid cursor's cross, and the current object's outline, each in blue too.
+    for cursor in [
+        OverlayCursor::Grid(Point::new(0.0, -3.0)),
+        OverlayCursor::Object(&t1),
+    ] {
+        let overlay = Overlay {
+            cursor,
+            status: StatusLine {
+                left: "NORMAL",
+                right: "0,-3",
+                error: false,
+            },
+            ..Overlay::default()
+        };
+        let image = renderer.render_with(&board, &vp, &overlay);
+        assert!(blue_pixels(image) > 20, "{cursor:?}");
+    }
+}
+
+/// Pixels of dark ink or of the error red in the columns `x0..x1` of the status bar of a frame
+/// `width` x `height` pixels.
+fn status_text_pixels(image: &[u8], width: u16, height: u16, x0: u16, x1: u16) -> (usize, usize) {
+    let bar = u16::try_from(status_bar_height_px(1.0)).unwrap();
+    let (mut ink, mut red) = (0, 0);
+    for y in height - bar..height {
+        for x in x0..x1 {
+            let px = common::pixel(image, width, x, y);
+            ink += usize::from(px[0] < 100 && px[1] < 100 && px[2] < 100);
+            red += usize::from(px[0] > 150 && px[1] < 100 && px[2] < 100);
+        }
+    }
+    (ink, red)
+}
+
+#[test]
+fn the_status_line_shows_both_sides_whatever_their_length() {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    let vp = Viewport::new(Point::ZERO, 1.0, 600, 200, 1.0);
+    let long = format!("{}  3,4", "very/long/path/".repeat(100));
+    for (left, right, error) in [
+        ("NORMAL", "area.lawh  0,0", false),
+        ("NORMAL", long.as_str(), false),
+        ("no file name", long.as_str(), true),
+    ] {
+        let overlay = Overlay {
+            status: StatusLine { left, right, error },
+            ..Overlay::default()
+        };
+        let image = renderer.render_with(&board, &vp, &overlay).to_vec();
+        let (ink, red) = status_text_pixels(&image, 600, 200, 0, 150);
+        if error {
+            assert!(red > 20 && ink == 0, "{left:?}: {ink} ink, {red} red");
+        } else {
+            assert!(ink > 20 && red == 0, "{left:?}: {ink} ink, {red} red");
+        }
+        let (ink, _) = status_text_pixels(&image, 600, 200, 450, 600);
+        assert!(ink > 20, "{right:?}");
+    }
+    // A command line far longer than the bar keeps its caret in view, left of the right text.
+    let line = "x".repeat(2_000);
+    let overlay = Overlay {
+        status: StatusLine {
+            left: "",
+            right: "area.lawh  0,0",
+            error: false,
+        },
+        command_line: Some((&line, line.len())),
+        ..Overlay::default()
+    };
+    let image = renderer.render_with(&board, &vp, &overlay).to_vec();
+    let caret = status_blue_columns(&image, 600, 200);
+    assert!(
+        !caret.is_empty() && caret.iter().all(|x| (300..500).contains(x)),
+        "{caret:?}"
+    );
+}
+
+/// The columns of the status bar with the cursor's blue in them.
+fn status_blue_columns(image: &[u8], width: u16, height: u16) -> Vec<u16> {
+    let bar = u16::try_from(status_bar_height_px(1.0)).unwrap();
+    (0..width)
+        .filter(|x| {
+            (height - bar..height).any(|y| {
+                let px = common::pixel(image, width, *x, y);
+                px[2] > 180 && px[0] < 120
+            })
+        })
+        .collect()
+}

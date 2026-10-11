@@ -15,8 +15,12 @@ use vello_cpu::{Glyph, Pixmap, RenderContext, Resources};
 
 use crate::budget::{self, Budget, Estimate, GlyphSums, MIN_VISIBLE_PX};
 use crate::glyphs::GlyphTable;
+use crate::overlay::Overlay;
+use crate::status::StatusText;
 use crate::text::{Chunk, KeyMap, Known, LAYOUT_EM, Plan, TextKey, TextShaper};
 use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
+
+mod ui;
 
 /// Board background.
 const PAPER: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xFA, 0xFA, 0xF7);
@@ -24,12 +28,31 @@ const PAPER: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xFA, 0xFA, 0xF7);
 const INK: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x1F, 0x1F, 0x1F);
 /// Grid dots.
 const GRID: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
-/// The source of math that failed to compile.
+/// The source of math that failed to compile, and error messages on the status line.
 const ERROR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC0, 0x39, 0x2B);
 /// The source of math that is still compiling, as a placeholder.
 const PENDING: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x9A, 0x9A, 0x94);
 /// The outline of an object drawn in its place when the frame budget is spent.
 const OUTLINE: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC8, 0xC8, 0xC2);
+
+// The overlay ([`Renderer::render_with`]): blue for where the cursor is, amber for what is
+// selected, and a status bar a shade darker than the paper.
+
+/// The cursor: the grid cursor's cross, the outline around the current object, and the caret
+/// in a text block.
+const CURSOR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x25, 0x63, 0xEB);
+/// The block caret of block-Normal mode: the cursor's blue at 35 %, so the character under it
+/// still shows.
+const CURSOR_BLOCK: AlphaColor<Srgb> = AlphaColor::from_rgba8(0x25, 0x63, 0xEB, 0x59);
+/// The outline around each object of a Visual selection.
+const SELECTED: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD9, 0x77, 0x06);
+/// The Visual rectangle: the selection's amber at 10 % over its area, and at 70 % along its
+/// edge.
+const VISUAL_FILL: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xD9, 0x77, 0x06, 0x1A);
+const VISUAL_EDGE: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xD9, 0x77, 0x06, 0xB3);
+/// The status bar, and the line along its top. Its text is [`INK`], or [`ERROR`] for an error.
+const STATUS_BAR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xEE, 0xEE, 0xE9);
+const STATUS_EDGE: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
 
 /// Width of those outlines in logical pixels.
 const OUTLINE_PX: f64 = 1.0;
@@ -137,8 +160,11 @@ struct Seen {
     /// The key of its text, or of a formula's source.
     key: Option<TextKey>,
     /// Its math status: `None` for objects that aren't math, and for formulas off screen when
-    /// the frame doesn't wait.
+    /// the frame doesn't wait. [`MathStatus::Pending`] for a formula being edited.
     math: Option<MathStatus>,
+    /// The caret is in it ([`Overlay::caret`]): it is laid out first, and a formula is drawn as
+    /// its source in ink, without asking the math engine for it.
+    edited: bool,
 }
 
 /// The bounds of a formula that has laid out, in pt within its layout.
@@ -160,6 +186,10 @@ struct Work {
     /// Math glyph runs set up and math glyphs drawn.
     math_runs: usize,
     math_glyphs: usize,
+    /// Objects of a Visual selection highlighted, and left without a highlight because the
+    /// highlights' budget was spent.
+    highlighted: usize,
+    not_highlighted: usize,
 }
 
 /// Work drawing text.
@@ -206,6 +236,8 @@ pub struct Renderer {
     resources: Resources,
     pixmap: Pixmap,
     text: TextShaper,
+    /// The status bar's strings, laid out.
+    status: StatusText,
     math: MathEngine,
     /// `vello_cpu` handles for [`lawh_math::fonts`], by the same index.
     math_fonts: Vec<FontData>,
@@ -245,6 +277,7 @@ impl Renderer {
             resources: Resources::new(),
             pixmap: Pixmap::new(1, 1),
             text: TextShaper::new(),
+            status: StatusText::default(),
             math,
             math_fonts,
             glyphs: GlyphTable::new(),
@@ -272,6 +305,17 @@ impl Renderer {
     }
 
     fn draw_frame(&mut self, board: &Board, vp: &Viewport, wait: MathWait) -> &[u8] {
+        self.draw_frame_with(board, vp, wait, None)
+    }
+
+    /// [`Self::draw_frame`], then `overlay` over the board, outside the frame's budget.
+    fn draw_frame_with(
+        &mut self,
+        board: &Board,
+        vp: &Viewport,
+        wait: MathWait,
+        overlay: Option<&Overlay<'_>>,
+    ) -> &[u8] {
         self.work = Work::default();
         if !self.begin_frame(vp) {
             self.last = FrameStats::default();
@@ -286,6 +330,9 @@ impl Renderer {
         if vp.is_drawable() {
             let clip = draw::clip_rect(vp);
             let mut seen = self.look_up(board, &mut budget);
+            if let Some(caret) = overlay.and_then(|overlay| overlay.caret) {
+                mark_edited(board, &mut seen, caret.id);
+            }
             self.math_statuses(board, &mut seen, vp, clip, wait);
             self.lay_out_on_screen(board, &seen, vp, clip, &mut budget, &mut stats);
             if let Some((path, dots)) = draw::grid_dots(vp) {
@@ -294,6 +341,9 @@ impl Renderer {
                 self.ctx.fill_path(&path);
             }
             self.draw_objects(board, &seen, vp, clip, &mut budget, &mut stats);
+            if let Some(overlay) = overlay {
+                self.draw_overlay(board, &seen, vp, clip, overlay);
+            }
         } else {
             tracing::debug!(?vp, "viewport not drawable; drawing the background only");
         }
@@ -460,6 +510,7 @@ impl Renderer {
                     self.text.key(text)
                 }),
                 math: None,
+                edited: false,
             })
             .collect();
         budget.charge(budget::hashing(hashed));
@@ -485,6 +536,11 @@ impl Renderer {
             let (Shape::Math { src, .. }, Some(key)) = (&object.shape, seen.key) else {
                 continue;
             };
+            if seen.edited {
+                // Drawn as its source while the caret is in it; compiled once it leaves.
+                seen.math = Some(MathStatus::Pending);
+                continue;
+            }
             if wait == MathWait::Yes {
                 let status = match self.math.layout_blocking(src) {
                     Ok(layout) => MathStatus::Ready(layout),
@@ -554,7 +610,13 @@ impl Renderer {
                 && screen.overlaps(clip)
                 && screen.width().max(screen.height()) >= MIN_VISIBLE_PX;
             if shown {
-                wanted.push((distance(screen, center), index));
+                // The text with the caret goes first, so it is never left to a later frame.
+                let order = if seen.edited {
+                    -1.0
+                } else {
+                    distance(screen, center)
+                };
+                wanted.push((order, index));
             }
         }
         wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -604,7 +666,7 @@ impl Renderer {
                 // Off screen, so not asked for.
                 continue;
             }
-            if matches!(math, Some(MathStatus::Pending)) {
+            if matches!(math, Some(MathStatus::Pending)) && !seen.edited {
                 stats.math_pending += 1;
             }
             let Some(screen) = self
@@ -809,7 +871,8 @@ impl Renderer {
                     self.draw_text(*at, key, src, ERROR, vp, clip, budget)
                 }
                 (Some(MathStatus::Pending) | None, Some(key)) => {
-                    self.draw_text(*at, key, src, PENDING, vp, clip, budget)
+                    let color = if seen.edited { INK } else { PENDING };
+                    self.draw_text(*at, key, src, color, vp, clip, budget)
                 }
                 (_, None) => Outcome::Pending,
             },
@@ -1232,6 +1295,17 @@ fn text_box(at: Point, width: f32, height: f32) -> Rect {
             f64::from(height) * text_scale(),
         ),
     )
+}
+
+/// Marks the object `id` in `seen` as holding the caret, if it is a text or a formula.
+fn mark_edited(board: &Board, seen: &mut [Seen], id: &lawh_core::ObjectId) {
+    let edited = board
+        .objects()
+        .iter()
+        .position(|object| object.id == *id && source(object).is_some());
+    if let Some(seen) = edited.and_then(|index| seen.get_mut(index)) {
+        seen.edited = true;
+    }
 }
 
 /// The text an object draws, or a formula's source: what the text cache is looked up by.
@@ -1761,6 +1835,7 @@ mod tests {
         let seen = [Seen {
             key: Some(renderer.text.key(src)),
             math: Some(MathStatus::Evicted(summary)),
+            edited: false,
         }];
         let mut budget = Budget::frame();
         let mut stats = FrameStats::default();

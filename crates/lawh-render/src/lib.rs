@@ -18,6 +18,10 @@
 //! laid out once and cached ([`MAX_TEXT_CACHE_BYTES`]), with what its glyphs
 //! cost to draw, so a frame estimates a text without walking its layout.
 //!
+//! While editing, [`Renderer::render_with`] draws an [`Overlay`] over the board: the cursor, a
+//! Visual selection, the caret in a text block and the status bar. The renderer also measures
+//! objects for the engine (`lawh_core::engine::Measure`), as it draws them.
+//!
 //! Board coordinates are grid units with y down. At zoom 1 and scale factor 1
 //! one unit is [`BASE_PX_PER_UNIT`] pixels.
 
@@ -25,11 +29,14 @@ mod budget;
 mod draw;
 mod error;
 mod glyphs;
+mod overlay;
 mod renderer;
+mod status;
 mod text;
 mod viewport;
 
 pub use error::RenderError;
+pub use overlay::{Caret, Overlay, OverlayCursor, StatusLine, status_bar_height_px};
 pub use renderer::{FrameStats, Renderer};
 pub use text::MAX_TEXT_CACHE_BYTES;
 pub use viewport::Viewport;

@@ -636,6 +636,130 @@ fn grid_frame_time() {
     }
 }
 
+/// Most the overlay ([`Renderer::render_with`]) may add to a frame in a release build, worst
+/// case: every object of a full board selected, a Visual rectangle over the whole view, and a
+/// command line and status text at their longest, changing every frame.
+const OVERLAY_TARGET: Duration = Duration::from_millis(8);
+
+/// What drawing the overlay adds to a frame: the median of `render_with` minus that of
+/// `render`, on an everyday overlay over the area board and on the worst one (see
+/// [`OVERLAY_TARGET`], asserted in release), at 1920x1080 and at 2880x1800 with scale factor 2.
+/// `nice -n 19 cargo test --release -p lawh-render --test bench -- --ignored --nocapture overlay`
+#[test]
+#[ignore = "timing only; run with --release -- --ignored --nocapture"]
+fn overlay_frame_time() {
+    use std::fmt::Write as _;
+
+    use lawh_core::ObjectId;
+    use lawh_core::engine::MAX_COMMAND_LINE_CHARS;
+    use lawh_render::{Caret, Overlay, OverlayCursor, StatusLine};
+
+    // 500 rectangles just inside the view, all selected.
+    let mut src = String::from("lawh version=1\n");
+    for i in 0..lawh_core::board::MAX_OBJECTS {
+        let inset = (i % 50) as f64 * 0.05;
+        writeln!(
+            src,
+            "rect id=r{i} x={} y={} w={} h={}",
+            -20.0 + inset,
+            -10.0 + inset,
+            40.0 - 2.0 * inset,
+            20.0 - 2.0 * inset
+        )
+        .unwrap();
+    }
+    let full = common::board(&src);
+    let selection: Vec<ObjectId> = full.objects().iter().map(|o| o.id.clone()).collect();
+    // A command line at its longest, of every digit so each window of it differs.
+    let line: String = (0..MAX_COMMAND_LINE_CHARS)
+        .map(|i| char::from_digit(u32::try_from(i % 10).unwrap(), 10).unwrap())
+        .collect();
+    let area = common::area_board();
+    let c1 = ObjectId::new("c1").unwrap();
+    let t1 = ObjectId::new("t1").unwrap();
+
+    for (width, height, scale) in [(1920, 1080, 1.0), (2880, 1800, 2.0)] {
+        let mut renderer = Renderer::new_trusted();
+        renderer.resolve_math(&area);
+        let bounds = renderer.board_bounds(&area).unwrap();
+        let vp = Viewport::fit(bounds, width, height, scale);
+        let everyday = |frame: usize| Overlay {
+            cursor: OverlayCursor::Object(&c1),
+            caret: frame.is_multiple_of(2).then_some(Caret {
+                id: &t1,
+                byte: 2,
+                block: false,
+            }),
+            status: StatusLine {
+                left: "-- INSERT --",
+                right: "area.lawh  0,0",
+                error: false,
+            },
+            ..Overlay::default()
+        };
+        let added = overlay_cost(&mut renderer, &area, &vp, everyday);
+        println!(
+            "area {width}x{height} scale {scale}: the everyday overlay adds {:.2} ms",
+            ms(added)
+        );
+
+        let mut renderer = Renderer::new_trusted();
+        let vp = Viewport::new(kurbo::Point::ZERO, 1.0, width, height, scale);
+        let worst = |frame: usize| Overlay {
+            cursor: OverlayCursor::Grid(kurbo::Point::new(1.0, 1.0)),
+            selection: &selection,
+            visual: Some(kurbo::Rect::new(-30.0, -20.0, 30.0, 20.0)),
+            status: StatusLine {
+                left: "",
+                right: &line[frame % 100..],
+                error: false,
+            },
+            command_line: Some((&line, (frame * 997) % MAX_COMMAND_LINE_CHARS)),
+            caret: None,
+        };
+        let added = overlay_cost(&mut renderer, &full, &vp, worst);
+        println!(
+            "{} selected rects {width}x{height} scale {scale}, longest command line: the overlay adds {:.2} ms",
+            selection.len(),
+            ms(added)
+        );
+        if !cfg!(debug_assertions) {
+            assert!(added <= OVERLAY_TARGET, "{added:?}");
+        }
+    }
+}
+
+/// The median time `render_with` takes over `render` on the same board and view, the overlay
+/// of each frame made by `overlay(frame)`.
+fn overlay_cost<'a>(
+    renderer: &mut Renderer,
+    board: &lawh_core::Board,
+    vp: &Viewport,
+    overlay: impl Fn(usize) -> lawh_render::Overlay<'a>,
+) -> Duration {
+    for frame in 0..WARM_UP {
+        black_box(renderer.render_with(board, vp, &overlay(frame)));
+    }
+    let mut plain: Vec<Duration> = (0..FRAMES)
+        .map(|_| {
+            let t = Instant::now();
+            black_box(renderer.render(board, vp));
+            t.elapsed()
+        })
+        .collect();
+    let mut with: Vec<Duration> = (0..FRAMES)
+        .map(|frame| {
+            let overlay = overlay(frame);
+            let t = Instant::now();
+            black_box(renderer.render_with(board, vp, &overlay));
+            t.elapsed()
+        })
+        .collect();
+    plain.sort();
+    with.sort();
+    with[FRAMES / 2].saturating_sub(plain[FRAMES / 2])
+}
+
 /// A `kB` field of `/proc/self/status`, in MiB; 0 where there is none.
 fn status_mib(field: &str) -> f64 {
     let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();

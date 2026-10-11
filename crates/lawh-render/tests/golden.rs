@@ -8,6 +8,9 @@
 //! a changed glyph changes whole strokes. The `a_wrong_glyph_fails_*` tests
 //! prove it against the real goldens.
 //!
+//! The `overlay_*` goldens are window frames ([`Renderer::render_with`]) with the cursor, a
+//! Visual selection, a caret or the status bar drawn over the area board.
+//!
 //! `LAWH_UPDATE_GOLDEN=1 cargo test -p lawh-render --test golden` rewrites
 //! the images. Look at every rewritten image before committing it.
 
@@ -19,8 +22,9 @@ mod common;
 use std::io::Cursor;
 use std::path::PathBuf;
 
+use kurbo::{Point, Rect};
 use lawh_core::{Board, ObjectId};
-use lawh_render::{Renderer, Viewport};
+use lawh_render::{Caret, Overlay, OverlayCursor, Renderer, StatusLine, Viewport};
 use vello_cpu::Pixmap;
 
 /// Largest per-channel difference that still counts as the same pixel.
@@ -199,4 +203,152 @@ fn a_wrong_glyph_fails_the_zoomed_golden() {
             "{what}: the mutated board passed the golden ({different} pixels differ)"
         );
     }
+}
+
+/// `image`, a frame of `vp` from the renderer (premultiplied RGBA8), as PNG.
+fn png_of(image: &[u8], vp: &Viewport) -> Vec<u8> {
+    let mut pixmap = Pixmap::new(vp.width, vp.height);
+    pixmap.data_as_u8_slice_mut().copy_from_slice(image);
+    pixmap.into_png().unwrap()
+}
+
+/// The area board in a window frame through `vp` (`None`: fitted to 800x600, as the `area`
+/// golden draws it), with `overlay` over it.
+fn overlay_png(vp: Option<Viewport>, overlay: &Overlay<'_>) -> Vec<u8> {
+    let board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    renderer.resolve_math(&board);
+    let vp =
+        vp.unwrap_or_else(|| Viewport::fit(renderer.board_bounds(&board).unwrap(), 800, 600, 1.0));
+    // The second frame at this size, with the whole budget, as the window draws it.
+    renderer.render_with(&board, &vp, overlay);
+    let image = renderer.render_with(&board, &vp, overlay).to_vec();
+    let frame = renderer.last_frame();
+    assert!(
+        !frame.incomplete() && frame.downgraded == 0 && frame.math_pending == 0,
+        "{frame:?}"
+    );
+    png_of(&image, &vp)
+}
+
+fn id(name: &str) -> ObjectId {
+    ObjectId::new(name).unwrap()
+}
+
+/// The right of the status line in these goldens: the file and the cursor's position.
+fn right(at: &str) -> String {
+    format!("area.lawh  {at}")
+}
+
+#[test]
+fn overlay_cursor_on_an_object() {
+    let c1 = id("c1");
+    let right = right("0,0");
+    let overlay = Overlay {
+        cursor: OverlayCursor::Object(&c1),
+        status: StatusLine {
+            left: "NORMAL",
+            right: &right,
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    check_golden("overlay_normal", &overlay_png(None, &overlay));
+}
+
+#[test]
+fn overlay_visual_selection() {
+    let c1 = id("c1");
+    // The circle's bounds, which hold the radius line and its label too.
+    let selection = [id("c1"), id("l1"), id("t2")];
+    let right = right("0,0");
+    let overlay = Overlay {
+        cursor: OverlayCursor::Object(&c1),
+        selection: &selection,
+        visual: Some(Rect::new(-3.0, -3.0, 3.0, 3.0)),
+        status: StatusLine {
+            left: "-- VISUAL --",
+            right: &right,
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    check_golden("overlay_visual", &overlay_png(None, &overlay));
+}
+
+#[test]
+fn overlay_insert_in_a_word() {
+    let t1 = id("t1");
+    let right = right("0,-5");
+    let overlay = Overlay {
+        cursor: OverlayCursor::Object(&t1),
+        // "Ar|ea of a circle"
+        caret: Some(Caret {
+            id: &t1,
+            byte: 2,
+            block: false,
+        }),
+        status: StatusLine {
+            left: "-- INSERT --",
+            right: &right,
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    let vp = Viewport::new(Point::new(2.0, -4.7), 3.0, 800, 600, 1.0);
+    check_golden("overlay_insert", &overlay_png(Some(vp), &overlay));
+}
+
+#[test]
+fn overlay_math_block_being_edited() {
+    let m1 = id("m1");
+    let right = right("5,0");
+    let overlay = Overlay {
+        cursor: OverlayCursor::Object(&m1),
+        // A block on the "p" of "A = pi r^2", drawn as its source.
+        caret: Some(Caret {
+            id: &m1,
+            byte: 4,
+            block: true,
+        }),
+        status: StatusLine {
+            left: "",
+            right: &right,
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    let vp = Viewport::new(Point::new(6.2, 0.3), 3.0, 800, 600, 1.0);
+    check_golden("overlay_math_edit", &overlay_png(Some(vp), &overlay));
+}
+
+#[test]
+fn overlay_command_line() {
+    let right = right("-4,-3");
+    let overlay = Overlay {
+        cursor: OverlayCursor::Grid(Point::new(-4.0, -3.0)),
+        status: StatusLine {
+            left: "NORMAL",
+            right: &right,
+            error: false,
+        },
+        command_line: Some(("ci 3", 4)),
+        ..Overlay::default()
+    };
+    check_golden("overlay_command_line", &overlay_png(None, &overlay));
+}
+
+#[test]
+fn overlay_error_message() {
+    let right = right("-4,-3");
+    let overlay = Overlay {
+        cursor: OverlayCursor::Grid(Point::new(-4.0, -3.0)),
+        status: StatusLine {
+            left: "radius must be above 0",
+            right: &right,
+            error: true,
+        },
+        ..Overlay::default()
+    };
+    check_golden("overlay_error", &overlay_png(None, &overlay));
 }
