@@ -1,6 +1,6 @@
 [package]
 name = "lawh"
-description = "A native, keyboard-driven whiteboard and text editor: draw shapes, write Typst math and arrange text with Vim motions instead of a mouse or pen"
+description = "A native whiteboard for shapes, Typst math and text, being built to be driven by Vim motions instead of a mouse or pen"
 keywords = ["whiteboard", "vim", "math", "diagram", "keyboard"]
 categories = ["text-editors", "graphics", "mathematics"]
 readme = "../../README.md"

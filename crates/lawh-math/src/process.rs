@@ -51,7 +51,8 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Failed starts in a row after which a formula gets
 /// [`MathError::Unavailable`]. Each later formula tries once more. A few retries ride out a
-/// passing failure without starting a process per formula when the worker can't start at all.
+/// passing failure; a worker that can't start at all then costs each later formula one try, not
+/// three.
 const MAX_SPAWN_FAILURES: u32 = 3;
 
 /// What the reader thread passes on: a handshake line or frame, or why the

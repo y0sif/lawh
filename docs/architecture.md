@@ -166,7 +166,8 @@ The largest board the caps allow writes 415,551 bytes, well under the 1 MiB read
 | Characters of text and math on a board | 40,000 | `MAX_BOARD_TEXT_CHARS` | same |
 | Characters in an id | 64 | `MAX_ID_CHARS` | same |
 
-Each constant's doc comment gives its reason, and measurements where a cost was measured.
+Each constant is documented where it is defined, most with their reason, and measurements where a
+cost was measured.
 
 ## Math
 

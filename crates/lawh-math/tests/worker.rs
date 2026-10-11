@@ -362,7 +362,7 @@ fn a_program_that_is_not_the_worker_is_unavailable() {
 
 /// Runs every `*.typ` formula in `$LAWH_MATH_REPROS` through a worker and
 /// prints what each did and how long it took. Not part of the suite:
-/// `LAWH_MATH_REPROS=dir cargo test -p lawh-math --test worker -- --ignored --nocapture`.
+/// `LAWH_MATH_REPROS=dir cargo test -p lawh-math --test worker -- --ignored --nocapture run_repro`.
 #[test]
 #[ignore = "needs a directory of formulas in LAWH_MATH_REPROS"]
 fn run_repro_directory() {

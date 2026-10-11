@@ -72,8 +72,9 @@ nice -n 19 cargo clippy --all-targets -- -D warnings
 
 ## Limits
 
-Every cap on what a board, a formula or a frame may cost is a named constant with its reason, and
-measurements where a cost was measured, in its doc comment. Change the constant, not a copy:
+Every cap on what a board, a formula or a frame may cost is a named constant, documented where it
+is defined (most with their reason, and measurements where a cost was measured). Change the
+constant, not a copy:
 
 - File and parser: `crates/lawh-core/src/format/mod.rs` (`MAX_FILE_BYTES`, `MAX_ENTRIES`, ...).
 - Board: `crates/lawh-core/src/board.rs` (`MAX_OBJECTS`, `MAX_TEXT_CHARS`, ...).

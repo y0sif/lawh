@@ -33,8 +33,8 @@ All three must pass. CI runs the same commands.
 - `lawh-render`: drawing, the frame budget and export.
 - `lawh`: the app shell.
 
-Limits on what a board, a formula or a frame may cost are named constants whose doc comments give
-the reason, and measurements where a cost was measured. If you change one, or a cost in the frame
+Limits on what a board, a formula or a frame may cost are named constants, documented where they
+are defined (most with their reason, and measurements where a cost was measured). If you change one, or a cost in the frame
 budget, rerun the calibrations and benches in
 [docs/testing.md](docs/testing.md#calibrations-and-benches).
 
