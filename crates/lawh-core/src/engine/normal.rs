@@ -4,6 +4,8 @@
 use super::motion::{Direction, ObjectMotion, Origin, path};
 use super::ops::Target;
 use super::place::Side;
+use super::repeat::Context;
+use super::text::Entry;
 use super::{Cursor, Effect, Engine, MAX_COUNT, Measure, Mode};
 use crate::key::{Key, KeyCode, format_keys};
 
@@ -70,6 +72,8 @@ enum Normal {
     Undo,
     Redo,
     CommandLine,
+    /// `i a I A o O <CR>`: into a text block.
+    Text(Entry),
 }
 
 /// Normal-mode commands by the keys that run them, after any count.
@@ -83,6 +87,13 @@ const NORMAL: &[(&[Key], Normal)] = &[
     (&[Key::char('u')], Normal::Undo),
     (&[Key::ctrl('r')], Normal::Redo),
     (&[Key::char(':')], Normal::CommandLine),
+    (&[Key::char('i')], Normal::Text(Entry::Start)),
+    (&[Key::char('I')], Normal::Text(Entry::Start)),
+    (&[Key::char('a')], Normal::Text(Entry::End)),
+    (&[Key::char('A')], Normal::Text(Entry::End)),
+    (&[Key::char('o')], Normal::Text(Entry::Open(Side::Below))),
+    (&[Key::char('O')], Normal::Text(Entry::Open(Side::Above))),
+    (&[Key::named(KeyCode::Enter)], Normal::Text(Entry::Block)),
 ];
 
 /// What some keys make in a key table.
@@ -162,7 +173,7 @@ struct PendingOperator {
 }
 
 impl Pending {
-    fn is_empty(&self) -> bool {
+    pub(super) fn is_empty(&self) -> bool {
         self.count.is_none() && self.keys.is_empty() && self.operator.is_none()
     }
 
@@ -324,6 +335,8 @@ impl Engine {
             Normal::Undo => self.undo(n),
             Normal::Redo => self.redo(n),
             Normal::CommandLine => self.open_command_line(),
+            // The Insert session finishes the change for `.` when it ends.
+            Normal::Text(entry) => self.enter_text(entry, count, measure),
         }
         Vec::new()
     }
@@ -362,14 +375,27 @@ impl Engine {
         }
     }
 
-    /// `.`: replays the last change's keys, with `count` in place of its own if given.
-    fn repeat_change(&mut self, count: Option<u32>, measure: &mut dyn Measure) -> Vec<Effect> {
+    /// `.`: replays the last change's keys, with `count` in place of its own if given, when
+    /// the change can be repeated here (see [`Context`]).
+    pub(super) fn repeat_change(
+        &mut self,
+        count: Option<u32>,
+        measure: &mut dyn Measure,
+    ) -> Vec<Effect> {
         if self.repeat.replaying {
             return Vec::new();
         }
         let Some(change) = self.repeat.last() else {
             return Vec::new();
         };
+        let here = match change.context {
+            Context::Board => self.mode == Mode::Normal,
+            Context::Block => self.mode == Mode::BlockNormal,
+            Context::Anywhere => true,
+        };
+        if !here {
+            return Vec::new();
+        }
         let keys = change.replay(count);
         self.repeat.replaying = true;
         let mut effects = Vec::new();

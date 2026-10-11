@@ -26,6 +26,8 @@ kurbo = "0.13.1"
 thiserror = "2.0.21"
 insta = "1.49.0"
 proptest = "1.11.0"
+# Grapheme clusters, for moving and deleting by user-perceived character inside text blocks.
+unicode-segmentation = "1.13.3"
 # Typst is pinned exactly: lawh-math walks its frame types, which change between releases.
 typst = "=0.15.1"
 typst-layout = "=0.15.1"

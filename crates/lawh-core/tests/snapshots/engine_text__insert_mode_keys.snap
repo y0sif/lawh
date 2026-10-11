@@ -1,0 +1,16 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: "trace(one_text(\"abc\\\\nde\"),\n\"wA<Up><End><Down><Home><Left><Right><Right><Right><Up>X\")"
+---
+    w // mode=normal cursor=object(t1) keys=1
+    A // mode=insert cursor=object(t1) keys=2 byte=6
+ <Up> // mode=insert cursor=object(t1) keys=3 byte=2
+<End> // mode=insert cursor=object(t1) keys=4 byte=3
+<Down> // mode=insert cursor=object(t1) keys=5 byte=6
+<Home> // mode=insert cursor=object(t1) keys=6 byte=4
+<Left> // mode=insert cursor=object(t1) keys=7 byte=4
+<Right> // mode=insert cursor=object(t1) keys=8 byte=5
+<Right> // mode=insert cursor=object(t1) keys=9 byte=6
+<Right> // mode=insert cursor=object(t1) keys=10 byte=6
+ <Up> // mode=insert cursor=object(t1) keys=11 byte=2
+    X // mode=insert cursor=object(t1) keys=12 byte=3

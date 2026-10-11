@@ -10,11 +10,18 @@
 //! (`h j k l`), object motions (`w b`, `H J K L`), the operators `d` and `y` with `dd`, `yy` and
 //! `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`, `<C-r>`), all with
 //! counts, and `:` for the command line (shapes, text, math, write and quit).
+//!
+//! Text and math objects are text blocks: `i a I A o O` type into one in Insert mode, `<CR>`
+//! enters one in block-Normal mode, Vim's Normal mode inside the text (see
+//! [`Engine::text_cursor`]). While a block is edited, the board already shows its live text;
+//! the whole Insert session is one undo step.
 
+mod block;
 mod cmdline;
 mod command;
 mod cursor;
 mod exec;
+mod insert;
 mod measure;
 mod motion;
 mod normal;
@@ -22,6 +29,9 @@ mod ops;
 mod place;
 mod register;
 mod repeat;
+mod settings;
+mod text;
+mod text_motion;
 mod undo;
 mod visual;
 
@@ -33,6 +43,9 @@ pub use cursor::{Cursor, anchor, round3};
 pub use measure::{FixedMeasure, Measure, shape_bounds};
 pub use motion::ROW_TOLERANCE;
 pub use place::PLACE_GAP;
+pub use repeat::MAX_REPEAT_KEYS;
+pub use settings::{Escape, Settings};
+pub use text::TextCursor;
 pub use undo::{MAX_UNDO_BYTES, MAX_UNDO_STEPS};
 
 use self::cmdline::CommandLine;
@@ -40,6 +53,7 @@ use self::exec::PendingWrite;
 use self::normal::Pending;
 use self::register::Register;
 use self::repeat::Repeat;
+use self::text::{Block, Session};
 use self::undo::{Edit, History, Step};
 use crate::board::{Board, Object, ObjectId};
 use crate::key::Key;
@@ -61,6 +75,10 @@ pub enum Mode {
     Visual,
     /// Typing a `:` command (see [`Engine::command_line`]).
     CommandLine,
+    /// Typing into a text block (see [`Engine::text_cursor`]).
+    Insert,
+    /// Vim's Normal mode inside a text block (see [`Engine::text_cursor`]).
+    BlockNormal,
 }
 
 /// Something the app must do for the engine.
@@ -111,6 +129,12 @@ pub struct Engine {
     version: u64,
     /// The write asked for with [`Effect::Write`], until [`Engine::write_done`].
     pending_write: Option<PendingWrite>,
+    /// The text block being edited: in Insert and block-Normal mode, and on a command line
+    /// opened from block-Normal mode.
+    block: Option<Block>,
+    /// The Insert session under way.
+    session: Option<Session>,
+    settings: Settings,
 }
 
 impl Engine {
@@ -133,6 +157,9 @@ impl Engine {
             selection: Vec::new(),
             version: 0,
             pending_write: None,
+            block: None,
+            session: None,
+            settings: Settings::default(),
         }
     }
 
@@ -145,6 +172,15 @@ impl Engine {
 
     pub fn board(&self) -> &Board {
         &self.board
+    }
+
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// The settings, to change them. A change applies from the next key.
+    pub fn settings_mut(&mut self) -> &mut Settings {
+        &mut self.settings
     }
 
     /// Takes one key. Keys are made canonical first (see [`Key::new`]).
@@ -163,15 +199,20 @@ impl Engine {
             Mode::Normal => self.normal_key(key, measure),
             Mode::Visual => self.visual_key(key, measure),
             Mode::CommandLine => self.command_line_key(key),
+            Mode::Insert => self.insert_key(key, measure),
+            Mode::BlockNormal => self.block_key(key, measure),
         }
     }
 
-    /// A mouse click at board point `at`, on object `hit` if any. It ends Visual mode and the
-    /// command line, drops pending keys, and puts the cursor on `hit`, or else on the grid point
-    /// nearest `at` (whole units). A point that is not finite leaves the cursor where it is.
+    /// A mouse click at board point `at`, on object `hit` if any. It ends an Insert session
+    /// (as one undo step), block-Normal mode, Visual mode and the command line, drops pending
+    /// keys, and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units).
+    /// A point that is not finite leaves the cursor where it is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
-        // Measuring is for Insert mode, which comes next: a click there ends the session.
-        let _ = measure;
+        if self.session.is_some() {
+            self.end_session(false, measure);
+        }
+        self.block = None;
         self.pending = Pending::default();
         self.message = None;
         self.command_line.clear();
@@ -222,9 +263,9 @@ impl Engine {
     }
 
     /// The board has changed since it was opened or last saved (undoing back to that point
-    /// makes it unmodified again).
+    /// makes it unmodified again). Text typed in an Insert session counts at once.
     pub fn is_modified(&self) -> bool {
-        self.history.is_modified()
+        self.history.is_modified() || self.session_changed()
     }
 
     fn error(&mut self, text: impl Into<String>) {
@@ -263,42 +304,76 @@ impl Engine {
     /// Records edits already made on the board as one undo step, from `cursor_before` to the
     /// cursor now.
     fn commit(&mut self, edits: Vec<Edit>, cursor_before: Cursor) {
+        self.commit_at(edits, cursor_before, None, None);
+    }
+
+    /// [`Engine::commit`] for a change made inside a text block: undo and redo in
+    /// block-Normal mode put the cursor at `byte_before` and `byte_after` in it.
+    fn commit_at(
+        &mut self,
+        edits: Vec<Edit>,
+        cursor_before: Cursor,
+        byte_before: Option<usize>,
+        byte_after: Option<usize>,
+    ) {
         self.history.push(Step {
             edits,
             cursor_before,
             cursor_after: self.cursor.clone(),
+            byte_before,
+            byte_after,
         });
         self.version = self.version.wrapping_add(1);
     }
 
-    /// Takes back up to `count` steps, putting the cursor where it was before the last one.
+    /// Takes back up to `count` steps, putting the cursor where it was before the last one. In
+    /// block-Normal mode it stays in the block while the cursor is on it.
     fn undo(&mut self, count: u32) {
+        let mut byte = None;
         for done in 0..count {
             match self.history.undo(&mut self.board) {
-                Some(Ok(cursor)) => {
+                Some(Ok((cursor, at))) => {
                     self.cursor = cursor;
+                    byte = at;
                     self.version = self.version.wrapping_add(1);
                 }
-                Some(Err(error)) => return self.error(format!("cannot undo: {error}")),
-                None if done == 0 => return self.error("already at the oldest change"),
-                None => return,
+                Some(Err(error)) => {
+                    self.error(format!("cannot undo: {error}"));
+                    break;
+                }
+                None if done == 0 => {
+                    self.error("already at the oldest change");
+                    break;
+                }
+                None => break,
             }
         }
+        self.sync_block(byte);
     }
 
     /// Makes again up to `count` undone steps, putting the cursor where it was after the last.
+    /// In block-Normal mode it stays in the block while the cursor is on it.
     fn redo(&mut self, count: u32) {
+        let mut byte = None;
         for done in 0..count {
             match self.history.redo(&mut self.board) {
-                Some(Ok(cursor)) => {
+                Some(Ok((cursor, at))) => {
                     self.cursor = cursor;
+                    byte = at;
                     self.version = self.version.wrapping_add(1);
                 }
-                Some(Err(error)) => return self.error(format!("cannot redo: {error}")),
-                None if done == 0 => return self.error("already at the newest change"),
-                None => return,
+                Some(Err(error)) => {
+                    self.error(format!("cannot redo: {error}"));
+                    break;
+                }
+                None if done == 0 => {
+                    self.error("already at the newest change");
+                    break;
+                }
+                None => break,
             }
         }
+        self.sync_block(byte);
     }
 }
 

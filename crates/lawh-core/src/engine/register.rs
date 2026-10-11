@@ -9,13 +9,6 @@ pub(crate) enum Register {
     /// lines up with a grid cursor.
     Objects(Vec<Object>),
     /// Text deleted inside a block. On the board, `p` makes a new text block of it.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "filled by `x` inside a text block, which comes next (lane L3)"
-        )
-    )]
     Text(String),
 }
 

@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: r.header()
+---
+// mode=insert cursor=object(t1) keys=3 byte=499 message="a text or formula holds at most 500 lines"

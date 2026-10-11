@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=object(t3) keys=8
+lawh version=1
+text id=t1 x=0 y=0 "ab"
+text id=t2 x=0 y=1.1 "ab"
+text id=t3 x=0 y=2.2 "ab"

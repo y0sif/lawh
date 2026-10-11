@@ -1,5 +1,5 @@
-//! The place rule: where `p`, `P` (and later `o`, `O`) put a group of objects next to the current
-//! object, below or above it, clear of the other objects.
+//! The place rule: where `p` and `P` put a group of objects, and `o` and `O` a new text block,
+//! next to the current object, below or above it, clear of the other objects.
 
 use kurbo::{Point, Rect, Size};
 

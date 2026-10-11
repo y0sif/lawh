@@ -56,8 +56,8 @@ fn small_board() -> impl Strategy<Value = Board> {
     })
 }
 
-/// Commands as typed: motions, counts, operators, puts, Visual mode, `:` commands, undo, redo
-/// and repeats.
+/// Commands as typed: motions, counts, operators, puts, Visual mode, `:` commands, insert
+/// sessions and block-Normal edits, undo, redo and repeats.
 const VOCABULARY: &[&str] = &[
     "h",
     "j",
@@ -93,6 +93,10 @@ const VOCABULARY: &[&str] = &[
     ":ar -1 1<CR>",
     ":te hi<CR>",
     ":ma x^2<CR>",
+    "ifoo<Esc>",
+    "oab<Esc>",
+    "<CR>x<Esc>",
+    "Ax<BS><Esc>",
     "u",
     "<C-r>",
     ".",

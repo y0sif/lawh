@@ -1,0 +1,10 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: "trace(one_text(family), \"w<CR>llhx\")"
+---
+    w // mode=normal cursor=object(t1) keys=1
+ <CR> // mode=block-normal cursor=object(t1) keys=2 byte=0
+    l // mode=block-normal cursor=object(t1) keys=3 byte=1
+    l // mode=block-normal cursor=object(t1) keys=4 byte=19
+    h // mode=block-normal cursor=object(t1) keys=5 byte=1
+    x // mode=block-normal cursor=object(t1) keys=6 byte=1

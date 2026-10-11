@@ -10,7 +10,8 @@
 //!
 //! The header gives the mode, the cursor (`grid(x,y)` or `object(id)`), how many keys the
 //! script typed (one per key in Vim notation: `<CR>` is one), the Visual selection, if any
-//! (` selection=c1,t1`), and the message, if any: ` message="..."`.
+//! (` selection=c1,t1`), the cursor's byte offset in the text block being edited, in Insert and
+//! block-Normal mode (` byte=3`), and the message, if any: ` message="..."`.
 
 #![allow(
     dead_code,
@@ -108,6 +109,9 @@ impl Run {
         if !engine.selection().is_empty() {
             let ids: Vec<&str> = engine.selection().iter().map(ObjectId::as_str).collect();
             let _ = write!(header, " selection={}", ids.join(","));
+        }
+        if let Some(text) = engine.text_cursor() {
+            let _ = write!(header, " byte={}", text.byte);
         }
         if let Some(message) = engine.message() {
             let _ = write!(header, " message={:?}", message.text);

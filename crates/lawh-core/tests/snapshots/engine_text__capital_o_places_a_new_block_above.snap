@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: "run(shelf(), \"wOhi<Esc>\").snapshot()"
+---
+// mode=normal cursor=object(t1) keys=5
+lawh version=1
+rect id=r1 x=0 y=0 w=2 h=1
+rect id=r2 x=-1 y=1.8 w=3 h=0.5
+text id=t1 x=0 y=-1.1 "hi"

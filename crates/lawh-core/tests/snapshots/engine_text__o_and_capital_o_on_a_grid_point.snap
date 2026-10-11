@@ -1,0 +1,8 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: "run(Board::new(), \"ox<Esc>Oy<Esc>\").snapshot()"
+---
+// mode=normal cursor=object(t2) keys=6
+lawh version=1
+text id=t1 x=0 y=0.5 "x"
+text id=t2 x=0 y=-0.6 "y"

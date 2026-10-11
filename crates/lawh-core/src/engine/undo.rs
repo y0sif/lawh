@@ -31,10 +31,6 @@ pub(crate) enum Edit {
     /// `object` was taken from position `index`.
     Remove { index: usize, object: Object },
     /// Object `id` changed shape from `before` to `after`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "made by text editing, which comes next")
-    )]
     Replace {
         id: ObjectId,
         before: Shape,
@@ -96,6 +92,10 @@ pub(crate) struct Step {
     pub(crate) edits: Vec<Edit>,
     pub(crate) cursor_before: Cursor,
     pub(crate) cursor_after: Cursor,
+    /// For a change made inside a text block: the byte offset of the cursor in the block's
+    /// text before the change and after it, so undo and redo in block-Normal mode put it back.
+    pub(crate) byte_before: Option<usize>,
+    pub(crate) byte_after: Option<usize>,
 }
 
 impl Step {
@@ -134,6 +134,10 @@ impl Step {
         Ok(())
     }
 }
+
+/// Where undo or redo puts the cursor: the board cursor, and the byte offset in a text block
+/// when the step was made inside one.
+pub(crate) type Restore = (Cursor, Option<usize>);
 
 /// The steps made so far, oldest first, within [`MAX_UNDO_STEPS`] and [`MAX_UNDO_BYTES`].
 ///
@@ -187,27 +191,29 @@ impl History {
         }
     }
 
-    /// Takes the newest step back on `board`: the cursor from before it, or `None` when there
-    /// is nothing to undo. On an error the board and the history stay as they were.
-    pub(crate) fn undo(&mut self, board: &mut Board) -> Option<Result<Cursor, BoardError>> {
+    /// Takes the newest step back on `board`: the cursor (and byte in a block) from before it,
+    /// or `None` when there is nothing to undo. On an error the board and the history stay as
+    /// they were.
+    pub(crate) fn undo(&mut self, board: &mut Board) -> Option<Result<Restore, BoardError>> {
         let index = self.done.checked_sub(1)?;
         let step = self.steps.get(index)?;
         if let Err(error) = step.undo(board) {
             return Some(Err(error));
         }
         self.done = index;
-        Some(Ok(step.cursor_before.clone()))
+        Some(Ok((step.cursor_before.clone(), step.byte_before)))
     }
 
-    /// Makes the oldest undone step again on `board`: the cursor from after it, or `None` when
-    /// there is nothing to redo. On an error the board and the history stay as they were.
-    pub(crate) fn redo(&mut self, board: &mut Board) -> Option<Result<Cursor, BoardError>> {
+    /// Makes the oldest undone step again on `board`: the cursor (and byte in a block) from
+    /// after it, or `None` when there is nothing to redo. On an error the board and the history
+    /// stay as they were.
+    pub(crate) fn redo(&mut self, board: &mut Board) -> Option<Result<Restore, BoardError>> {
         let step = self.steps.get(self.done)?;
         if let Err(error) = step.redo(board) {
             return Some(Err(error));
         }
         self.done += 1;
-        Some(Ok(step.cursor_after.clone()))
+        Some(Ok((step.cursor_after.clone(), step.byte_after)))
     }
 
     /// The board differs from when it was last saved.
@@ -251,7 +257,14 @@ mod tests {
             edits,
             cursor_before: grid(before),
             cursor_after: grid(after),
+            byte_before: None,
+            byte_after: None,
         }
+    }
+
+    /// Where undo or redo puts the cursor for a step made on the board.
+    fn at(x: f64) -> Restore {
+        (grid(x), None)
     }
 
     /// Makes `step` on `board` and records it, as the engine does.
@@ -305,13 +318,13 @@ mod tests {
         let end = board.clone();
         assert_eq!(board.objects(), [circle("c1", 2.0)]);
 
-        assert_eq!(history.undo(&mut board), Some(Ok(grid(1.0))));
+        assert_eq!(history.undo(&mut board), Some(Ok(at(1.0))));
         assert_eq!(board, start);
-        assert_eq!(history.redo(&mut board), Some(Ok(grid(2.0))));
+        assert_eq!(history.redo(&mut board), Some(Ok(at(2.0))));
         assert_eq!(board, end);
         assert_eq!(history.redo(&mut board), None);
-        assert_eq!(history.undo(&mut board), Some(Ok(grid(1.0))));
-        assert_eq!(history.undo(&mut board), Some(Ok(grid(0.0))));
+        assert_eq!(history.undo(&mut board), Some(Ok(at(1.0))));
+        assert_eq!(history.undo(&mut board), Some(Ok(at(0.0))));
         assert!(board.is_empty());
         assert_eq!(history.undo(&mut board), None);
     }
@@ -414,7 +427,7 @@ mod tests {
         while let Some(cursor) = history.undo(&mut board) {
             last = Some(cursor.unwrap());
         }
-        assert_eq!(last, Some(grid(5.0)));
+        assert_eq!(last, Some(at(5.0)));
     }
 
     #[test]

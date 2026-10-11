@@ -59,14 +59,27 @@ impl Engine {
                 Vec::new()
             }
             Outcome::Cancel => {
-                self.mode = Mode::Normal;
+                self.leave_command_line();
                 Vec::new()
             }
             Outcome::Run(line) => {
                 self.mode = Mode::Normal;
-                self.execute_line(&line)
+                let effects = self.execute_line(&line);
+                self.leave_command_line();
+                effects
             }
         }
+    }
+
+    /// Back from the command line: to block-Normal mode when it was opened there and the
+    /// cursor is still on the block, else to Normal mode.
+    fn leave_command_line(&mut self) {
+        self.mode = if self.block.is_some() {
+            Mode::BlockNormal
+        } else {
+            Mode::Normal
+        };
+        self.sync_block(None);
     }
 
     /// Reads and runs a `:` line, keeping it for `@:` (unless it is empty).

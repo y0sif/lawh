@@ -1,0 +1,25 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: "trace(b, \"w<CR>3ljjjjkkkk$jjjj0k5j\")"
+---
+    w // mode=normal cursor=object(t1) keys=1
+ <CR> // mode=block-normal cursor=object(t1) keys=2 byte=0
+    3 // mode=block-normal cursor=object(t1) keys=3 byte=0
+    l // mode=block-normal cursor=object(t1) keys=4 byte=3
+    j // mode=block-normal cursor=object(t1) keys=5 byte=5
+    j // mode=block-normal cursor=object(t1) keys=6 byte=9
+    j // mode=block-normal cursor=object(t1) keys=7 byte=11
+    j // mode=block-normal cursor=object(t1) keys=8 byte=15
+    k // mode=block-normal cursor=object(t1) keys=9 byte=11
+    k // mode=block-normal cursor=object(t1) keys=10 byte=9
+    k // mode=block-normal cursor=object(t1) keys=11 byte=5
+    k // mode=block-normal cursor=object(t1) keys=12 byte=3
+    $ // mode=block-normal cursor=object(t1) keys=13 byte=3
+    j // mode=block-normal cursor=object(t1) keys=14 byte=5
+    j // mode=block-normal cursor=object(t1) keys=15 byte=9
+    j // mode=block-normal cursor=object(t1) keys=16 byte=11
+    j // mode=block-normal cursor=object(t1) keys=17 byte=17
+    0 // mode=block-normal cursor=object(t1) keys=18 byte=12
+    k // mode=block-normal cursor=object(t1) keys=19 byte=11
+    5 // mode=block-normal cursor=object(t1) keys=20 byte=11
+    j // mode=block-normal cursor=object(t1) keys=21 byte=12

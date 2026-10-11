@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+expression: r.header()
+---
+// mode=insert cursor=object(t9) keys=5 byte=0 message="a board holds at most 40000 characters of text and math in all"

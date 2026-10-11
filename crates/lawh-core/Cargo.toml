@@ -16,6 +16,7 @@ publish.workspace = true
 [dependencies]
 kurbo.workspace = true
 thiserror.workspace = true
+unicode-segmentation.workspace = true
 
 [dev-dependencies]
 insta.workspace = true

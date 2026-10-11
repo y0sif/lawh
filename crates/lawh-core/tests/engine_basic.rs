@@ -188,7 +188,7 @@ fn a_circle_without_a_radius_says_so() {
 }
 
 #[test]
-fn the_board_refuses_a_negative_radius() {
+fn a_negative_radius_is_refused_before_the_board() {
     assert_snapshot!(run(Board::new(), "l:ci -2<CR>").snapshot());
 }
 

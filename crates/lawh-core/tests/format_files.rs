@@ -48,7 +48,7 @@ fn area_example_parses_into_the_expected_objects() {
         object(
             "t2",
             Shape::Text {
-                at: Point::new(1.5, -0.6),
+                at: Point::new(1.0, -1.0),
                 text: "r".to_owned(),
             },
         ),
