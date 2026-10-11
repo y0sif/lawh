@@ -23,15 +23,16 @@ use std::fmt::{self, Display, Formatter, Write as _};
 /// One key press: a key and the modifiers held with it.
 ///
 /// Build keys with [`Key::new`] (or [`Key::char`], [`Key::ctrl`], [`Key::named`]) so they are
-/// canonical: the engine compares keys as they are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// canonical: the engine compares keys as they are. Keys are ordered (by code, then modifiers)
+/// only so tables of keys can be sorted; the order means nothing else.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key {
     pub code: KeyCode,
     pub mods: Mods,
 }
 
 /// Which key: a character as typed, or a key with no character.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum KeyCode {
     /// A typed character, Shift already applied (`A`, not Shift + `a`). Space is `Char(' ')`.
     Char(char),
@@ -54,7 +55,7 @@ pub enum KeyCode {
 }
 
 /// Modifiers held with a key. `cmd` is the macOS Command key (`D-` in Vim notation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "four independent modifier keys, named as in Vim notation"

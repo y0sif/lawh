@@ -231,18 +231,32 @@ fn write_and_quit_forms() {
     assert_eq!(parsed("w!  my board.lawh  "), write(Some("my board.lawh")));
     assert_eq!(parsed("q"), Command::Quit { force: false });
     assert_eq!(parsed("quit!"), Command::Quit { force: true });
-    assert_eq!(parsed("wq"), Command::WriteQuit { file: None });
+    assert_eq!(
+        parsed("wq"),
+        Command::WriteQuit {
+            file: None,
+            force: false
+        }
+    );
     assert_eq!(
         parsed("wq! b.lawh"),
         Command::WriteQuit {
-            file: Some("b.lawh".to_owned())
+            file: Some("b.lawh".to_owned()),
+            force: true
         }
     );
-    assert_eq!(parsed("x"), Command::Exit { file: None });
+    assert_eq!(
+        parsed("x"),
+        Command::Exit {
+            file: None,
+            force: false
+        }
+    );
     assert_eq!(
         parsed("xit! c"),
         Command::Exit {
-            file: Some("c".to_owned())
+            file: Some("c".to_owned()),
+            force: true
         }
     );
     assert_eq!(parsed("u"), Command::Undo);
@@ -327,6 +341,19 @@ fn errors_say_what_is_wrong() {
         (
             "w >>log",
             "writing to a command or appending to a file is not supported: `:w >>log`",
+        ),
+        // The command as typed.
+        (
+            "x !y",
+            "writing to a command or appending to a file is not supported: `:x !y`",
+        ),
+        (
+            "wq! >>log",
+            "writing to a command or appending to a file is not supported: `:wq! >>log`",
+        ),
+        (
+            "write  !cat",
+            "writing to a command or appending to a file is not supported: `:write !cat`",
         ),
     ];
     for (line, message) in cases {

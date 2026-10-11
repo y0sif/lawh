@@ -16,6 +16,7 @@
 
 use kurbo::{Point, Rect};
 
+use super::keymap::too_many_keys;
 use super::place::{Side, place};
 use super::repeat::{Context, MAX_REPEAT_KEYS};
 use super::settings::Escape;
@@ -301,7 +302,8 @@ impl Engine {
     }
 
     /// Ends the Insert session, for `<Esc>` (`by_esc`) or a click. `<Esc>` first types the
-    /// session's keys again for a count on the key that started it.
+    /// session's keys again for a count on the key that started it; a click does not, so `.`
+    /// then repeats the session once, as it was committed.
     ///
     /// A change to the board becomes one undo step and the last change for `.`. A new block
     /// left empty is taken off the board. The cursor goes to the block: on the board, or in
@@ -372,18 +374,23 @@ impl Engine {
             );
             // `o` and `O` make a block next to an object: only on the board. `i a I A` type
             // wherever they are pressed, on the board or in a block.
-            if session.open.is_some() {
-                self.repeat.finish(session.count);
+            let context = if session.open.is_some() {
+                Context::Board
             } else {
-                self.repeat.finish_in(session.count, Context::Anywhere);
-            }
+                Context::Anywhere
+            };
+            let count = if by_esc { session.count } else { None };
+            self.repeat.finish_insert(count, context);
         }
     }
 
     /// A count on the key that started the session: types the session's keys `count - 1` more
     /// times, as Vim does (`3ia<Esc>` inserts `aaa`). After `o` or `O`, each time in a new
     /// block on the same side of the last. Stops at the first edit the board refuses, and once
-    /// [`MAX_REPEAT_KEYS`] keys would be replayed.
+    /// [`MAX_REPEAT_KEYS`] keys would be replayed. The keys count against what the typed key
+    /// may set off ([`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS)), which matters only for a
+    /// `<Esc>` that `.` or a mapping typed: past it, the rest of the count and the typeahead are
+    /// dropped with a message.
     fn repeat_session(&mut self, measure: &mut dyn Measure) {
         let Some(session) = &self.session else {
             return;
@@ -395,9 +402,16 @@ impl Engine {
         if keys.is_empty() {
             return;
         }
-        let times = usize::try_from(count.saturating_sub(1))
+        let wanted = usize::try_from(count.saturating_sub(1))
             .unwrap_or(usize::MAX)
             .min(MAX_REPEAT_KEYS / keys.len());
+        let times = wanted.min(self.keymap.left_to_spend() / keys.len());
+        if times < wanted {
+            self.keymap.flush();
+            self.error(too_many_keys());
+        }
+        // It fits: `times` is cut to what is left.
+        let _ = self.keymap.spend(times * keys.len());
         for _ in 0..times {
             if let Some(side) = open
                 && !self.open_another(side, measure)

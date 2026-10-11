@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+assertion_line: 705
+expression: r.header()
+---
+// mode=normal cursor=object(c1) keys=20 message="\"other.lawh\" written, but the board has changes: :w writes them, :q! quits without them"

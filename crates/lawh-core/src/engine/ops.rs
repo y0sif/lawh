@@ -27,8 +27,9 @@ impl Engine {
     ///
     /// `w` is exclusive, as in Vim: `dw` is this object, `d3w` this one and the next two. `b`
     /// takes the objects before this one, not this one. `H J K L` take this object and every
-    /// object the motion lands on. A motion that runs out of objects takes what it reached; one
-    /// that cannot move at all does nothing.
+    /// object the motion lands on. `gg` and `G` take this object, the one they land on and every
+    /// object between them in reading order (`dG`: this one to the last). A motion that runs out
+    /// of objects takes what it reached; one that cannot move at all does nothing.
     pub(super) fn operate(
         &mut self,
         operator: Operator,
@@ -61,6 +62,20 @@ impl Engine {
                     Vec::new()
                 } else {
                     iter::once(current).chain(landed).collect()
+                }
+            }
+            Target::Motion(motion @ (ObjectMotion::First | ObjectMotion::Last)) => {
+                let order = reading_order(&bounds);
+                let rank = |i: usize| order.iter().position(|&o| o == i);
+                let here = rank(current);
+                let there = path(&bounds, origin, motion, n)
+                    .first()
+                    .and_then(|&i| rank(i));
+                match (here, there) {
+                    (Some(a), Some(b)) => {
+                        order.get(a.min(b)..=a.max(b)).unwrap_or_default().to_vec()
+                    }
+                    _ => Vec::new(),
                 }
             }
         };

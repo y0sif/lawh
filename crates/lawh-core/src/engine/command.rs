@@ -59,10 +59,13 @@ pub enum Command {
     Write { file: Option<String> },
     /// `:q[uit]`; `:q!` (`force`) quits even when the board has changes.
     Quit { force: bool },
-    /// `:wq [file]` and `:wq! [file]`: write, then quit.
-    WriteQuit { file: Option<String> },
-    /// `:x[it] [file]` and `:x! [file]`: write only when the board has changes, then quit.
-    Exit { file: Option<String> },
+    /// `:wq [file]` and `:wq! [file]`: write, then quit. A write to another file than the
+    /// board's own leaves the board's changes unsaved, so it does not quit then, unless
+    /// `force` (`!`).
+    WriteQuit { file: Option<String>, force: bool },
+    /// `:x[it] [file]` and `:x! [file]`: write only when the board has changes, then quit, as
+    /// [`Command::WriteQuit`].
+    Exit { file: Option<String>, force: bool },
     /// `:u[ndo]`.
     Undo,
     /// `:red[o]`.
@@ -156,9 +159,10 @@ pub enum CommandError {
     /// `:text` or `:math` with nothing (or only spaces) after the name.
     #[error("missing {0}")]
     MissingBody(&'static str),
-    /// `:w !cmd` or `:w >>file`, which Vim reads as a shell command or an append.
-    #[error("writing to a command or appending to a file is not supported: `:w {0}`")]
-    UnsupportedFile(String),
+    /// `:w !cmd` or `:w >>file`, which Vim reads as a shell command or an append; `command` is
+    /// the command as typed, with its `!` (`w`, `x`, `wq!`).
+    #[error("writing to a command or appending to a file is not supported: `:{command} {file}`")]
+    UnsupportedFile { command: String, file: String },
     /// Keys of a mapping that are not Vim key notation.
     #[error("in `{keys}`: {error}")]
     BadKeys { keys: String, error: KeyParseError },
@@ -415,6 +419,8 @@ const COMMANDS: &[Row] = &[
 #[derive(Clone, Copy)]
 struct Args<'a> {
     name: &'static str,
+    /// The name as typed: `name` or an abbreviation of it.
+    typed: &'a str,
     bang: bool,
     /// Everything after the name, the `!` and one space, verbatim.
     rest: &'a str,
@@ -467,6 +473,7 @@ pub fn parse_command(line: &str) -> Result<Command, CommandError> {
         .ok_or_else(|| unknown(line))?;
     (row.parse)(Args {
         name: row.name,
+        typed: name,
         bang,
         rest,
     })
@@ -581,20 +588,20 @@ fn body(args: Args<'_>, missing: &'static str) -> Result<String, CommandError> {
 }
 
 fn write(args: Args<'_>) -> Result<Command, CommandError> {
-    Ok(Command::Write {
-        file: file(args.rest)?,
-    })
+    Ok(Command::Write { file: file(args)? })
 }
 
 fn write_quit(args: Args<'_>) -> Result<Command, CommandError> {
     Ok(Command::WriteQuit {
-        file: file(args.rest)?,
+        file: file(args)?,
+        force: args.bang,
     })
 }
 
 fn exit(args: Args<'_>) -> Result<Command, CommandError> {
     Ok(Command::Exit {
-        file: file(args.rest)?,
+        file: file(args)?,
+        force: args.bang,
     })
 }
 
@@ -608,12 +615,16 @@ fn quit(args: Args<'_>) -> Result<Command, CommandError> {
 
 /// The file name after `:w`, `:wq` or `:x`: the rest of the line without spaces at its ends,
 /// or `None` when there is none.
-fn file(rest: &str) -> Result<Option<String>, CommandError> {
-    let name = rest.trim();
+fn file(args: Args<'_>) -> Result<Option<String>, CommandError> {
+    let name = args.rest.trim();
     if name.is_empty() {
         Ok(None)
     } else if name.starts_with('!') || name.starts_with(">>") {
-        Err(CommandError::UnsupportedFile(name.to_owned()))
+        let bang = if args.bang { "!" } else { "" };
+        Err(CommandError::UnsupportedFile {
+            command: format!("{}{bang}", args.typed),
+            file: name.to_owned(),
+        })
     } else {
         Ok(Some(name.to_owned()))
     }

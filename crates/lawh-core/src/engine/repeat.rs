@@ -15,6 +15,10 @@
 //! board change (`x`, `dd`, `p`, `o`) only on the board: `x` in a block deletes a character, on
 //! the board a whole object. An insert session entered with `i`, `a`, `I` or `A` is repeated
 //! in either place, since those keys start typing in both.
+//!
+//! A change that types in Insert mode stops its replay when its first key does not start
+//! Insert mode (`i` on a rectangle, `o` with no room, a full board): the keys typed after it
+//! would run as commands.
 
 use crate::key::{Key, KeyCode};
 
@@ -37,6 +41,8 @@ pub(crate) struct Change {
     pub(crate) keys: Vec<Key>,
     /// Where `.` repeats it.
     pub(crate) context: Context,
+    /// Its first key enters Insert mode and the rest are typed there.
+    pub(crate) insert: bool,
 }
 
 /// Where a change can be repeated.
@@ -52,16 +58,20 @@ pub(crate) enum Context {
 
 impl Change {
     /// The keys to replay: `count` (or the change's own) as digits, then the change's keys.
-    pub(crate) fn replay(&self, count: Option<u32>) -> Vec<Key> {
+    /// For a change that types in Insert mode, also how many of them run before Insert mode must
+    /// have started: the digits and the first key.
+    pub(crate) fn replay(&self, count: Option<u32>) -> (Vec<Key>, Option<usize>) {
         let digits = count
             .or(self.count)
             .map(|n| n.to_string())
             .unwrap_or_default();
-        digits
+        let entry = self.insert.then_some(digits.len() + 1);
+        let keys = digits
             .chars()
             .map(|c| Key::named(KeyCode::Char(c)))
             .chain(self.keys.iter().copied())
-            .collect()
+            .collect();
+        (keys, entry)
     }
 }
 
@@ -111,16 +121,22 @@ impl Repeat {
         } else {
             Context::Board
         };
-        self.finish_in(count, context);
+        self.finish_change(count, context, false);
     }
 
-    /// [`Repeat::finish`] for a change `.` repeats in `context`.
-    pub(crate) fn finish_in(&mut self, count: Option<u32>, context: Context) {
+    /// An insert session changed the board: [`Repeat::finish`] for a change whose first key
+    /// enters Insert mode, repeated in `context`.
+    pub(crate) fn finish_insert(&mut self, count: Option<u32>, context: Context) {
+        self.finish_change(count, context, true);
+    }
+
+    fn finish_change(&mut self, count: Option<u32>, context: Context, insert: bool) {
         let keys = std::mem::take(&mut self.recording);
         self.last = (!self.too_long).then_some(Change {
             count,
             keys,
             context,
+            insert,
         });
     }
 
@@ -149,8 +165,20 @@ mod tests {
         }
         repeat.finish(Some(6));
         let change = repeat.last().unwrap();
-        assert_eq!(change.replay(None), parse_keys("6dw").unwrap());
-        assert_eq!(change.replay(Some(12)), parse_keys("12dw").unwrap());
+        assert_eq!(change.replay(None), (parse_keys("6dw").unwrap(), None));
+        assert_eq!(change.replay(Some(12)), (parse_keys("12dw").unwrap(), None));
+        // An insert: Insert mode must have started after the digits and the first key.
+        repeat.start();
+        for key in parse_keys("oab<Esc>").unwrap() {
+            repeat.push(key);
+        }
+        repeat.finish_insert(Some(3), Context::Board);
+        let change = repeat.last().unwrap();
+        assert_eq!(
+            change.replay(None),
+            (parse_keys("3oab<Esc>").unwrap(), Some(2))
+        );
+        assert_eq!(change.replay(Some(12)).1, Some(3));
         repeat.forget();
         assert_eq!(repeat.last(), None);
     }

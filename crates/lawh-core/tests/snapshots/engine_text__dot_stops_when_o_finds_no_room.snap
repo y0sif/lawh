@@ -1,0 +1,10 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+assertion_line: 470
+expression: "run(b, \"wojl<Esc>J.\").snapshot()"
+---
+// mode=normal cursor=object(r2) keys=7 message="no room for a new text block"
+lawh version=1
+rect id=r1 x=0 y=0 w=1 h=1
+rect id=r2 x=0 y=999999 w=1 h=0.5
+text id=t1 x=0 y=1.5 "jl"

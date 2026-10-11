@@ -1,6 +1,8 @@
 //! Running `:` commands: the command line's keys, shapes, text and math at the cursor, writing
 //! and quitting. Mapping commands and `:set` run in `keymap.rs` and `settings.rs`.
 
+use std::path::{Component, Path};
+
 use kurbo::Point;
 
 use super::cmdline::Outcome;
@@ -19,18 +21,26 @@ use crate::key::Key;
 pub(super) struct PendingWrite {
     path: String,
     quit_after: bool,
+    /// `:wq!` or `:x!`: quit after the write even when the board's own file lacks its changes.
+    force: bool,
     /// The engine's change count when the write was asked for.
     version: u64,
 }
 
+/// Why `:q` (and `:wq` to another file) does not quit.
+const UNSAVED: &str = "the board has changes: :w writes them, :q! quits without them";
+
 impl Engine {
     /// The app wrote the board to `path` (as an [`Effect::Write`] asked), or failed to with
     /// `result`'s error. Returns [`Effect::Quit`] when the write was asked for by `:wq` or `:x`,
-    /// went well, and the board has not changed since.
+    /// went well, the board has not changed since, and nothing is left unsaved.
     ///
     /// A good write to the board's own file makes the board unmodified, unless it changed after
-    /// the write was asked for. A write to another file (a copy, `:w other` on a named board)
-    /// leaves it as it was, as in Vim.
+    /// the write was asked for. The file is the board's own when the two names are the same
+    /// path once `.` and `..` are worked out, without asking the file system (`./a.lawh` and
+    /// `dir/../a.lawh` are `a.lawh`). A write to another file (a copy, `:w other` on a named
+    /// board) leaves the board as it was, as in Vim, so `:wq other` on a modified board writes
+    /// the copy and does not quit, unless forced with `:wq!`.
     pub fn write_done(&mut self, path: &str, result: Result<(), String>) -> Vec<Effect> {
         let asked = self.pending_write.take_if(|w| w.path == path);
         let current = asked.as_ref().is_some_and(|w| w.version == self.version);
@@ -38,15 +48,23 @@ impl Engine {
             self.error(format!("cannot write \"{path}\": {error}"));
             return Vec::new();
         }
-        if current && self.file_name.as_deref() == Some(path) {
+        let own = self
+            .file_name
+            .as_deref()
+            .is_some_and(|name| same_file(name, path));
+        if current && own {
             self.history.mark_saved();
         }
-        self.info(format!("\"{path}\" written"));
-        if current && asked.is_some_and(|w| w.quit_after) {
-            vec![Effect::Quit]
-        } else {
-            Vec::new()
+        let Some(asked) = asked.filter(|w| current && w.quit_after) else {
+            self.info(format!("\"{path}\" written"));
+            return Vec::new();
+        };
+        if self.is_modified() && !asked.force {
+            self.error(format!("\"{path}\" written, but {UNSAVED}"));
+            return Vec::new();
         }
+        self.info(format!("\"{path}\" written"));
+        vec![Effect::Quit]
     }
 
     pub(super) fn command_line_key(&mut self, key: Key) -> Vec<Effect> {
@@ -135,11 +153,11 @@ impl Engine {
                 at,
                 src: src.clone(),
             }),
-            Command::Write { file } => return self.write(file.as_deref(), false),
-            Command::WriteQuit { file } => return self.write(file.as_deref(), true),
-            Command::Exit { file } => {
+            Command::Write { file } => return self.write(file.as_deref(), None),
+            Command::WriteQuit { file, force } => return self.write(file.as_deref(), Some(*force)),
+            Command::Exit { file, force } => {
                 return if self.is_modified() {
-                    self.write(file.as_deref(), true)
+                    self.write(file.as_deref(), Some(*force))
                 } else {
                     vec![Effect::Quit]
                 };
@@ -148,7 +166,7 @@ impl Engine {
                 if *force || !self.is_modified() {
                     return vec![Effect::Quit];
                 }
-                self.error("the board has changes: :w writes them, :q! quits without them");
+                self.error(UNSAVED);
             }
             Command::Undo => self.undo(1),
             Command::Redo => self.redo(1),
@@ -166,8 +184,9 @@ impl Engine {
     }
 
     /// Asks the app to write the board to `file`, or to the board's own file. An unnamed board
-    /// takes `file` as its name; a named board writes a copy to it.
-    fn write(&mut self, file: Option<&str>, quit_after: bool) -> Vec<Effect> {
+    /// takes `file` as its name; a named board writes a copy to it. `quit`: quit after the
+    /// write, forced (`Some(true)`) or not.
+    fn write(&mut self, file: Option<&str>, quit: Option<bool>) -> Vec<Effect> {
         let path = match (file, &self.file_name) {
             (Some(file), None) => {
                 self.file_name = Some(file.to_owned());
@@ -180,9 +199,11 @@ impl Engine {
                 return Vec::new();
             }
         };
+        let quit_after = quit.is_some();
         self.pending_write = Some(PendingWrite {
             path: path.clone(),
             quit_after,
+            force: quit == Some(true),
             version: self.version,
         });
         vec![Effect::Write { path, quit_after }]
@@ -205,6 +226,35 @@ impl Engine {
         let before = std::mem::replace(&mut self.cursor, Cursor::Object(id));
         self.commit(vec![edit], before);
     }
+}
+
+/// `a` and `b` name the same file as far as their text tells: the same parts once `.` parts
+/// are dropped and each `..` takes back the part before it. The file system is not asked, so
+/// links are not followed (`link/../a` is `a`). Parts are split as the platform splits paths:
+/// on `/`, and on Windows on `\` too.
+fn same_file(a: &str, b: &str) -> bool {
+    lexical_parts(a) == lexical_parts(b)
+}
+
+/// The parts of `path` with `.` dropped and each `..` taking back the part before it. A `..`
+/// with no part before it stays (`../a`), except right after the root, where it does nothing
+/// (`/..` is `/`).
+fn lexical_parts(path: &str) -> Vec<Component<'_>> {
+    let mut parts: Vec<Component<'_>> = Vec::new();
+    for part in Path::new(path).components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match parts.last() {
+                Some(Component::Normal(_)) => {
+                    parts.pop();
+                }
+                Some(Component::RootDir) => {}
+                _ => parts.push(part),
+            },
+            Component::Normal(_) | Component::RootDir | Component::Prefix(_) => parts.push(part),
+        }
+    }
+    parts
 }
 
 /// The two ends of a line or an arrow, the start defaulting to the cursor point `at`.
@@ -240,5 +290,35 @@ pub(super) fn refusal(error: &BoardError) -> String {
         BoardError::NonFinite(_) => "every number must be finite".to_owned(),
         BoardError::InvalidSize(_) => format!("sizes must be above 0 and at most {MAX_SIZE}"),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_file_works_out_dots_without_the_file_system() {
+        for (a, b) in [
+            ("a.lawh", "./a.lawh"),
+            ("a.lawh", "dir/../a.lawh"),
+            ("a.lawh", "a/b/../../a.lawh"),
+            ("dir/a.lawh", "dir/./a.lawh"),
+            ("dir/a.lawh", "dir//a.lawh"),
+            ("/a.lawh", "/../a.lawh"),
+            ("../a.lawh", "./../a.lawh"),
+        ] {
+            assert!(same_file(a, b), "{a} {b}");
+            assert!(same_file(b, a), "{b} {a}");
+        }
+        for (a, b) in [
+            ("a.lawh", "../a.lawh"),
+            ("a.lawh", "dir/a.lawh"),
+            ("a.lawh", "/a.lawh"),
+            ("a.lawh", "a.lawh/.."),
+            ("a.lawh", "A.lawh"),
+        ] {
+            assert!(!same_file(a, b), "{a} {b}");
+        }
     }
 }

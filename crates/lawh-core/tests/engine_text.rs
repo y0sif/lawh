@@ -11,6 +11,7 @@
 mod common;
 
 use std::fmt::Write as _;
+use std::time::{Duration, Instant};
 
 use common::{Run, board, run, run_engine, trace};
 use insta::assert_snapshot;
@@ -436,6 +437,40 @@ fn an_insert_repeats_on_the_board_and_in_a_block() {
 }
 
 #[test]
+fn dot_stops_when_its_insert_is_refused() {
+    // `idd<Esc>` makes t1 at the origin; `L` goes onto the rectangle, where `i` is refused.
+    // `.` shows why and stops: the `dd` it typed in Insert mode does not delete r1.
+    let b = board("rect id=r1 x=3 y=0 w=1 h=1\n");
+    assert_snapshot!(run(b, "idd<Esc>L.").snapshot());
+}
+
+#[test]
+fn dot_stops_when_a_full_board_refuses_its_block() {
+    // `ijl<Esc>` fills the board. On a grid point `.` cannot make a block: the `j` and `l` it
+    // typed do not move the cursor.
+    let mut b = Board::new();
+    for i in 1..MAX_OBJECTS {
+        let shape = Shape::Ellipse {
+            center: Point::new(0.0, 10.0),
+            rx: 1.0,
+            ry: 1.0,
+        };
+        b.insert(Object::new(id(&format!("c{i}")), shape)).unwrap();
+    }
+    let r = run(b, "ijl<Esc>5l.");
+    assert_eq!(r.engine.board().len(), MAX_OBJECTS);
+    assert_snapshot!(r.header());
+}
+
+#[test]
+fn dot_stops_when_o_finds_no_room() {
+    // r2 lies on the board's bottom edge, so `o` below it has no room: the cursor stays on it
+    // instead of running `jl` from there.
+    let b = board("rect id=r1 x=0 y=0 w=1 h=1\nrect id=r2 x=0 y=999999 w=1 h=0.5\n");
+    assert_snapshot!(run(b, "wojl<Esc>J.").snapshot());
+}
+
+#[test]
 fn dot_in_a_block_does_not_repeat_a_board_change() {
     let mut r = run(one_text("ab"), "wyyp<CR>.");
     assert_eq!(r.engine.board().len(), 2);
@@ -505,4 +540,34 @@ fn a_click_commits_the_session() {
     r.click(0.0, 0.0, Some("t1"));
     assert_eq!(r.engine.mode(), Mode::Normal);
     assert_eq!(r.engine.cursor(), &Cursor::Object(id("t1")));
+}
+
+#[test]
+fn a_click_during_a_counted_insert_keeps_it_once() {
+    // The count would type `hi` again at `<Esc>`; a click commits it once, and `.` then
+    // repeats what was committed: one `hi`.
+    let mut r = run(Board::new(), "3ihi");
+    r.click(5.0, 5.0, None);
+    assert_eq!(text(&r, "t1"), "hi");
+    r.feed(".");
+    assert_eq!(text(&r, "t2"), "hi");
+}
+
+// Cost.
+
+#[test]
+fn insert_arrows_look_only_at_their_line() {
+    // 495 lines of 9 characters (4,949 in all). Each `<Left>` and `<Up>` used to split the
+    // whole text into lines: 10,000 of them took over a second in release.
+    let content = vec!["abcdefghi"; 495].join("\\n");
+    let started = Instant::now();
+    let r = run(
+        one_text(&content),
+        "w10000A<Left><Esc>10000A<Up><Esc>10000A<Home><End><Esc>",
+    );
+    let elapsed = started.elapsed();
+    assert_eq!(text(&r, "t1").len(), 4949);
+    assert!(!r.engine.is_modified());
+    let limit = if cfg!(debug_assertions) { 10 } else { 1 };
+    assert!(elapsed < Duration::from_secs(limit), "{elapsed:?}");
 }

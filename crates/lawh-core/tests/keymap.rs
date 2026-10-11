@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use common::{Run, board, run, run_engine, run_with_rc};
 use insta::assert_snapshot;
 use lawh_core::engine::{
-    Effect, Engine, Escape, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MAX_RC_BYTES,
-    MAX_RC_WARNINGS, RcWarning,
+    Effect, Engine, Escape, MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS,
+    MAX_PENDING_KEYS, MAX_RC_BYTES, MAX_RC_WARNINGS, MAX_REPEAT_KEYS, RcWarning,
 };
 use lawh_core::{Board, Cursor, Key, Mode, ObjectId, Point, Shape};
 
@@ -76,6 +76,19 @@ fn warnings(rc: &str) -> Vec<(usize, String)> {
         .into_iter()
         .map(|RcWarning { line, message }| (line, message))
         .collect()
+}
+
+/// The message when one key would set off more than [`MAX_EXPANDED_KEYS`] keys.
+fn too_many_keys() -> String {
+    format!(
+        "one key may set off at most {MAX_EXPANDED_KEYS} keys through mappings and `.`; the \
+         rest were dropped"
+    )
+}
+
+/// A bound for work that takes milliseconds in release: 1 s there, more in a debug build.
+fn quick() -> Duration {
+    Duration::from_secs(if cfg!(debug_assertions) { 10 } else { 1 })
 }
 
 fn arm(ms: u64) -> Effect {
@@ -296,6 +309,58 @@ fn a_mapping_that_feeds_itself_stops_at_max_pending_keys() {
 }
 
 #[test]
+fn one_key_sets_off_at_most_max_expanded_keys() {
+    // `q` types 255 `l`s and itself again, and 999 mappings start with those 255 `l`s, so
+    // each `l` is looked up against all of them. Without a cap, 1,000 expansions of 256 keys
+    // each, looked up in every mapping one by one, took 82 s in release.
+    let ls = "l".repeat(255);
+    let mut rc = format!("nmap q {ls}q\n");
+    for i in 0..999 {
+        let c = char::from_u32(0x100 + i).unwrap();
+        writeln!(rc, "nmap {ls}{c} h").unwrap();
+    }
+    let started = Instant::now();
+    let mut r = run_with_rc(&rc, Board::new(), "q");
+    let elapsed = started.elapsed();
+    assert_eq!(error(&r), too_many_keys());
+    // Every expansion that fits ran: each moves 255 units right.
+    let expansions = MAX_EXPANDED_KEYS / 256;
+    assert_eq!(r.engine.cursor(), &grid((expansions * 255) as f64, 0.0));
+    assert!(elapsed < quick(), "{elapsed:?}");
+    // The typeahead was dropped; the next key starts afresh.
+    assert_eq!(r.engine.pending(), "");
+    r.feed("h");
+    assert_eq!(r.engine.cursor(), &grid((expansions * 255 - 1) as f64, 0.0));
+    assert_eq!(message(&r), None);
+}
+
+#[test]
+fn dot_from_a_mapping_counts_against_max_expanded_keys() {
+    // `Q` repeats a 2,002-key insert, undoes it and runs itself again. `.` used to replay its
+    // keys whatever the mapping had done, so 1,000 rounds of it never finished.
+    let long = "a".repeat(2000);
+    let started = Instant::now();
+    let r = run_with_rc("nmap Q .uQ\n", Board::new(), &format!("i{long}<Esc>Q"));
+    let elapsed = started.elapsed();
+    assert_eq!(error(&r), too_many_keys());
+    assert_eq!(text(&r, "t1"), long);
+    assert!(elapsed < quick(), "{elapsed:?}");
+    // A `.` still replays a change of nearly MAX_REPEAT_KEYS keys in full, with a count: its
+    // keys, then the 9,997 the count types again (MAX_REPEAT_KEYS allows one more time).
+    let moves = (MAX_REPEAT_KEYS - 3) / 2;
+    let insert = format!("ib{}<Esc>", "<Left><Right>".repeat(moves));
+    let mut r = run(Board::new(), &format!("{insert}j"));
+    r.feed("3.");
+    assert_eq!(text(&r, "t2"), "bb");
+    assert_eq!(message(&r), None);
+    // So does a mapping that runs it once.
+    let mut r = run_with_rc("nnoremap Q 3.\n", Board::new(), &format!("{insert}j"));
+    r.feed("Q");
+    assert_eq!(text(&r, "t2"), "bb");
+    assert_eq!(message(&r), None);
+}
+
+#[test]
 fn dot_repeats_the_keys_a_mapping_ran_without_mapping_them_again() {
     // `X` runs `dd`; `.` replays `dd` itself, though `d` is mapped to nothing by then.
     let r = run_with_rc("nnoremap X dd\nnnoremap d <Nop>\n", row(), "wXw.");
@@ -400,6 +465,25 @@ fn a_click_drops_keys_waiting_for_a_mapping() {
 }
 
 // Keys.
+
+#[test]
+fn a_mapping_of_a_shifted_key_wins_over_the_plain_key() {
+    // Unmapped, `<S-CR>` on a grid point is `<CR>`: no text there to enter.
+    let r = run(Board::new(), "<S-CR>");
+    assert_eq!(
+        error(&r),
+        "no text under the cursor: <CR> enters text and math"
+    );
+    let rc = "nnoremap <S-CR> l\ncnoremap <S-Esc> x\n";
+    let r = run_with_rc(rc, Board::new(), "<S-CR>");
+    assert_eq!(r.engine.cursor(), &grid(1.0, 0.0));
+    assert_eq!(message(&r), None);
+    let r = run_with_rc(rc, Board::new(), ":ci 1<S-Esc><BS><S-CR>");
+    assert_eq!(r.engine.board().len(), 1);
+    // A mapping of the plain key does not take the shifted one.
+    let r = run_with_rc("nnoremap <CR> l\n", Board::new(), "<S-CR>");
+    assert_eq!(r.engine.cursor(), &grid(0.0, 0.0));
+}
 
 #[test]
 fn ctrl_chords_match_exactly() {

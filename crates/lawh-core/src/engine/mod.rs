@@ -7,9 +7,10 @@
 //! command that changes the board makes one undo step.
 //!
 //! The cursor is a grid point or an object (see [`Cursor`]). Normal mode has grid motions
-//! (`h j k l`), object motions (`w b`, `H J K L`), the operators `d` and `y` with `dd`, `yy` and
-//! `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`, `<C-r>`), all with
-//! counts, and `:` for the command line (shapes, text, math, write and quit).
+//! (`h j k l`), object motions (`w b`, `H J K L`, `gg G`), the operators `d` and `y` with `dd`,
+//! `yy` and `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`,
+//! `<C-r>`), all with counts, and `:` for the command line (shapes, text, math, write and
+//! quit).
 //!
 //! Text and math objects are text blocks: `i a I A o O` type into one in Insert mode, `<CR>`
 //! enters one in block-Normal mode, Vim's Normal mode inside the text (see
@@ -47,7 +48,9 @@ use kurbo::{Point, Rect};
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, parse_command};
 pub use cursor::{Cursor, anchor, round3};
-pub use keymap::{MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MapKey, MapMode};
+pub use keymap::{
+    MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MapKey, MapMode,
+};
 pub use measure::{FixedMeasure, Measure, shape_bounds};
 pub use motion::ROW_TOLERANCE;
 pub use place::PLACE_GAP;
@@ -66,7 +69,7 @@ use self::repeat::Repeat;
 use self::text::{Block, Session};
 use self::undo::{Edit, History, Step};
 use crate::board::{Board, Object, ObjectId};
-use crate::key::Key;
+use crate::key::{Key, KeyCode};
 
 /// Largest count before a command; typing more digits keeps it here. Both counts of `2d3w`
 /// together (6) stop here too.
@@ -96,8 +99,8 @@ pub enum Mode {
 pub enum Effect {
     /// Write the board ([`to_lawh`](crate::to_lawh) of [`Engine::board`]) to `path`
     /// atomically, then report back with [`Engine::write_done`]. When `quit_after` is set and
-    /// the write went well, `write_done` returns [`Effect::Quit`]; the app does not quit by
-    /// itself.
+    /// the write went well, `write_done` returns [`Effect::Quit`], unless the write was a copy
+    /// and the board's own file still lacks its changes; the app does not quit by itself.
     Write { path: String, quit_after: bool },
     /// Quit the app. Only sent when quitting is allowed.
     Quit,
@@ -201,7 +204,9 @@ impl Engine {
     /// Takes one typed key. Keys are made canonical first (see [`Key::new`]), then go through
     /// the key mappings. When the keys typed so far start a longer mapping, they wait: the
     /// effects end with [`Effect::ArmTimer`], and the keys run on the next key or on
-    /// [`Engine::timeout`].
+    /// [`Engine::timeout`]. After the mappings, Shift with `<Esc>`, `<CR>`, `<BS>` or `<Del>`
+    /// is dropped, in every mode: `<S-CR>` runs the command line. A mapping of the shifted key
+    /// still wins.
     ///
     /// `measure` gives the bounds of text and math, for object motions, Visual mode and puts.
     pub fn feed(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
@@ -213,6 +218,7 @@ impl Engine {
     /// Runs one key in the current mode, after mappings. `.` replays its keys through here, so
     /// mappings do not apply to them again.
     fn dispatch(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
+        let key = unshifted(key);
         match self.mode {
             Mode::Normal => self.normal_key(key, measure),
             Mode::Visual => self.visual_key(key, measure),
@@ -394,6 +400,19 @@ impl Engine {
             }
         }
         self.sync_block(byte);
+    }
+}
+
+/// `key` without Shift when it is Shift alone with `<Esc>`, `<CR>`, `<BS>` or `<Del>`. Shift is
+/// often still held on these keys after a capital (`:W<S-CR>`), and most terminals send them as
+/// the plain keys, so they act the same in Vim.
+fn unshifted(key: Key) -> Key {
+    let shift_alone = key.mods.shift && !(key.mods.ctrl || key.mods.alt || key.mods.cmd);
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Backspace | KeyCode::Delete if shift_alone => {
+            Key::named(key.code)
+        }
+        _ => key,
     }
 }
 

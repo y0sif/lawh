@@ -63,6 +63,61 @@ fn w_and_b_from_a_grid_point_and_with_counts() {
     assert_snapshot!(trace(rows(), "4w2b99w"));
 }
 
+#[test]
+fn gg_and_capital_g_go_to_the_first_and_last_object() {
+    // Reading order: r1 c1 t1 l1 r2 m1. With a count, the count-th object, or the last when
+    // there are fewer. `g` then another key does nothing; in Visual mode they move the cursor.
+    assert_snapshot!(trace(rows(), "Ggg3gg3G99G2gggh2lvG<Esc>"));
+    // An empty board: the cursor stays.
+    let r = run(Board::new(), "3lGgg");
+    assert_eq!(r.engine.cursor(), &Cursor::Grid(Point::new(3.0, 0.0)));
+}
+
+#[test]
+fn d_and_y_with_gg_and_capital_g_take_a_run_in_reading_order() {
+    // From t1, third in reading order: `dG` takes t1 to m1, `dgg` r1 to t1, `d2G` c1 and t1.
+    assert_snapshot!(run(rows(), "3ggdG").snapshot());
+    assert_snapshot!(run(rows(), "3ggdgg").snapshot());
+    assert_snapshot!(run(rows(), "3ggd2G").snapshot());
+    // `yG` from the last object yanks it alone; `.` repeats `dG` from the new cursor.
+    let r = run(rows(), "GyGggp");
+    assert_eq!(r.engine.board().len(), 7);
+    let r = run(rows(), "5ggdGgg.");
+    assert_eq!(r.engine.board().len(), 0);
+}
+
+#[test]
+fn go_first_puts_the_cursor_on_the_first_object() {
+    // A board far from the grid's origin.
+    let far = board("circle id=c1 x=500 y=300 r=2\ntext id=t1 x=480 y=290 \"far\"\n");
+    let mut r = run(far.clone(), "");
+    r.engine.go_first(&mut FixedMeasure);
+    assert_snapshot!(r.header());
+    assert!(!r.engine.is_modified());
+    // An empty board keeps the origin.
+    let mut r = run(Board::new(), "");
+    r.engine.go_first(&mut FixedMeasure);
+    assert_eq!(r.engine.cursor(), &Cursor::Grid(Point::ZERO));
+    // No undo step, and `.` still repeats the last change.
+    let mut r = run(rows(), "wdd");
+    r.engine.go_first(&mut FixedMeasure);
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("c1")));
+    r.feed(".");
+    assert_eq!(r.engine.board().len(), 4);
+    r.feed("uu");
+    assert_eq!(r.engine.board(), &rows());
+    r.feed("u");
+    assert_eq!(
+        r.engine.message().map(|m| m.text.as_str()),
+        Some("already at the oldest change")
+    );
+    // Outside Normal mode it does nothing.
+    let mut r = run(far, "i");
+    r.engine.go_first(&mut FixedMeasure);
+    assert_eq!(r.engine.mode(), Mode::Insert);
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("t2")));
+}
+
 /// An origin with a rectangle to its right that overlaps it across, and a circle nearer by
 /// centre down to the right that does not.
 fn compass() -> Board {
@@ -262,6 +317,25 @@ fn the_place_rule_moves_past_every_blocker() {
     // 1.4..2.6), so y = 2.6 + 0.5 = 3.1. That box (3.1..4.1) hits c (-1..0.2 by 2.9..3.5), so
     // y = 3.5 + 0.5 = 4. Nothing is there: the copy goes to (0, 4).
     assert_snapshot!(run(blocked(), "wyyp").snapshot());
+}
+
+#[test]
+fn the_place_rule_counts_flat_boxes() {
+    // A copy of l1 below it would start at y 0.5, right on l2: it goes past l2, to y 1.
+    let b = board(
+        "line id=l1 x1=0 y1=0 x2=5 y2=0
+line id=l2 x1=0 y1=0.5 x2=5 y2=0.5
+",
+    );
+    assert_snapshot!(run(b, "wyyp").snapshot());
+    // A copy of the upright line l1 would run down r1's left edge (x 0, y 2.5..4.5): it goes
+    // past r1, to y 5.
+    let b = board(
+        "line id=l1 x1=0 y1=0 x2=0 y2=2
+rect id=r1 x=0 y=2.5 w=3 h=2
+",
+    );
+    assert_snapshot!(run(b, "wyyp").snapshot());
 }
 
 #[test]
@@ -593,6 +667,74 @@ fn modified_follows_undo_back_to_the_saved_point() {
     let mut r = run_engine(engine, ":ci 1<CR>:w<CR>l:ci 2<CR>");
     r.write_done("d.lawh", Ok(()));
     assert!(r.engine.is_modified());
+}
+
+#[test]
+fn the_same_file_written_another_way_saves_the_board() {
+    let named = || Engine::new(Board::new()).with_file_name(Some("a.lawh".to_owned()));
+    for path in ["./a.lawh", "dir/../a.lawh", "./dir/./sub/../.././a.lawh"] {
+        let mut r = run_engine(named(), &format!(":ci 1<CR>:w {path}<CR>"));
+        r.write_done(path, Ok(()));
+        assert!(!r.engine.is_modified(), "{path}");
+        assert_eq!(r.engine.file_name(), Some("a.lawh"));
+    }
+    // Other files: copies.
+    for path in ["../a.lawh", "dir/a.lawh", "/a.lawh", "a.lawh/.."] {
+        let mut r = run_engine(named(), &format!(":ci 1<CR>:w {path}<CR>"));
+        r.write_done(path, Ok(()));
+        assert!(r.engine.is_modified(), "{path}");
+    }
+}
+
+#[test]
+fn wq_to_another_file_writes_a_copy_and_stays() {
+    // The board's own file still lacks the changes, so `:wq other` does not quit after the
+    // copy (as Vim); `:wq!` does.
+    let named = || Engine::new(Board::new()).with_file_name(Some("b.lawh".to_owned()));
+    for command in ["wq", "x"] {
+        let mut r = run_engine(named(), &format!(":ci 1<CR>:{command} other.lawh<CR>"));
+        assert_eq!(
+            r.effects,
+            [Effect::Write {
+                path: "other.lawh".to_owned(),
+                quit_after: true
+            }]
+        );
+        r.write_done("other.lawh", Ok(()));
+        assert_eq!(r.effects.len(), 1, "{command}");
+        assert_snapshot!(r.header());
+        r.feed(":q!<CR>");
+        assert_eq!(r.effects.last(), Some(&Effect::Quit));
+        // Forced, or with nothing left unsaved, it quits.
+        let mut r = run_engine(named(), &format!(":ci 1<CR>:{command}! other.lawh<CR>"));
+        r.write_done("other.lawh", Ok(()));
+        assert_eq!(r.effects.last(), Some(&Effect::Quit), "{command}!");
+    }
+    let mut r = run_engine(named(), ":wq other.lawh<CR>");
+    r.write_done("other.lawh", Ok(()));
+    assert_eq!(r.effects.last(), Some(&Effect::Quit));
+}
+
+// Shift on named keys.
+
+#[test]
+fn shift_with_esc_cr_bs_or_del_is_the_plain_key() {
+    // On the command line: `<S-BS>` deletes, `<S-CR>` runs.
+    let r = run(Board::new(), ":ci 12<S-BS><S-CR>");
+    assert_snapshot!(r.snapshot());
+    // `<S-Esc>` leaves Visual mode, the command line, Insert mode and block-Normal mode;
+    // `<S-CR>` enters a block.
+    let r = run(rows(), "v<S-Esc>");
+    assert_eq!(r.engine.mode(), Mode::Normal);
+    let r = run(Board::new(), ":ci 1<S-Esc>");
+    assert_eq!(r.engine.mode(), Mode::Normal);
+    assert!(r.engine.board().is_empty());
+    let mut r = run(Board::new(), "iab<S-BS>c<S-Esc>");
+    assert_eq!(r.engine.mode(), Mode::Normal);
+    r.feed("<S-CR>");
+    assert_eq!(r.engine.mode(), Mode::BlockNormal);
+    r.feed("<S-Esc>");
+    assert_snapshot!(r.snapshot());
 }
 
 // Clicks.

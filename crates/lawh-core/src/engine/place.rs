@@ -11,7 +11,8 @@ use crate::board::{MAX_COORDINATE, Shape};
 ///
 /// Half a unit reads as "next to" at any zoom where the objects are legible, yet keeps a group
 /// from touching its neighbour, so the bounds of the two never overlap and `w`, `J` and `K`
-/// still tell them apart.
+/// still tell them apart. Flat bounds (a level or upright line) count too: a group never ends
+/// up lying on one.
 pub const PLACE_GAP: f64 = 0.5;
 
 /// Which side of the current object a group goes.
@@ -30,7 +31,8 @@ pub(crate) enum Side {
 /// it overlaps obstacles it moves down to [`PLACE_GAP`] under the lowest of them. Above is the
 /// mirror image. Each try rounds y away from `reference` to a multiple of 0.1 (so files show
 /// `y=4.3`, and the box never moves back into what it just cleared) and x with [`round3`]: the
-/// box tested is the box placed. Boxes that only touch do not overlap.
+/// box tested is the box placed. Boxes that only touch do not overlap, unless one is flat (see
+/// [`overlaps`]).
 pub(crate) fn place(reference: Rect, size: Size, obstacles: &[Rect], on: Side) -> Option<Point> {
     let x = round3(reference.x0);
     let mut y = match on {
@@ -63,10 +65,22 @@ pub(crate) fn place(reference: Rect, size: Size, obstacles: &[Rect], on: Side) -
     None
 }
 
-/// The two boxes share more than an edge. A box of zero width or height overlaps a box it lies
-/// strictly inside.
+/// The two boxes overlap on both axes (see [`overlap`]): two boxes of some size share more than
+/// an edge; a flat box (of zero width or height) lies within the other's extent, edges
+/// included, so a line on a box's edge or on another line overlaps it.
 pub(crate) fn overlaps(a: Rect, b: Rect) -> bool {
-    a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1
+    overlap(a.x0, a.x1, b.x0, b.x1) && overlap(a.y0, a.y1, b.y0, b.y1)
+}
+
+/// The extents `a0..=a1` and `b0..=b1` on one axis overlap. Two of some length must share more
+/// than an end; when either has zero length, sharing a point is enough (two of zero length at
+/// the same place overlap).
+fn overlap(a0: f64, a1: f64, b0: f64, b1: f64) -> bool {
+    if a0 < a1 && b0 < b1 {
+        a0 < b1 && b0 < a1
+    } else {
+        a0 <= b1 && b0 <= a1
+    }
 }
 
 fn within_limits(r: Rect) -> bool {
@@ -167,6 +181,31 @@ mod tests {
             place(reference, size, &above, Side::Above),
             Some(Point::new(0.0, -3.6))
         );
+    }
+
+    #[test]
+    fn flat_boxes_overlap_what_they_lie_on() {
+        let box_ = r(0.0, 0.0, 2.0, 2.0);
+        // Boxes of some size that share only an edge or a corner do not overlap.
+        assert!(!overlaps(box_, r(2.0, 0.0, 3.0, 2.0)));
+        assert!(!overlaps(box_, r(2.0, 2.0, 3.0, 3.0)));
+        assert!(overlaps(box_, r(1.9, 1.9, 3.0, 3.0)));
+        // A level line on the box's edge, inside it, or at the same height as another.
+        let level = |y: f64| r(0.0, y, 5.0, y);
+        assert!(overlaps(level(2.0), box_));
+        assert!(overlaps(level(1.0), box_));
+        assert!(!overlaps(level(2.1), box_));
+        assert!(overlaps(level(0.5), level(0.5)));
+        assert!(!overlaps(level(0.5), level(0.6)));
+        // Upright lines on the box's left and right edges; one that only meets its corner from
+        // below shares just an end with it along y.
+        assert!(overlaps(r(0.0, 0.5, 0.0, 4.0), box_));
+        assert!(overlaps(r(2.0, 0.5, 2.0, 1.5), box_));
+        assert!(!overlaps(r(2.0, 2.0, 2.0, 4.0), box_));
+        assert!(!overlaps(r(2.1, 0.5, 2.1, 1.5), box_));
+        // A point.
+        assert!(overlaps(r(1.0, 1.0, 1.0, 1.0), box_));
+        assert!(overlaps(r(2.0, 2.0, 2.0, 2.0), box_));
     }
 
     #[test]

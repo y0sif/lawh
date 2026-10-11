@@ -1,0 +1,26 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+assertion_line: 70
+expression: "trace(rows(), \"Ggg3gg3G99G2gggh2lvG<Esc>\")"
+---
+    G // mode=normal cursor=object(m1) keys=1
+    g // mode=normal cursor=object(m1) keys=2
+    g // mode=normal cursor=object(r1) keys=3
+    3 // mode=normal cursor=object(r1) keys=4
+    g // mode=normal cursor=object(r1) keys=5
+    g // mode=normal cursor=object(t1) keys=6
+    3 // mode=normal cursor=object(t1) keys=7
+    G // mode=normal cursor=object(t1) keys=8
+    9 // mode=normal cursor=object(t1) keys=9
+    9 // mode=normal cursor=object(t1) keys=10
+    G // mode=normal cursor=object(m1) keys=11
+    2 // mode=normal cursor=object(m1) keys=12
+    g // mode=normal cursor=object(m1) keys=13
+    g // mode=normal cursor=object(c1) keys=14
+    g // mode=normal cursor=object(c1) keys=15
+    h // mode=normal cursor=object(c1) keys=16
+    2 // mode=normal cursor=object(c1) keys=17
+    l // mode=normal cursor=grid(7,0.5) keys=18
+    v // mode=visual cursor=grid(7,0.5) keys=19
+    G // mode=visual cursor=object(m1) keys=20 selection=m1,r2
+<Esc> // mode=normal cursor=object(m1) keys=21

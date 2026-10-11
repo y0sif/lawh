@@ -13,6 +13,10 @@
 //! they make, or run as typed. A key that starts no mapping runs as typed, and the keys after it
 //! are looked up again.
 //!
+//! Each mode's mappings are kept sorted by their keys, so a lookup narrows them one typed key at a
+//! time: its cost grows with the keys looked at, not with the number of mappings. One typed key
+//! sets off at most [`MAX_EXPANDED_KEYS`] keys, through mappings and `.` together.
+//!
 //! Keys from `:noremap` and its kind are not mapped again. Keys from `:map` are, except the
 //! first one when what a mapping maps to starts with its own keys (Vim's rule, so `:nmap l lw`
 //! moves right, then onto the next object). `<Leader>` in a mapping is the `leader` setting at
@@ -23,13 +27,15 @@
 use std::collections::VecDeque;
 
 use super::command::Command;
+use super::repeat::MAX_REPEAT_KEYS;
 use super::{Effect, Engine, Measure, Mode};
 use crate::key::{Key, KeyCode, format_keys};
 
 /// Most mappings in each mode (1,000).
 ///
-/// A lawhrc holds tens. Every key typed is looked up in its mode's mappings one by one, so the
-/// cap keeps that cheap. It also bounds what mappings hold: 1,000 mappings of two
+/// A lawhrc holds tens. Keys are looked up by binary search in their mode's mappings, sorted by
+/// their keys, so the number of mappings costs little per key (at most about 20 comparisons a
+/// key looked at, for 1,000). The cap bounds what mappings hold: 1,000 mappings of two
 /// [`MAX_MAP_KEYS`] keys (12 bytes a key) are about 6 MB a mode.
 pub const MAX_MAPS: usize = 1000;
 
@@ -47,8 +53,20 @@ pub const MAX_MAP_KEYS: usize = 256;
 /// a command; lawh counts them until the next typed key, because a mapping can loop forever
 /// while its keys do reach commands: `:map x yx` yanks with `yy` and maps `x` again without end.
 /// Vim stops that with Ctrl-C, which the engine does not have. So one typed key runs at most
-/// 1,000 expansions of at most [`MAX_MAP_KEYS`] keys each.
+/// 1,000 expansions, and [`MAX_EXPANDED_KEYS`] keys from them.
 pub const MAX_MAP_DEPTH: usize = 1000;
+
+/// Most keys one typed key (or a timeout) may set off (30,000, three times [`MAX_REPEAT_KEYS`]):
+/// keys that mappings put in the typeahead, keys that `.` replays, and keys that a count on an
+/// insert types again. Past it the typeahead is dropped and a message says so.
+///
+/// Each of those keys is looked up in the mappings and run, so this bounds the work behind one
+/// key press. Without it, [`MAX_MAP_DEPTH`] expansions of [`MAX_MAP_KEYS`] keys (256,000 keys)
+/// could each be looked up in [`MAX_MAPS`] long mappings: one key took 82 s in release. A mapping
+/// that runs `.` on a long insert, then itself, never finished. Three times [`MAX_REPEAT_KEYS`]
+/// leaves room for a mapping to run `.` once on the longest change with a count: its keys, the
+/// keys typed again for the count, and the mapping's own.
+pub const MAX_EXPANDED_KEYS: usize = 3 * MAX_REPEAT_KEYS;
 
 /// Most keys the typeahead holds (10,000); past it, it is dropped with a message.
 ///
@@ -171,7 +189,7 @@ enum Lookup {
     Expand { len: usize, keys: Vec<Queued> },
 }
 
-/// The mappings of every mode, and the typeahead.
+/// The mappings of every mode, each sorted by `lhs`, and the typeahead.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Keymap {
     normal: Vec<Mapping>,
@@ -183,6 +201,16 @@ pub(super) struct Keymap {
     typeahead: VecDeque<Queued>,
     /// Mappings expanded since the last typed key or timeout (see [`MAX_MAP_DEPTH`]).
     depth: usize,
+    /// Keys set off since the last typed key or timeout (see [`MAX_EXPANDED_KEYS`]).
+    spent: usize,
+}
+
+/// The message when one key would set off more than [`MAX_EXPANDED_KEYS`] keys.
+pub(super) fn too_many_keys() -> String {
+    format!(
+        "one key may set off at most {MAX_EXPANDED_KEYS} keys through mappings and `.`; \
+         the rest were dropped"
+    )
 }
 
 impl Keymap {
@@ -216,23 +244,68 @@ impl Keymap {
         self.typeahead.clear();
     }
 
+    /// Counts `keys` more keys set off by the key typed last, if they fit in
+    /// [`MAX_EXPANDED_KEYS`]: false, counting nothing, when they do not.
+    pub(super) fn spend(&mut self, keys: usize) -> bool {
+        match self.spent.checked_add(keys) {
+            Some(spent) if spent <= MAX_EXPANDED_KEYS => {
+                self.spent = spent;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Keys the key typed last may still set off (see [`MAX_EXPANDED_KEYS`]).
+    pub(super) fn left_to_spend(&self) -> usize {
+        MAX_EXPANDED_KEYS.saturating_sub(self.spent)
+    }
+
     /// Looks up the typeahead, which is not empty, in `mode`'s mappings. When `timed_out`, no
     /// more keys are coming for a longer mapping.
+    ///
+    /// The mappings are sorted by `lhs`, so those that start with the typeahead's first `k`
+    /// keys are a run of them, the one of exactly those keys (if any) first. Each key of the
+    /// typeahead narrows the run with two binary searches on that key alone, so a lookup costs
+    /// about the keys looked at times the logarithm of the number of mappings.
     fn lookup(&self, mode: MapMode, timed_out: bool) -> Lookup {
-        let typeahead = &self.typeahead;
+        let mappings = self.mappings(mode);
         let mut full: Option<&Mapping> = None;
-        let mut longer = false;
-        for mapping in self.mappings(mode) {
-            let lhs = &mapping.lhs;
-            if lhs.is_empty() || !lhs.iter().zip(typeahead).all(|(k, q)| *k == q.key) {
-                continue;
+        // The run of mappings that start with the first `matched` keys of the typeahead.
+        let (mut from, mut to) = (0, mappings.len());
+        let mut matched = 0;
+        for queued in &self.typeahead {
+            let run = mappings.get(from..to).unwrap_or_default();
+            if let Some(first) = run
+                .first()
+                .filter(|m| m.lhs.len() == matched && matched > 0)
+            {
+                full = Some(first);
             }
-            if lhs.len() > typeahead.len() {
-                longer = true;
-            } else if full.is_none_or(|f| lhs.len() > f.lhs.len()) {
-                full = Some(mapping);
+            let key = Some(queued.key);
+            let at = |m: &Mapping| m.lhs.get(matched).copied();
+            // Often every mapping left goes on with this key: no search then.
+            let (start, end) = match (run.first().map(at), run.last().map(at)) {
+                (Some(a), Some(b)) if a == key && b == key => (0, run.len()),
+                _ => (
+                    run.partition_point(|m| at(m) < key),
+                    run.partition_point(|m| at(m) <= key),
+                ),
+            };
+            (from, to) = (from + start, from + end);
+            matched += 1;
+            if from >= to {
+                break;
             }
         }
+        // Mappings that start with the whole typeahead: one of exactly its keys comes first,
+        // and any others are longer.
+        let run = mappings.get(from..to).unwrap_or_default();
+        let exact = run.first().filter(|m| m.lhs.len() == matched);
+        if let Some(mapping) = exact {
+            full = Some(mapping);
+        }
+        let longer = run.len() > usize::from(exact.is_some());
         if longer && !timed_out && !full.is_some_and(|m| m.nowait) {
             return Lookup::Wait;
         }
@@ -256,8 +329,8 @@ impl Keymap {
         }
     }
 
-    /// Replaces the first `len` keys of the typeahead with `keys`, within [`MAX_MAP_DEPTH`] and
-    /// [`MAX_PENDING_KEYS`]: past either, the message to show.
+    /// Replaces the first `len` keys of the typeahead with `keys`, within [`MAX_MAP_DEPTH`],
+    /// [`MAX_PENDING_KEYS`] and [`MAX_EXPANDED_KEYS`]: past any, the message to show.
     fn expand(&mut self, len: usize, keys: Vec<Queued>) -> Result<(), String> {
         if self.depth >= MAX_MAP_DEPTH {
             return Err("recursive mapping".to_owned());
@@ -268,6 +341,9 @@ impl Keymap {
                 "mappings made more than {MAX_PENDING_KEYS} keys at once; they were dropped"
             ));
         }
+        if !self.spend(keys.len()) {
+            return Err(too_many_keys());
+        }
         self.depth += 1;
         self.typeahead.drain(..len);
         for queued in keys.into_iter().rev() {
@@ -276,12 +352,17 @@ impl Keymap {
         Ok(())
     }
 
+    /// Where the mapping of `lhs` is in `mode`'s sorted mappings, or where it would go.
+    fn find(&self, mode: MapMode, lhs: &[Key]) -> Result<usize, usize> {
+        self.mappings(mode)
+            .binary_search_by(|m| m.lhs.as_slice().cmp(lhs))
+    }
+
     /// Adds `mapping` to each of `modes`, replacing one of the same keys. All or nothing: no
     /// mode takes it when one is full.
     fn define(&mut self, modes: &[MapMode], mapping: &Mapping) -> Result<(), String> {
         let full = modes.iter().find(|mode| {
-            let mappings = self.mappings(**mode);
-            mappings.len() >= MAX_MAPS && mappings.iter().all(|m| m.lhs != mapping.lhs)
+            self.mappings(**mode).len() >= MAX_MAPS && self.find(**mode, &mapping.lhs).is_err()
         });
         if let Some(mode) = full {
             return Err(format!(
@@ -290,10 +371,15 @@ impl Keymap {
             ));
         }
         for mode in modes {
+            let found = self.find(*mode, &mapping.lhs);
             let mappings = self.mappings_mut(*mode);
-            match mappings.iter_mut().find(|m| m.lhs == mapping.lhs) {
-                Some(old) => old.clone_from(mapping),
-                None => mappings.push(mapping.clone()),
+            match found {
+                Ok(i) => {
+                    if let Some(old) = mappings.get_mut(i) {
+                        old.clone_from(mapping);
+                    }
+                }
+                Err(i) => mappings.insert(i, mapping.clone()),
             }
         }
         Ok(())
@@ -303,10 +389,10 @@ impl Keymap {
     fn remove(&mut self, modes: &[MapMode], lhs: &[Key]) -> bool {
         let mut removed = false;
         for mode in modes {
-            let mappings = self.mappings_mut(*mode);
-            let before = mappings.len();
-            mappings.retain(|m| m.lhs != lhs);
-            removed |= mappings.len() != before;
+            if let Ok(i) = self.find(*mode, lhs) {
+                self.mappings_mut(*mode).remove(i);
+                removed = true;
+            }
         }
         removed
     }
@@ -322,8 +408,8 @@ impl Keymap {
         let found: Vec<String> = modes
             .iter()
             .filter_map(|mode| {
-                let mapping = self.mappings(*mode).iter().find(|m| m.lhs == lhs)?;
-                Some(mapping.describe(*mode))
+                let i = self.find(*mode, lhs).ok()?;
+                Some(self.mappings(*mode).get(i)?.describe(*mode))
             })
             .collect();
         if found.is_empty() {
@@ -338,6 +424,7 @@ impl Engine {
     /// Puts a typed key at the end of the typeahead and runs what it can.
     pub(super) fn type_key(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         self.keymap.depth = 0;
+        self.keymap.spent = 0;
         self.keymap.typeahead.push_back(Queued { key, remap: true });
         self.run_typeahead(false, measure)
     }
@@ -353,6 +440,7 @@ impl Engine {
             return Vec::new();
         }
         self.keymap.depth = 0;
+        self.keymap.spent = 0;
         self.run_typeahead(true, measure)
     }
 

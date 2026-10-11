@@ -1,6 +1,7 @@
 //! Normal mode keys: counts, operators, the key tables, and the motions Normal and Visual mode
 //! share.
 
+use super::keymap::too_many_keys;
 use super::motion::{Direction, ObjectMotion, Origin, path};
 use super::ops::Target;
 use super::place::Side;
@@ -14,8 +15,19 @@ use crate::key::{Key, KeyCode, format_keys};
 pub(super) enum Motion {
     /// `h j k l`: whole grid units, `dx` and `dy` a step.
     Grid { dx: i8, dy: i8 },
-    /// `w b H J K L`: onto an object.
+    /// `w b H J K L gg G`: onto an object.
     Object(ObjectMotion),
+}
+
+impl Motion {
+    /// The count the motion runs with: the one typed, else 1. `G` without a count goes to the
+    /// last object: the count is then as large as can be, past any board's last object.
+    pub(super) fn count(self, typed: Option<u32>) -> u32 {
+        typed.unwrap_or(match self {
+            Self::Object(ObjectMotion::Last) => u32::MAX,
+            _ => 1,
+        })
+    }
 }
 
 /// Motions by their keys, in Normal mode, Visual mode and after an operator.
@@ -42,6 +54,11 @@ pub(super) const MOTIONS: &[(&[Key], Motion)] = &[
         &[Key::char('L')],
         Motion::Object(ObjectMotion::Nearest(Direction::Right)),
     ),
+    (
+        &[Key::char('g'), Key::char('g')],
+        Motion::Object(ObjectMotion::First),
+    ),
+    (&[Key::char('G')], Motion::Object(ObjectMotion::Last)),
 ];
 
 /// An operator: what `d` and `y` do to the objects a motion covers.
@@ -263,7 +280,7 @@ impl Engine {
                 Vec::new()
             }
             Lookup::Found(Found::Motion(motion)) => {
-                let count = self.pending.count.unwrap_or(1);
+                let count = motion.count(self.pending.count);
                 self.pending = Pending::default();
                 self.motion(motion, count, measure);
                 Vec::new()
@@ -307,7 +324,11 @@ impl Engine {
                     return Vec::new();
                 };
                 let count = multiply(op.count, pending.count);
-                let changed = self.operate(op.operator, target, count.unwrap_or(1), measure);
+                let n = match target {
+                    Target::Objects => count.unwrap_or(1),
+                    Target::Motion(motion) => Motion::Object(motion).count(count),
+                };
+                let changed = self.operate(op.operator, target, n, measure);
                 if changed {
                     self.repeat.finish(count);
                 }
@@ -380,8 +401,26 @@ impl Engine {
         }
     }
 
+    /// Puts the cursor on the first object in reading order, as `gg` does, when the board has
+    /// one and the engine is in Normal mode with no keys pending. It makes no undo step and
+    /// leaves `.` as it was.
+    ///
+    /// For the app when it opens a board: the cursor starts at the grid's origin, which may be
+    /// far from the board's objects.
+    pub fn go_first(&mut self, measure: &mut dyn Measure) {
+        if self.mode == Mode::Normal && self.pending.is_empty() {
+            self.motion(Motion::Object(ObjectMotion::First), 1, measure);
+        }
+    }
+
     /// `.`: replays the last change's keys, with `count` in place of its own if given, when
     /// the change can be repeated here (see [`Context`]).
+    ///
+    /// The keys count against what the typed key may set off
+    /// ([`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS)); past it, nothing is replayed and the
+    /// typeahead is dropped with a message. A change typed in Insert mode stops after its first
+    /// key when that key did not start Insert mode (it was refused, and says why): the keys
+    /// after it would run as commands.
     pub(super) fn repeat_change(
         &mut self,
         count: Option<u32>,
@@ -401,10 +440,18 @@ impl Engine {
         if !here {
             return Vec::new();
         }
-        let keys = change.replay(count);
+        let (keys, entry) = change.replay(count);
+        if !self.keymap.spend(keys.len()) {
+            self.keymap.flush();
+            self.error(too_many_keys());
+            return Vec::new();
+        }
         self.repeat.replaying = true;
         let mut effects = Vec::new();
-        for key in keys {
+        for (i, key) in keys.into_iter().enumerate() {
+            if Some(i) == entry && self.mode != Mode::Insert {
+                break;
+            }
             effects.extend(self.dispatch(key, measure));
         }
         self.repeat.replaying = false;

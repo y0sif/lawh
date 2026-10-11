@@ -1,0 +1,10 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+assertion_line: 330
+expression: "run(b, \"wyyp\").snapshot()"
+---
+// mode=normal cursor=object(l3) keys=4
+lawh version=1
+line id=l1 x1=0 y1=0 x2=5 y2=0
+line id=l2 x1=0 y1=0.5 x2=5 y2=0.5
+line id=l3 x1=0 y1=1 x2=5 y2=1

@@ -6,6 +6,10 @@
 //! boundaries. Lines break where the board counts line breaks (see
 //! [`MAX_TEXT_LINES`](crate::board::MAX_TEXT_LINES)): `\n`, `\r`, CRLF (one break), vertical
 //! tab, form feed, next line, line separator and paragraph separator. Each is one grapheme.
+//!
+//! Every key in Insert and block-Normal mode runs some of these, so they look only around the
+//! cursor: the graphemes next to it, its line, and the lines a motion crosses. None splits the
+//! whole text into lines or graphemes.
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
@@ -55,41 +59,62 @@ fn is_break(grapheme: &str) -> bool {
     )
 }
 
-/// The lines of `text`, first to last: one more than its line breaks.
-pub(super) fn lines(text: &str) -> Vec<Line> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (i, g) in text.grapheme_indices(true) {
-        if is_break(g) {
-            lines.push(Line { start, end: i });
-            start = i + g.len();
-        }
-    }
-    lines.push(Line {
-        start,
-        end: text.len(),
-    });
-    lines
+/// The character starts a line break. Every break is a grapheme of its own (CR and LF together
+/// make one), so the characters that break lines are exactly where the graphemes do.
+fn is_break_char(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
 }
 
-/// The index in `lines` of the line `byte` is on; a line's end (its break) counts as on it.
-pub(super) fn line_index(lines: &[Line], byte: usize) -> usize {
-    lines
-        .iter()
-        .position(|l| byte <= l.end)
-        .unwrap_or(lines.len().saturating_sub(1))
-}
-
-/// The line `byte` is on.
+/// The line `byte` is on; a line's end (its break) counts as on it. It looks from `byte` back
+/// and forward to the nearest line breaks only.
 pub(super) fn line_at(text: &str, byte: usize) -> Line {
-    let lines = lines(text);
-    lines
-        .get(line_index(&lines, byte))
-        .copied()
-        .unwrap_or(Line {
-            start: text.len(),
-            end: text.len(),
-        })
+    let mut byte = text.floor_char_boundary(byte);
+    // Between the CR and the LF of one break: on the line after it.
+    if byte > 0 && text.get(byte - 1..=byte) == Some("\r\n") {
+        byte += 1;
+    }
+    let start = text
+        .get(..byte)
+        .unwrap_or_default()
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| is_break_char(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let end = text
+        .get(byte..)
+        .unwrap_or_default()
+        .find(is_break_char)
+        .map_or(text.len(), |i| byte + i);
+    Line { start, end }
+}
+
+/// The line after `line`, or `None` on the last line.
+fn next_line(text: &str, line: Line) -> Option<Line> {
+    (line.end < text.len()).then(|| line_at(text, next_grapheme(text, line.end)))
+}
+
+/// The line before `line`, or `None` on the first line.
+fn prev_line(text: &str, line: Line) -> Option<Line> {
+    (line.start > 0).then(|| line_at(text, prev_grapheme(text, line.start)))
+}
+
+/// `byte` starts a line: the text's start, or just after a line break.
+fn at_line_start(text: &str, byte: usize) -> bool {
+    byte == 0
+        || text
+            .get(prev_grapheme(text, byte)..byte)
+            .is_some_and(is_break)
+}
+
+/// `byte` ends a line: the text's end, or a line break.
+fn at_line_end(text: &str, byte: usize) -> bool {
+    byte >= text.len()
+        || text
+            .get(byte..next_grapheme(text, byte))
+            .is_some_and(is_break)
 }
 
 /// Where the grapheme at `byte` ends; `byte` at the end of the text.
@@ -131,10 +156,23 @@ pub(super) fn ceil_boundary(text: &str, byte: usize) -> usize {
         .unwrap_or(text.len())
 }
 
-/// The grapheme boundary at `byte`, or the nearest before it.
+/// The grapheme boundary at `byte`, or the nearest before it. Like [`ceil_boundary`], it looks
+/// only at the graphemes around `byte`.
 pub(super) fn floor_boundary(text: &str, byte: usize) -> usize {
     if byte >= text.len() {
         return text.len();
+    }
+    let byte = text.floor_char_boundary(byte);
+    // The whole text is the chunk, so the cursor never asks for more context.
+    let mut cursor = GraphemeCursor::new(byte, text.len(), true);
+    match cursor.is_boundary(text, 0) {
+        Ok(true) => return byte,
+        Ok(false) => {
+            if let Ok(Some(prev)) = cursor.prev_boundary(text, 0) {
+                return prev;
+            }
+        }
+        Err(_) => {}
     }
     text.grapheme_indices(true)
         .map(|(i, _)| i)
@@ -174,9 +212,8 @@ fn at_column(text: &str, line: Line, column: usize, past_end: bool) -> usize {
 /// line's start when the line is empty.
 pub(super) fn on_grapheme(text: &str, byte: usize) -> usize {
     let byte = floor_boundary(text, byte);
-    let line = line_at(text, byte);
-    if byte >= line.end && !line.is_empty() {
-        prev_grapheme(text, line.end).max(line.start)
+    if at_line_end(text, byte) && !at_line_start(text, byte) {
+        prev_grapheme(text, byte)
     } else {
         byte
     }
@@ -185,24 +222,22 @@ pub(super) fn on_grapheme(text: &str, byte: usize) -> usize {
 /// Where the cursor goes when Insert mode ends at `byte`: one grapheme back, as in Vim, unless
 /// at the start of a line.
 pub(super) fn after_insert(text: &str, byte: usize) -> usize {
-    let line = line_at(text, byte);
-    let back = if byte > line.start {
-        prev_grapheme(text, byte).max(line.start)
-    } else {
+    let back = if at_line_start(text, byte) {
         byte
+    } else {
+        prev_grapheme(text, byte)
     };
     on_grapheme(text, back)
 }
 
 /// `count` graphemes left of `byte`, within its line.
 pub(super) fn left(text: &str, byte: usize, count: u32) -> usize {
-    let line = line_at(text, byte);
     let mut at = byte;
     for _ in 0..count {
-        if at <= line.start {
+        if at_line_start(text, at) {
             break;
         }
-        at = prev_grapheme(text, at).max(line.start);
+        at = prev_grapheme(text, at);
     }
     at
 }
@@ -210,11 +245,13 @@ pub(super) fn left(text: &str, byte: usize, count: u32) -> usize {
 /// `count` graphemes right of `byte`, within its line: up to its end when `past_end`, else up
 /// to its last grapheme.
 pub(super) fn right(text: &str, byte: usize, count: u32, past_end: bool) -> usize {
-    let line = line_at(text, byte);
     let mut at = byte;
     for _ in 0..count {
-        let next = next_grapheme(text, at).min(line.end);
-        if next <= at || (next == line.end && !past_end) {
+        if at_line_end(text, at) {
+            break;
+        }
+        let next = next_grapheme(text, at);
+        if next <= at || (!past_end && at_line_end(text, next)) {
             break;
         }
         at = next;
@@ -232,20 +269,21 @@ pub(super) fn vertical(
     want: usize,
     past_end: bool,
 ) -> Option<usize> {
-    let lines = lines(text);
-    let here = line_index(&lines, byte);
-    let steps = usize::try_from(count).unwrap_or(usize::MAX);
-    let target = if up {
-        here.checked_sub(1)?.saturating_sub(steps.saturating_sub(1))
-    } else {
-        let last = lines.len().checked_sub(1)?;
-        if here >= last {
-            return None;
+    let step = |line| {
+        if up {
+            prev_line(text, line)
+        } else {
+            next_line(text, line)
         }
-        here.saturating_add(steps).min(last)
     };
-    let line = lines.get(target)?;
-    Some(at_column(text, *line, want, past_end))
+    let mut line = step(line_at(text, byte))?;
+    for _ in 1..count {
+        match step(line) {
+            Some(next) => line = next,
+            None => break,
+        }
+    }
+    Some(at_column(text, line, want, past_end))
 }
 
 /// The start of `byte`'s line.
@@ -271,13 +309,14 @@ pub(super) fn first_non_blank(text: &str, byte: usize) -> usize {
 /// `$` with a count: the last grapheme of the line `count - 1` lines below `byte`, or of the
 /// last line.
 pub(super) fn last_of_line(text: &str, byte: usize, count: u32) -> usize {
-    let lines = lines(text);
-    let here = line_index(&lines, byte);
-    let down = usize::try_from(count.saturating_sub(1)).unwrap_or(usize::MAX);
-    let target = here.saturating_add(down).min(lines.len().saturating_sub(1));
-    lines
-        .get(target)
-        .map_or(byte, |line| on_grapheme(text, line.end))
+    let mut line = line_at(text, byte);
+    for _ in 1..count {
+        match next_line(text, line) {
+            Some(next) => line = next,
+            None => break,
+        }
+    }
+    on_grapheme(text, line.end)
 }
 
 /// A grapheme's class for word motions, as Vim's `cls()`: blanks separate words; a word is a
@@ -316,29 +355,28 @@ enum Step {
 /// line's end (where Vim's cursor stands on the line's NUL), which counts as blank.
 struct Walk<'a> {
     text: &'a str,
-    lines: Vec<Line>,
-    line: usize,
+    /// The line the walk is on.
+    line: Line,
     byte: usize,
 }
 
 impl<'a> Walk<'a> {
     fn new(text: &'a str, byte: usize) -> Self {
-        let lines = lines(text);
         let byte = floor_boundary(text, byte);
-        let line = line_index(&lines, byte);
         Self {
             text,
-            lines,
-            line,
+            line: line_at(text, byte),
             byte,
         }
     }
 
     fn current(&self) -> Line {
-        self.lines.get(self.line).copied().unwrap_or(Line {
-            start: self.text.len(),
-            end: self.text.len(),
-        })
+        self.line
+    }
+
+    /// On the text's last line.
+    fn on_last_line(&self) -> bool {
+        self.line.end >= self.text.len()
     }
 
     /// One position forward: Vim's `inc()`.
@@ -357,9 +395,9 @@ impl<'a> Walk<'a> {
                 Step::Within
             };
         }
-        match self.lines.get(self.line + 1) {
+        match next_line(self.text, line) {
             Some(next) => {
-                self.line += 1;
+                self.line = next;
                 self.byte = next.start;
                 Step::Crossed
             }
@@ -380,13 +418,10 @@ impl<'a> Walk<'a> {
             };
             return Step::Within;
         }
-        let Some(index) = self.line.checked_sub(1) else {
+        let Some(prev) = prev_line(self.text, line) else {
             return Step::Stuck;
         };
-        let Some(prev) = self.lines.get(index) else {
-            return Step::Stuck;
-        };
-        self.line = index;
+        self.line = prev;
         self.byte = prev.end;
         Step::Crossed
     }
@@ -413,7 +448,7 @@ pub(super) fn word_forward(text: &str, byte: usize, count: u32) -> usize {
     let mut walk = Walk::new(text, byte);
     'count: for _ in 0..count {
         let start = walk.class();
-        let last_line = walk.line + 1 >= walk.lines.len();
+        let last_line = walk.on_last_line();
         match walk.inc() {
             Step::Stuck => break,
             Step::OntoLineEnd | Step::Crossed if last_line => break,
@@ -523,6 +558,24 @@ mod tests {
         seen
     }
 
+    /// The lines of `text` from splitting all of it into graphemes: the oracle for
+    /// [`line_at`], which looks only around its byte.
+    fn lines(text: &str) -> Vec<Line> {
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (i, g) in text.grapheme_indices(true) {
+            if is_break(g) {
+                lines.push(Line { start, end: i });
+                start = i + g.len();
+            }
+        }
+        lines.push(Line {
+            start,
+            end: text.len(),
+        });
+        lines
+    }
+
     #[test]
     fn lines_break_where_the_board_counts_breaks() {
         let l = |start, end| Line { start, end };
@@ -530,8 +583,33 @@ mod tests {
         assert_eq!(lines("ab\ncd"), [l(0, 2), l(3, 5)]);
         assert_eq!(lines("a\r\nb\rc\n"), [l(0, 1), l(3, 4), l(5, 6), l(7, 7)]);
         assert_eq!(lines("a\u{2028}b"), [l(0, 1), l(4, 5)]);
-        assert_eq!(line_index(&lines("ab\ncd"), 2), 0);
-        assert_eq!(line_index(&lines("ab\ncd"), 3), 1);
+        assert_eq!(line_at("ab\ncd", 2), l(0, 2));
+        assert_eq!(line_at("ab\ncd", 3), l(3, 5));
+    }
+
+    #[test]
+    fn line_at_finds_the_line_that_splitting_the_text_finds() {
+        let texts = [
+            "",
+            "abc",
+            "ab\ncd\n",
+            "\n\n",
+            "a\r\nb\rc\n\r\n",
+            "\u{B}x\u{C}y\u{85}z\u{2028}\u{2029}é\u{301}",
+            "\r\n\u{301}q\n\u{1F468}\u{200D}\u{1F469}",
+        ];
+        for text in texts {
+            let all = lines(text);
+            for byte in 0..=text.len() + 1 {
+                let floor = text.floor_char_boundary(byte);
+                let expected = all
+                    .iter()
+                    .copied()
+                    .find(|l| floor <= l.end)
+                    .unwrap_or(all[all.len() - 1]);
+                assert_eq!(line_at(text, byte), expected, "{text:?} at {byte}");
+            }
+        }
     }
 
     #[test]

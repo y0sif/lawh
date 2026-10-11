@@ -109,7 +109,7 @@ impl Engine {
             Lookup::Prefix => return Vec::new(),
             Lookup::Nothing => {}
             Lookup::Found(Found::Motion(motion)) => {
-                let count = self.pending.count.unwrap_or(1);
+                let count = motion.count(self.pending.count);
                 self.motion(motion, count, measure);
                 self.select(measure);
             }

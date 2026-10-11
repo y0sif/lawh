@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+assertion_line: 444
+expression: "run(b, \"idd<Esc>L.\").snapshot()"
+---
+// mode=normal cursor=object(r1) keys=6 message="only text and math have text to edit"
+lawh version=1
+rect id=r1 x=3 y=0 w=1 h=1
+text id=t1 x=0 y=0 "dd"

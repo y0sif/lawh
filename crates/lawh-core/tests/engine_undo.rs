@@ -57,7 +57,7 @@ fn small_board() -> impl Strategy<Value = Board> {
 }
 
 /// Commands as typed: motions, counts, operators, puts, Visual mode, `:` commands, insert
-/// sessions and block-Normal edits, undo, redo and repeats.
+/// sessions and block-Normal edits, undo, redo and repeats, and Shift with `<CR>` and `<Esc>`.
 const VOCABULARY: &[&str] = &[
     "h",
     "j",
@@ -101,6 +101,10 @@ const VOCABULARY: &[&str] = &[
     "<C-r>",
     ".",
     "@:",
+    "gg",
+    "G",
+    "<S-CR>",
+    "<S-Esc>",
 ];
 
 fn script() -> impl Strategy<Value = String> {

@@ -1,6 +1,6 @@
-//! Object motions: reading order for `w` and `b`, the nearest object in a direction for
-//! `H J K L`. Pure functions over bounds, in the board's z-order (file order), so ties go to the
-//! object written first.
+//! Object motions: reading order for `w`, `b`, `gg` and `G`, the nearest object in a
+//! direction for `H J K L`. Pure functions over bounds, in the board's z-order (file order), so
+//! ties go to the object written first.
 
 use std::cmp::Ordering;
 
@@ -33,6 +33,10 @@ pub(super) enum ObjectMotion {
     Previous,
     /// `H J K L`: the nearest object in a direction.
     Nearest(Direction),
+    /// `gg`: the first object in reading order, or with a count the count-th.
+    First,
+    /// `G`: the last object in reading order, or with a count the count-th.
+    Last,
 }
 
 /// Where an object motion starts.
@@ -46,7 +50,8 @@ pub(super) enum Origin {
 
 /// The objects `motion` visits from `origin`, repeated `count` times, as indices into `bounds`
 /// (one per object, in file order), nearest first. Fewer when the motion runs out of objects;
-/// empty when it cannot move at all.
+/// empty when it cannot move at all. `gg` and `G` visit one object: the count-th in reading
+/// order, or the last when there are fewer.
 pub(super) fn path(
     bounds: &[Rect],
     origin: Origin,
@@ -56,6 +61,11 @@ pub(super) fn path(
     match motion {
         ObjectMotion::Next => walk(bounds, origin, count, true),
         ObjectMotion::Previous => walk(bounds, origin, count, false),
+        ObjectMotion::First | ObjectMotion::Last => {
+            let order = reading_order(bounds);
+            let nth = count.saturating_sub(1).min(order.len().saturating_sub(1));
+            order.get(nth).copied().into_iter().collect()
+        }
         ObjectMotion::Nearest(direction) => {
             let mut visited = Vec::new();
             let mut from = origin;

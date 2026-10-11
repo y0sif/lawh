@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_text.rs
+assertion_line: 462
+expression: r.header()
+---
+// mode=normal cursor=grid(5,0) keys=7 message="the board is full: it holds at most 500 objects"

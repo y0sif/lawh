@@ -1,0 +1,10 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+assertion_line: 80
+expression: "run(rows(), \"3ggdgg\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=6
+lawh version=1
+math id=m1 x=1 y=5 "x^2"
+rect id=r2 x=4 y=2.5 w=2 h=1
+line id=l1 x1=0 y1=3 x2=2 y2=3
