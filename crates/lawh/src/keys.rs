@@ -11,8 +11,8 @@
 //! - Ctrl without Alt and a character is `<C-x>` (a letter lowercased, `Ctrl+[` is `<Esc>`).
 //! - Cmd (the Super or Windows key elsewhere) and a character is `<D-x>`.
 //!
-//! The one key the app takes before the engine is Cmd+Q ([`is_close_request`]); every other
-//! chord goes to the engine. When app shortcuts come, they go through one modifier setting
+//! The one key the app takes before the engine is Cmd+Q on macOS ([`is_close_request`]); every
+//! other chord goes to the engine, Super+Q elsewhere included. When app shortcuts come, they go through one modifier setting
 //! (Ctrl, or Cmd on macOS) as `CLAUDE.md` says, and are taken before the engine sees the key.
 //!
 //! The caller drops key releases and synthetic presses (the keys winit reports as held when the
@@ -66,10 +66,11 @@ pub fn translate(logical: &WinitKey, mods: ModifiersState, text_mode: bool) -> T
     }
 }
 
-/// True for Cmd+Q alone (`<D-q>`; Super+Q off macOS): the app takes it as a close request,
-/// as the window's close button, which warns once about unwritten changes. macOS's default
-/// menu would quit on it without any warning; lawh has no such menu (see `main`), so the key
-/// arrives here. Cmd+Shift+Q (`<D-Q>`, log out on macOS) and other chords are not it.
+/// True for Cmd+Q alone (`<D-q>`): on macOS the app takes it as a close request, as the
+/// window's close button, which warns once about unwritten changes. macOS's default menu would
+/// quit on it without any warning; lawh has no such menu (see `main`), so the key arrives here.
+/// Cmd+Shift+Q (`<D-Q>`, log out on macOS) and other chords are not it. The caller asks only on
+/// macOS: elsewhere the key is Super+Q, which is the desktop's, not a quit key.
 pub fn is_close_request(keys: &[Key]) -> bool {
     let cmd_q = Key::new(
         KeyCode::Char('q'),

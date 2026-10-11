@@ -16,7 +16,8 @@ use common::{Run, board, run, run_engine, run_with_rc};
 use insta::assert_snapshot;
 use lawh_core::engine::{
     Effect, Engine, Escape, MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS,
-    MAX_PENDING_KEYS, MAX_RC_BYTES, MAX_RC_WARNINGS, MAX_REPEAT_KEYS, RcWarning,
+    MAX_PENDING_KEYS, MAX_PENDING_WRITES, MAX_RC_BYTES, MAX_RC_WARNINGS, MAX_REPEAT_KEYS,
+    RcWarning,
 };
 use lawh_core::{Board, Cursor, Key, Mode, ObjectId, Point, Shape};
 
@@ -336,14 +337,16 @@ fn one_key_sets_off_at_most_max_expanded_keys() {
 
 #[test]
 fn dot_from_a_mapping_counts_against_max_expanded_keys() {
-    // `Q` repeats a 2,002-key insert, undoes it and runs itself again. `.` used to replay its
-    // keys whatever the mapping had done, so 1,000 rounds of it never finished.
-    let long = "a".repeat(2000);
+    // `Q` repeats a 2,003-key insert, undoes it and runs itself again. `.` used to replay its
+    // keys whatever the mapping had done, so 1,000 rounds of it never finished. The insert
+    // moves more than it types, so the keys run out before the work does (`engine_cost.rs`
+    // has the same loop typing 2,000 characters, which runs out of work first).
+    let moves = "<Left><Right>".repeat(1000);
     let started = Instant::now();
-    let r = run_with_rc("nmap Q .uQ\n", Board::new(), &format!("i{long}<Esc>Q"));
+    let r = run_with_rc("nmap Q .uQ\n", Board::new(), &format!("ib{moves}<Esc>Q"));
     let elapsed = started.elapsed();
     assert_eq!(error(&r), too_many_keys());
-    assert_eq!(text(&r, "t1"), long);
+    assert_eq!(text(&r, "t1"), "b");
     assert!(elapsed < quick(), "{elapsed:?}");
     // A `.` still replays a change of nearly MAX_REPEAT_KEYS keys in full, with a count: its
     // keys, then the 9,997 the count types again (MAX_REPEAT_KEYS allows one more time).
@@ -612,6 +615,81 @@ fn set_shows_and_changes_options() {
         "bad value `20000` for `timeoutlen`: it takes milliseconds from 0 to 10000"
     );
     assert_eq!(r.engine.settings().timeoutlen, 1000);
+}
+
+// Writes from mappings.
+
+/// An engine for `a.lawh` with `rc` read, after `script`.
+fn named(rc: &str, script: &str) -> Run {
+    let mut engine = Engine::new(Board::new()).with_file_name(Some("a.lawh".to_owned()));
+    assert_eq!(engine.source(rc), []);
+    run_engine(engine, script)
+}
+
+#[test]
+fn a_write_before_insert_in_one_mapping_does_not_save_the_new_block() {
+    // `i` puts an empty block on the board before the app writes, so the file gets it: the
+    // write is not of the board as it was asked, so it neither saves nor quits.
+    let mut r = named("nnoremap Q :wq<CR>i\n", ":ci 1<CR>9lQ");
+    r.effects.clear();
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(r.effects, []);
+    assert!(r.engine.is_modified());
+    // The same with `:w`: dropping the empty block again is a change too, so the board stays
+    // modified, as the file has the stray block.
+    let mut r = named("nnoremap Q :w<CR>i\n", ":ci 1<CR>9lQ");
+    r.write_done("a.lawh", Ok(()));
+    r.feed("<Esc>");
+    assert_eq!(r.engine.board().len(), 1);
+    assert!(r.engine.is_modified());
+    // A write after the block is dropped saves.
+    r.feed(":w<CR>");
+    r.write_done("a.lawh", Ok(()));
+    assert!(!r.engine.is_modified());
+}
+
+#[test]
+fn every_write_of_a_mapping_is_matched_to_its_report() {
+    let mut r = named("nnoremap Q :w<CR>:w b.lawh<CR>\n", ":ci 1<CR>Q");
+    r.write_done("a.lawh", Ok(()));
+    r.write_done("b.lawh", Ok(()));
+    assert!(!r.engine.is_modified());
+    // Reported out of order, each still finds its own.
+    let mut r = named("nnoremap Q :w<CR>:w b.lawh<CR>\n", ":ci 1<CR>Q");
+    r.write_done("b.lawh", Ok(()));
+    r.write_done("a.lawh", Ok(()));
+    assert!(!r.engine.is_modified());
+    // `:wq` after a copy still quits once its own write is reported.
+    let mut r = named("nnoremap Q :w b.lawh<CR>:wq<CR>\n", ":ci 1<CR>Q");
+    r.effects.clear();
+    r.write_done("b.lawh", Ok(()));
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(r.effects, [Effect::Quit]);
+}
+
+#[test]
+fn at_most_max_pending_writes_wait_for_their_reports() {
+    // The board's own write, then MAX_PENDING_WRITES copies: the own write is forgotten, so
+    // its report does not mark the board saved (the safe side).
+    let copies = |from: usize| {
+        let mut keys = String::new();
+        for i in from..MAX_PENDING_WRITES {
+            write!(keys, ":w c{i}.lawh<CR>").unwrap();
+        }
+        keys
+    };
+    let mut r = named("", &format!(":ci 1<CR>:w<CR>{}", copies(0)));
+    r.write_done("a.lawh", Ok(()));
+    assert!(r.engine.is_modified());
+    for i in 0..MAX_PENDING_WRITES {
+        r.write_done(&format!("c{i}.lawh"), Ok(()));
+    }
+    let last = format!("\"c{}.lawh\" written", MAX_PENDING_WRITES - 1);
+    assert_eq!(message(&r), Some(last.as_str()));
+    // One fewer copy, and the own write is still waiting.
+    let mut r = named("", &format!(":ci 1<CR>:w<CR>{}", copies(1)));
+    r.write_done("a.lawh", Ok(()));
+    assert!(!r.engine.is_modified());
 }
 
 // Reading a lawhrc.

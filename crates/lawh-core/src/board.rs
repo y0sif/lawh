@@ -165,14 +165,50 @@ pub(crate) enum TextProblem {
     TooManyLines,
 }
 
-/// The number of characters in `s` when it is within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`].
-/// Stops counting at the first cap passed.
+/// The number of characters in `s` when it is within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`],
+/// or the first cap passed, going through `s` from its start.
+///
+/// The board checks a text block's whole text on every key typed into it, and `.` or a count
+/// can type thousands of keys at once. Counting one character at a time cost 20 ns a byte in a
+/// debug build, so typing 5,000 characters with `10000ia<Esc>` took 250 ms there. Texts are
+/// counted with the standard library's scans instead, which stay fast in a debug build; only
+/// one past both caps, or too long to be within them, is counted one character at a time to
+/// tell which cap it passes first.
 pub(crate) fn check_text(s: &str) -> Result<usize, TextProblem> {
+    // Past this many bytes a text has more characters than the cap: no need to count them all.
+    let longest = MAX_TEXT_CHARS.saturating_mul(4);
+    if s.len() <= longest {
+        let chars = s.chars().count();
+        // Both counts only grow along the text, so a cap that the whole text keeps is never
+        // passed on the way; only a text past both needs telling which comes first.
+        match (chars <= MAX_TEXT_CHARS, line_breaks(s) < MAX_TEXT_LINES) {
+            (true, true) => return Ok(chars),
+            (false, true) => return Err(TextProblem::TooLong),
+            (true, false) => return Err(TextProblem::TooManyLines),
+            (false, false) => {}
+        }
+    }
     let mut count = TextCount::new();
     for c in s.chars() {
         count.push(c)?;
     }
     Ok(count.chars())
+}
+
+/// The line breaks in `s` that [`TextCount`] counts: each break character, CRLF once.
+fn line_breaks(s: &str) -> usize {
+    let breaks: usize = [
+        '\n', '\r', '\u{B}', '\u{C}', '\u{85}', '\u{2028}', '\u{2029}',
+    ]
+    .into_iter()
+    .map(|c| s.matches(c).count())
+    .sum();
+    let crlf = if s.contains('\r') {
+        s.matches("\r\n").count()
+    } else {
+        0
+    };
+    breaks.saturating_sub(crlf)
 }
 
 /// Counts the characters and lines of a text one character at a time, against
@@ -371,6 +407,36 @@ pub enum BoardError {
     },
 }
 
+/// One change in a batch for [`Board::apply`].
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Change<'a> {
+    /// Put a copy of `object` at position `index`, as [`Board::insert_at`] does.
+    Insert { index: usize, object: &'a Object },
+    /// Take object `id` off the board, as [`Board::remove`] does. `at` is the position it should
+    /// be at: the object there is looked at first, so finding it costs nothing when the caller
+    /// knows the board.
+    Remove { id: &'a ObjectId, at: usize },
+    /// Give object `id` a copy of `shape`, as [`Board::replace`] does.
+    Replace { id: &'a ObjectId, shape: &'a Shape },
+}
+
+/// A batch of changes worked out against the board without changing it (see [`Board::apply`]).
+struct Plan<'a> {
+    /// The z-order after the changes. An entry below the board's length is the board object at
+    /// that position; one past it is the added object at `entry - len`.
+    order: Vec<usize>,
+    added: Vec<&'a Object>,
+    /// Board objects the changes take off, by position.
+    removed: Vec<bool>,
+    /// The last shape a change gave each entry.
+    shapes: HashMap<usize, &'a Shape>,
+    /// The board's characters of text after the changes.
+    text_chars: usize,
+    /// The first position a change put an object at or took one from: the objects before it
+    /// stay where they are.
+    first_moved: usize,
+}
+
 /// The whiteboard: objects in z-order, back to front.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Board {
@@ -405,6 +471,11 @@ impl Board {
 
     pub fn contains(&self, id: &ObjectId) -> bool {
         self.index.contains_key(id)
+    }
+
+    /// The position of object `id` in z-order (0 is the back).
+    pub fn position(&self, id: &ObjectId) -> Option<usize> {
+        self.index.get(id).copied()
     }
 
     /// Adds `object` on top of the others.
@@ -480,6 +551,174 @@ impl Board {
         Ok(old)
     }
 
+    /// Makes `changes` in order, each with the checks and errors of the method it is named after
+    /// ([`Board::insert_at`], [`Board::remove`] as [`BoardError::NoSuchObject`] when missing,
+    /// [`Board::replace`]), as one batch: all or nothing. When a change fails, the board stays as
+    /// it was and its error is returned.
+    ///
+    /// One change at a time, each insert or remove shifts the objects after it and points the
+    /// index at their new positions, so a batch of `k` changes on a board of `n` objects cost
+    /// `k x n` index updates: undoing a delete of 500 objects took 1.7 ms. Here the changes are
+    /// worked out on a list of positions first, and the objects and the index are built once:
+    /// about `n + k` work, plus moving `k` lists of `n` small numbers.
+    pub(crate) fn apply(&mut self, changes: &[Change<'_>]) -> Result<(), BoardError> {
+        let plan = self.plan(changes)?;
+        self.commit(&plan);
+        Ok(())
+    }
+
+    /// Works `changes` out against the board, without changing it: what the board becomes, or
+    /// the first change's error.
+    fn plan<'a>(&self, changes: &[Change<'a>]) -> Result<Plan<'a>, BoardError> {
+        let len = self.objects.len();
+        let mut plan = Plan {
+            order: (0..len).collect(),
+            added: Vec::new(),
+            removed: vec![false; len],
+            shapes: HashMap::new(),
+            text_chars: self.text_chars,
+            first_moved: len,
+        };
+        // The entries of the added objects still on the board, by id.
+        let mut added_ids: HashMap<&ObjectId, usize> = HashMap::new();
+        for change in changes {
+            let find = |id: &ObjectId, plan: &Plan<'_>| {
+                added_ids.get(id).copied().or_else(|| {
+                    self.index
+                        .get(id)
+                        .copied()
+                        .filter(|&i| !plan.removed.get(i).copied().unwrap_or(true))
+                })
+            };
+            match *change {
+                Change::Insert { index, object } => {
+                    let id = &object.id;
+                    let check: Result<usize, fn(ObjectId) -> BoardError> =
+                        if plan.order.len() >= MAX_OBJECTS {
+                            Err(BoardError::TooManyObjects)
+                        } else if find(id, &plan).is_some() {
+                            Err(BoardError::DuplicateId)
+                        } else {
+                            check_shape(&object.shape, 0, plan.text_chars)
+                        };
+                    let chars = check.map_err(|error| error(id.clone()))?;
+                    let count = plan.order.len();
+                    if index > count {
+                        return Err(BoardError::BadPosition {
+                            id: id.clone(),
+                            index,
+                            len: count,
+                        });
+                    }
+                    let entry = len + plan.added.len();
+                    plan.order.insert(index, entry);
+                    plan.first_moved = plan.first_moved.min(index);
+                    plan.added.push(object);
+                    added_ids.insert(id, entry);
+                    plan.text_chars = plan.text_chars.saturating_add(chars);
+                }
+                Change::Remove { id, at } => {
+                    let missing = || BoardError::NoSuchObject(id.clone());
+                    let entry = find(id, &plan).ok_or_else(missing)?;
+                    let position = if plan.order.get(at) == Some(&entry) {
+                        at
+                    } else {
+                        plan.order
+                            .iter()
+                            .position(|&e| e == entry)
+                            .ok_or_else(missing)?
+                    };
+                    plan.order.remove(position);
+                    plan.first_moved = plan.first_moved.min(position);
+                    let freed = self
+                        .planned_shape(&plan, entry)
+                        .map_or(0, Shape::content_chars);
+                    plan.text_chars = plan.text_chars.saturating_sub(freed);
+                    match plan.removed.get_mut(entry) {
+                        Some(gone) => *gone = true,
+                        None => {
+                            added_ids.remove(id);
+                        }
+                    }
+                }
+                Change::Replace { id, shape } => {
+                    let entry =
+                        find(id, &plan).ok_or_else(|| BoardError::NoSuchObject(id.clone()))?;
+                    let freed = self
+                        .planned_shape(&plan, entry)
+                        .map_or(0, Shape::content_chars);
+                    let chars = check_shape(shape, freed, plan.text_chars)
+                        .map_err(|error| error(id.clone()))?;
+                    plan.shapes.insert(entry, shape);
+                    plan.text_chars = plan.text_chars.saturating_sub(freed).saturating_add(chars);
+                }
+            }
+        }
+        Ok(plan)
+    }
+
+    /// The shape of `entry` (see [`Plan::order`]) as `plan` leaves it so far.
+    fn planned_shape<'a>(&'a self, plan: &Plan<'a>, entry: usize) -> Option<&'a Shape> {
+        if let Some(shape) = plan.shapes.get(&entry) {
+            return Some(shape);
+        }
+        match entry.checked_sub(self.objects.len()) {
+            None => self.objects.get(entry).map(|o| &o.shape),
+            Some(added) => plan.added.get(added).map(|o| &o.shape),
+        }
+    }
+
+    /// Makes the board what `plan` worked out: the objects in their new order, then the index.
+    /// The objects before the first one moved stay where they are, so a batch at the top of
+    /// the board (a put, a new object) costs only what it adds.
+    fn commit(&mut self, plan: &Plan<'_>) {
+        let len = self.objects.len();
+        let first = plan.first_moved.min(len);
+        // No change moved the objects before `first`: their entries are their positions.
+        for (&entry, shape) in &plan.shapes {
+            if entry < first
+                && let Some(object) = self.objects.get_mut(entry)
+            {
+                object.shape = (*shape).clone();
+            }
+        }
+        let mut moved: Vec<Option<Object>> = self
+            .objects
+            .split_off(first)
+            .into_iter()
+            .map(Some)
+            .collect();
+        for (slot, gone) in moved.iter().zip(plan.removed.iter().skip(first)) {
+            if let (Some(object), true) = (slot, gone) {
+                self.index.remove(&object.id);
+            }
+        }
+        for &entry in plan.order.iter().skip(first) {
+            let object = match entry.checked_sub(len) {
+                None => entry
+                    .checked_sub(first)
+                    .and_then(|i| moved.get_mut(i))
+                    .and_then(Option::take),
+                Some(added) => plan.added.get(added).map(|o| (*o).clone()),
+            };
+            // Every entry names one object, once.
+            let Some(mut object) = object else {
+                continue;
+            };
+            if let Some(shape) = plan.shapes.get(&entry) {
+                object.shape = (*shape).clone();
+            }
+            let at = self.objects.len();
+            if let Some(slot) = self.index.get_mut(&object.id) {
+                *slot = at;
+            } else {
+                self.index.insert(object.id.clone(), at);
+            }
+            self.objects.push(object);
+        }
+        self.text_chars = plan.text_chars;
+    }
+
     /// What [`Board::insert`] would refuse about `object`, if anything.
     fn check_new(&self, object: &Object) -> Result<(), fn(ObjectId) -> BoardError> {
         if self.is_full() {
@@ -498,27 +737,7 @@ impl Board {
         shape: &Shape,
         freed: usize,
     ) -> Result<usize, fn(ObjectId) -> BoardError> {
-        if !shape.is_finite() {
-            Err(BoardError::NonFinite)
-        } else if !shape.coordinates_in_range() {
-            Err(BoardError::CoordinateOutOfRange)
-        } else if !shape.sizes_in_range() {
-            Err(BoardError::InvalidSize)
-        } else {
-            match shape.content().map(check_text) {
-                Some(Err(TextProblem::TooLong)) => Err(BoardError::TextTooLong),
-                Some(Err(TextProblem::TooManyLines)) => Err(BoardError::TooManyLines),
-                Some(Ok(chars))
-                    if chars
-                        > MAX_BOARD_TEXT_CHARS
-                            .saturating_sub(self.text_chars.saturating_sub(freed)) =>
-                {
-                    Err(BoardError::TooMuchText)
-                }
-                Some(Ok(chars)) => Ok(chars),
-                None => Ok(0),
-            }
-        }
+        check_shape(shape, freed, self.text_chars)
     }
 
     /// Points the index at the positions of the objects from `start` on, after they moved.
@@ -559,12 +778,25 @@ impl Board {
     /// Characters that are not allowed in ids are dropped from `prefix`, and its end is cut so
     /// the id fits in [`MAX_ID_CHARS`].
     pub fn fresh_id(&self, prefix: &str) -> ObjectId {
+        self.fresh_id_from(prefix, &mut 1, |_| false)
+    }
+
+    /// [`Board::fresh_id`] counting from `*from`, and skipping the ids `taken` says are in use
+    /// too; `*from` moves past the id returned. Ids for objects not yet on the board (a put
+    /// adds them all at once) come from one pass this way, not one pass each.
+    pub(crate) fn fresh_id_from(
+        &self,
+        prefix: &str,
+        from: &mut usize,
+        taken: impl Fn(&ObjectId) -> bool,
+    ) -> ObjectId {
         let prefix: String = prefix
             .chars()
             .filter(|c| u8::try_from(*c).is_ok_and(is_id_byte))
             .collect();
-        let mut n: usize = 1;
         loop {
+            let n = *from;
+            *from = n.saturating_add(1);
             let n_text = n.to_string();
             // ASCII only, so any byte offset is a character boundary.
             let keep = prefix.len().min(MAX_ID_CHARS.saturating_sub(n_text.len()));
@@ -572,10 +804,38 @@ impl Board {
                 "{}{n_text}",
                 prefix.get(..keep).unwrap_or_default()
             ));
-            if !self.contains(&id) {
+            if !self.contains(&id) && !taken(&id) {
                 return id;
             }
-            n += 1;
+        }
+    }
+}
+
+/// The characters of text in `shape` when a board holding `text_chars` characters of text can
+/// hold it once `freed` of them have left (a replaced shape's), or what is wrong with it.
+fn check_shape(
+    shape: &Shape,
+    freed: usize,
+    text_chars: usize,
+) -> Result<usize, fn(ObjectId) -> BoardError> {
+    if !shape.is_finite() {
+        Err(BoardError::NonFinite)
+    } else if !shape.coordinates_in_range() {
+        Err(BoardError::CoordinateOutOfRange)
+    } else if !shape.sizes_in_range() {
+        Err(BoardError::InvalidSize)
+    } else {
+        match shape.content().map(check_text) {
+            Some(Err(TextProblem::TooLong)) => Err(BoardError::TextTooLong),
+            Some(Err(TextProblem::TooManyLines)) => Err(BoardError::TooManyLines),
+            Some(Ok(chars))
+                if chars
+                    > MAX_BOARD_TEXT_CHARS.saturating_sub(text_chars.saturating_sub(freed)) =>
+            {
+                Err(BoardError::TooMuchText)
+            }
+            Some(Ok(chars)) => Ok(chars),
+            None => Ok(0),
         }
     }
 }
@@ -1247,6 +1507,171 @@ mod tests {
                 assert_consistent(&board);
             }
         }
+    }
+
+    /// A batch for [`Board::apply`]: a change on the pool of ids, a position hint for removes.
+    fn change() -> impl proptest::strategy::Strategy<Value = (Edit, usize)> {
+        (edit(), 0..16_usize)
+    }
+
+    /// Makes `edit` with the one-object methods, as [`Board::apply`] must.
+    fn one_by_one(board: &mut Board, edit: &Edit) -> Result<(), BoardError> {
+        match *edit {
+            Edit::Insert(n, chars) => board.insert_at(board.len(), pool_object(n, chars)),
+            Edit::InsertAt(i, n, chars) => board.insert_at(i, pool_object(n, chars)),
+            Edit::Remove(n) => {
+                let target = id(&format!("o{n}"));
+                board
+                    .remove(&target)
+                    .map(|_| ())
+                    .ok_or(BoardError::NoSuchObject(target))
+            }
+            Edit::Replace(n, chars) => board
+                .replace(&id(&format!("o{n}")), pool_object(n, chars).shape)
+                .map(|_| ()),
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(cases(256)))]
+
+        /// A batch does what its changes do one by one, or, when one fails, nothing but return
+        /// that change's error.
+        #[test]
+        fn a_batch_is_its_changes_one_by_one_or_nothing(
+            start in proptest::collection::vec(edit(), 0..20),
+            batch in proptest::collection::vec(change(), 0..20),
+        ) {
+            let mut board = Board::new();
+            for edit in &start {
+                let _ = one_by_one(&mut board, edit);
+            }
+            let objects: Vec<Object> = batch
+                .iter()
+                .map(|(edit, _)| match *edit {
+                    Edit::Insert(n, c) | Edit::InsertAt(_, n, c) | Edit::Replace(n, c) => {
+                        pool_object(n, c)
+                    }
+                    Edit::Remove(n) => pool_object(n, 0),
+                })
+                .collect();
+            let changes: Vec<Change<'_>> = batch
+                .iter()
+                .zip(&objects)
+                .map(|((edit, hint), object)| match *edit {
+                    Edit::Insert(..) => Change::Insert { index: *hint, object },
+                    Edit::InsertAt(i, ..) => Change::Insert { index: i, object },
+                    Edit::Remove(_) => Change::Remove { id: &object.id, at: *hint },
+                    Edit::Replace(..) => Change::Replace { id: &object.id, shape: &object.shape },
+                })
+                .collect();
+            let before = board.clone();
+            let mut expected = board.clone();
+            let outcome = changes.iter().try_for_each(|change| match *change {
+                Change::Insert { index, object } => expected.insert_at(index, object.clone()),
+                Change::Remove { id, .. } => expected
+                    .remove(id)
+                    .map(|_| ())
+                    .ok_or_else(|| BoardError::NoSuchObject(id.clone())),
+                Change::Replace { id, shape } => expected.replace(id, shape.clone()).map(|_| ()),
+            });
+            if outcome.is_err() {
+                expected = before;
+            }
+            let result = board.apply(&changes);
+            proptest::prop_assert_eq!(result, outcome);
+            proptest::prop_assert_eq!(&board, &expected);
+            assert_consistent(&board);
+        }
+    }
+
+    /// [`check_text`] one character at a time, as it always counted.
+    fn check_text_slowly(s: &str) -> Result<usize, TextProblem> {
+        let mut count = TextCount::new();
+        for c in s.chars() {
+            count.push(c)?;
+        }
+        Ok(count.chars())
+    }
+
+    /// Runs of one character, with every line break and characters of every length.
+    fn runs() -> impl proptest::strategy::Strategy<Value = String> {
+        use proptest::prelude::*;
+        let c = prop::sample::select(vec![
+            'a', 'é', '€', '😀', '\n', '\r', '\u{B}', '\u{C}', '\u{85}', '\u{2028}', '\u{2029}',
+            '\u{C5}', '\u{20AC}',
+        ]);
+        prop::collection::vec((c, 0..1200_usize), 0..12).prop_map(|runs| {
+            runs.into_iter()
+                .map(|(c, n)| c.to_string().repeat(n))
+                .collect()
+        })
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(cases(256)))]
+
+        /// The fast count agrees with one character at a time, near both caps and past them.
+        #[test]
+        fn check_text_counts_as_one_character_at_a_time_does(s in runs()) {
+            proptest::prop_assert_eq!(check_text(&s), check_text_slowly(&s));
+        }
+    }
+
+    #[test]
+    fn check_text_tells_which_cap_comes_first() {
+        let breaks = "\n".repeat(MAX_TEXT_LINES);
+        let chars = "a".repeat(MAX_TEXT_CHARS + 1);
+        assert_eq!(
+            check_text(&(breaks.clone() + &chars)),
+            Err(TextProblem::TooManyLines)
+        );
+        assert_eq!(check_text(&(chars + &breaks)), Err(TextProblem::TooLong));
+        // CRLF is one break.
+        let crlf = "\r\n".repeat(MAX_TEXT_LINES - 1);
+        assert_eq!(check_text(&crlf), Ok(2 * (MAX_TEXT_LINES - 1)));
+        assert_eq!(check_text(&(crlf + "\r")), Err(TextProblem::TooManyLines));
+        // Four-byte characters up to the cap.
+        assert_eq!(check_text(&"😀".repeat(MAX_TEXT_CHARS)), Ok(MAX_TEXT_CHARS));
+        assert_eq!(
+            check_text(&"😀".repeat(MAX_TEXT_CHARS + 1)),
+            Err(TextProblem::TooLong)
+        );
+    }
+
+    #[test]
+    fn a_batch_of_a_whole_board_is_linear() {
+        // Taking 500 objects off and putting them back where they were, the way undo does a
+        // delete: the old one-by-one way updated the index 125,000 times each way.
+        let mut board = Board::new();
+        for i in 0..MAX_OBJECTS {
+            board.insert(circle(&format!("c{i}"), 1.0)).unwrap();
+        }
+        let start = board.clone();
+        let objects = start.objects();
+        let removes: Vec<Change<'_>> = objects
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(at, o)| Change::Remove { id: &o.id, at })
+            .collect();
+        let inserts: Vec<Change<'_>> = objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| Change::Insert { index, object })
+            .collect();
+        let started = std::time::Instant::now();
+        for _ in 0..20 {
+            board.apply(&removes).unwrap();
+            assert!(board.is_empty());
+            board.apply(&inserts).unwrap();
+            assert_eq!(board, start);
+        }
+        assert_consistent(&board);
+        // 40 ms in a debug build (1 ms a batch of 500); the old way took 1.7 ms a batch in
+        // release.
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
     }
 
     #[test]

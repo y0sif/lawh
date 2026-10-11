@@ -15,7 +15,8 @@
 //!
 //! Each mode's mappings are kept sorted by their keys, so a lookup narrows them one typed key at a
 //! time: its cost grows with the keys looked at, not with the number of mappings. One typed key
-//! sets off at most [`MAX_EXPANDED_KEYS`] keys, through mappings and `.` together.
+//! sets off at most [`MAX_EXPANDED_KEYS`] keys, through mappings and `.` together, and does at
+//! most [`MAX_KEY_WORK`](super::MAX_KEY_WORK) work.
 //!
 //! Keys from `:noremap` and its kind are not mapped again. Keys from `:map` are, except the
 //! first one when what a mapping maps to starts with its own keys (Vim's rule, so `:nmap l lw`
@@ -37,6 +38,17 @@ use crate::key::{Key, KeyCode, format_keys};
 /// their keys, so the number of mappings costs little per key (at most about 20 comparisons a
 /// key looked at, for 1,000). The cap bounds what mappings hold: 1,000 mappings of two
 /// [`MAX_MAP_KEYS`] keys (12 bytes a key) are about 6 MB a mode.
+///
+/// Making or dropping a mapping shifts the mappings sorted after it, up to 1,000 of 56 bytes.
+/// The worst lawhrc this allows, [`MAX_RC_BYTES`](super::MAX_RC_BYTES) of `map ! x` and
+/// `unmap !` after 999 mappings (`!` sorts first, in three modes), loads in 676 ms in release
+/// and 1.7 s in debug (`a_lawhrc_of_mappings_made_and_dropped_at_the_front_loads_in_time` in
+/// `tests/engine_cost.rs`, Linux `x86_64`, 2026-10-12). That stays as it is: a lawhrc is the
+/// user's own file, read once at start, and real ones hold tens of lines.
+/// A map ordered by keys (a `BTreeMap`) would make and drop mappings cheaply, but without
+/// cursors over it a lookup would search again for every key typed so far, instead of
+/// narrowing one sorted run a key at a time: slower on every key typed, to speed up a file
+/// nobody writes.
 pub const MAX_MAPS: usize = 1000;
 
 /// Most keys on each side of a mapping: the keys mapped, and what they map to (256).
@@ -60,12 +72,14 @@ pub const MAX_MAP_DEPTH: usize = 1000;
 /// keys that mappings put in the typeahead, keys that `.` replays, and keys that a count on an
 /// insert types again. Past it the typeahead is dropped and a message says so.
 ///
-/// Each of those keys is looked up in the mappings and run, so this bounds the work behind one
-/// key press. Without it, [`MAX_MAP_DEPTH`] expansions of [`MAX_MAP_KEYS`] keys (256,000 keys)
-/// could each be looked up in [`MAX_MAPS`] long mappings: one key took 82 s in release. A mapping
-/// that runs `.` on a long insert, then itself, never finished. Three times [`MAX_REPEAT_KEYS`]
-/// leaves room for a mapping to run `.` once on the longest change with a count: its keys, the
-/// keys typed again for the count, and the mapping's own.
+/// Each of those keys is looked up in the mappings and run, so this bounds the keys behind one
+/// key press, and what looking them up costs; what the commands they run cost is bounded by
+/// [`MAX_KEY_WORK`](super::MAX_KEY_WORK). Without it, [`MAX_MAP_DEPTH`] expansions of
+/// [`MAX_MAP_KEYS`] keys (256,000 keys) could each be looked up in [`MAX_MAPS`] long mappings:
+/// one key took 82 s in release. A mapping that runs `.` on a long insert, then itself, never
+/// finished. Three times [`MAX_REPEAT_KEYS`] leaves room for a mapping to run `.` once on the
+/// longest change with a count: its keys, the keys typed again for the count, and the mapping's
+/// own. 30,000 keys that do no work (`l` on the grid) take 36 ms in debug, 3.5 ms in release.
 pub const MAX_EXPANDED_KEYS: usize = 3 * MAX_REPEAT_KEYS;
 
 /// Most keys the typeahead holds (10,000); past it, it is dropped with a message.
@@ -425,6 +439,7 @@ impl Engine {
     pub(super) fn type_key(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         self.keymap.depth = 0;
         self.keymap.spent = 0;
+        self.reset_work();
         self.keymap.typeahead.push_back(Queued { key, remap: true });
         self.run_typeahead(false, measure)
     }
@@ -441,6 +456,7 @@ impl Engine {
         }
         self.keymap.depth = 0;
         self.keymap.spent = 0;
+        self.reset_work();
         self.run_typeahead(true, measure)
     }
 
@@ -458,6 +474,11 @@ impl Engine {
                 Lookup::Literal => {
                     self.keymap.typeahead.pop_front();
                     effects.extend(self.dispatch(first.key, measure));
+                    if self.out_of_work() {
+                        // `charge` dropped the typeahead then; keys may have joined it since.
+                        self.keymap.flush();
+                        break;
+                    }
                 }
                 Lookup::Wait => {
                     effects.push(Effect::ArmTimer {

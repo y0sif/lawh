@@ -146,6 +146,13 @@ impl Repeat {
         self.recording.clear();
     }
 
+    /// Makes `change` the last change again, dropping what was recorded since: for a `.` that
+    /// was cut short (see [`MAX_KEY_WORK`](crate::engine::MAX_KEY_WORK)).
+    pub(crate) fn restore(&mut self, change: Change) {
+        self.last = Some(change);
+        self.recording.clear();
+    }
+
     pub(crate) fn last(&self) -> Option<&Change> {
         self.last.as_ref()
     }

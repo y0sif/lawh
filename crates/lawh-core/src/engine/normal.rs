@@ -1,12 +1,15 @@
 //! Normal mode keys: counts, operators, the key tables, and the motions Normal and Visual mode
 //! share.
 
+use kurbo::Rect;
+
 use super::keymap::too_many_keys;
 use super::motion::{Direction, ObjectMotion, Origin, path};
 use super::ops::Target;
 use super::place::Side;
 use super::repeat::Context;
 use super::text::Entry;
+use super::work::{LOOK_WORK, ORDER_WORK};
 use super::{Cursor, Effect, Engine, MAX_COUNT, Measure, Mode};
 use crate::key::{Key, KeyCode, format_keys};
 
@@ -373,7 +376,8 @@ impl Engine {
     }
 
     /// Moves the cursor by `motion`, `count` times. An object motion that finds no object
-    /// leaves the cursor where it is.
+    /// leaves the cursor where it is; one cut short when the key runs out of work stops on the
+    /// last object it reached.
     pub(super) fn motion(&mut self, motion: Motion, count: u32, measure: &mut dyn Measure) {
         match motion {
             Motion::Grid { dx, dy } => {
@@ -381,14 +385,55 @@ impl Engine {
                 self.move_by(f64::from(dx) * steps, f64::from(dy) * steps);
             }
             Motion::Object(motion) => {
-                let bounds = self.layout(measure);
-                let count = usize::try_from(count).unwrap_or(usize::MAX);
-                let last = path(&bounds, self.origin(), motion, count).pop();
+                let last = self
+                    .object_path(motion, count, measure)
+                    .and_then(|(_, mut visited)| visited.pop());
                 if let Some(object) = last.and_then(|i| self.board.objects().get(i)) {
                     self.cursor = Cursor::Object(object.id.clone());
                 }
             }
         }
+    }
+
+    /// The bounds of every object, and the objects `motion` visits from the cursor `count`
+    /// times (see [`path`]), counting the work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)):
+    /// measuring the board, then putting every object in reading order, or looking at every
+    /// object for each step of `H J K L`. `None` when the key runs out of work before the
+    /// motion starts. A motion that would take more steps than the work left stops after those
+    /// it can take, and the key runs out of work.
+    pub(super) fn object_path(
+        &mut self,
+        motion: ObjectMotion,
+        count: u32,
+        measure: &mut dyn Measure,
+    ) -> Option<(Vec<Rect>, Vec<usize>)> {
+        if !self.charge(self.layout_work()) {
+            return None;
+        }
+        let bounds = self.layout(measure);
+        let objects = bounds.len().max(1);
+        let count = usize::try_from(count).unwrap_or(usize::MAX);
+        let origin = self.origin();
+        let visited = if let ObjectMotion::Nearest(_) = motion {
+            // Each step looks at every object.
+            let step = LOOK_WORK.saturating_mul(objects);
+            let steps = count.min(self.work_left() / step);
+            let visited = path(&bounds, origin, motion, steps);
+            // A path that ends early tried one more step and found nothing.
+            let looked = visited.len().saturating_add(1).min(steps);
+            self.charge(looked.saturating_mul(step));
+            if visited.len() == steps && steps < count {
+                // Cut short: the work left cannot pay for another step.
+                self.charge(step);
+            }
+            visited
+        } else {
+            if !self.charge(ORDER_WORK.saturating_mul(objects)) {
+                return None;
+            }
+            path(&bounds, origin, motion, count)
+        };
+        Some((bounds, visited))
     }
 
     /// Where object motions start: the current object, or the cursor's grid point.
@@ -408,6 +453,7 @@ impl Engine {
     /// For the app when it opens a board: the cursor starts at the grid's origin, which may be
     /// far from the board's objects.
     pub fn go_first(&mut self, measure: &mut dyn Measure) {
+        self.reset_work();
         if self.mode == Mode::Normal && self.pending.is_empty() {
             self.motion(Motion::Object(ObjectMotion::First), 1, measure);
         }
@@ -440,6 +486,7 @@ impl Engine {
         if !here {
             return Vec::new();
         }
+        let change = change.clone();
         let (keys, entry) = change.replay(count);
         if !self.keymap.spend(keys.len()) {
             self.keymap.flush();
@@ -449,10 +496,18 @@ impl Engine {
         self.repeat.replaying = true;
         let mut effects = Vec::new();
         for (i, key) in keys.into_iter().enumerate() {
-            if Some(i) == entry && self.mode != Mode::Insert {
+            if (Some(i) == entry && self.mode != Mode::Insert) || self.out_of_work() {
                 break;
             }
             effects.extend(self.dispatch(key, measure));
+        }
+        if self.out_of_work() {
+            // Cut short: an Insert session it was typing ends as `<Esc>` would end it (one undo
+            // step for what it typed), and `.` keeps the whole change, not the part replayed.
+            if self.mode == Mode::Insert {
+                self.end_session(true, measure);
+            }
+            self.repeat.restore(change);
         }
         self.repeat.replaying = false;
         effects

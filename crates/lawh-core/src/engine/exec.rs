@@ -9,12 +9,22 @@ use super::cmdline::Outcome;
 use super::command::{Command, CommandError, Segment, parse_command};
 use super::register::id_prefix;
 use super::undo::Edit;
+use super::work::PARSE_WORK;
 use super::{Cursor, Effect, Engine, MAX_COMMAND_LINE_CHARS, Mode};
 use crate::board::{
     BoardError, MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
     MAX_TEXT_LINES, Object, Shape,
 };
 use crate::key::Key;
+
+/// Most writes that may wait for the app to report them with [`Engine::write_done`] (16).
+///
+/// The app writes and reports right after the key that asked, so only the writes of one key
+/// wait together: a mapping such as `:w<CR>:w copy.lawh<CR>` asks for two. Each is matched to
+/// its report by path, oldest first, so every one can mark the board saved. Past the cap the
+/// oldest is forgotten: its report then reads as a write the engine did not ask for, which
+/// neither marks the board saved nor quits, the safe side.
+pub const MAX_PENDING_WRITES: usize = 16;
 
 /// A write the engine asked the app for, until the app reports back.
 #[derive(Debug, Clone)]
@@ -41,8 +51,15 @@ impl Engine {
     /// `dir/../a.lawh` are `a.lawh`). A write to another file (a copy, `:w other` on a named
     /// board) leaves the board as it was, as in Vim, so `:wq other` on a modified board writes
     /// the copy and does not quit, unless forced with `:wq!`.
+    ///
+    /// Several writes may wait at once (`:w<CR>:w copy.lawh<CR>` in a mapping): each report is
+    /// matched to the oldest write asked for with the same path.
     pub fn write_done(&mut self, path: &str, result: Result<(), String>) -> Vec<Effect> {
-        let asked = self.pending_write.take_if(|w| w.path == path);
+        let asked = self
+            .pending_writes
+            .iter()
+            .position(|w| w.path == path)
+            .and_then(|i| self.pending_writes.remove(i));
         let current = asked.as_ref().is_some_and(|w| w.version == self.version);
         if let Err(error) = result {
             self.error(format!("cannot write \"{path}\": {error}"));
@@ -100,8 +117,13 @@ impl Engine {
         self.sync_block(None);
     }
 
-    /// Reads and runs a `:` line, keeping it for `@:` (unless it is empty).
+    /// Reads and runs a `:` line, keeping it for `@:` (unless it is empty). Reading it counts as
+    /// work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)): `@:` runs a line of thousands of
+    /// characters for two keys. Once the key has run out, the line does not run.
     pub(super) fn execute_line(&mut self, line: &str) -> Vec<Effect> {
+        if !self.charge(PARSE_WORK.saturating_mul(line.len())) {
+            return Vec::new();
+        }
         let command = parse_command(line);
         if command != Err(CommandError::Empty) {
             self.last_command_line = Some(line.to_owned());
@@ -200,7 +222,10 @@ impl Engine {
             }
         };
         let quit_after = quit.is_some();
-        self.pending_write = Some(PendingWrite {
+        if self.pending_writes.len() >= MAX_PENDING_WRITES {
+            self.pending_writes.pop_front();
+        }
+        self.pending_writes.push_back(PendingWrite {
             path: path.clone(),
             quit_after,
             force: quit == Some(true),
@@ -210,10 +235,14 @@ impl Engine {
     }
 
     /// Puts a new object on top of the board, with a fresh id for its kind (`c1`, `t2`), as one
-    /// undo step, and makes it the current object. A refusal becomes the message.
+    /// undo step, and makes it the current object. A refusal becomes the message. Finding the
+    /// id counts as work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)).
     fn add_shape(&mut self, shape: Shape) {
         if !shape.coordinates_in_range() {
             return self.error(coordinates_message());
+        }
+        if !self.charge(self.id_work()) {
+            return;
         }
         let id = self.board.fresh_id(id_prefix(&shape));
         let edit = Edit::Insert {

@@ -21,6 +21,10 @@
 //! per mode as in Vim, with `<Leader>` and a timeout for keys that start a longer mapping
 //! ([`Effect::ArmTimer`], [`Engine::timeout`]). `:set` changes the [`Settings`], and
 //! [`Engine::source`] reads both from a lawhrc.
+//!
+//! One typed key may set off many commands, through mappings, `.` and counts. It does at most
+//! [`MAX_KEY_WORK`] work (see `work.rs`): past it, the command under way stops where it is and
+//! the rest of the key's keys are dropped, with a message.
 
 mod block;
 mod cmdline;
@@ -42,12 +46,16 @@ mod text;
 mod text_motion;
 mod undo;
 mod visual;
+mod work;
+
+use std::collections::VecDeque;
 
 use kurbo::{Point, Rect};
 
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, parse_command};
 pub use cursor::{Cursor, anchor, round3};
+pub use exec::MAX_PENDING_WRITES;
 pub use keymap::{
     MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MapKey, MapMode,
 };
@@ -59,6 +67,7 @@ pub use repeat::MAX_REPEAT_KEYS;
 pub use settings::{Escape, MAX_TIMEOUTLEN, OptionName, OptionValue, SetArg, Settings};
 pub use text::TextCursor;
 pub use undo::{MAX_UNDO_BYTES, MAX_UNDO_STEPS};
+pub use work::MAX_KEY_WORK;
 
 use self::cmdline::CommandLine;
 use self::exec::PendingWrite;
@@ -68,6 +77,7 @@ use self::register::Register;
 use self::repeat::Repeat;
 use self::text::{Block, Session};
 use self::undo::{Edit, History, Step};
+use self::work::{EDIT_WORK, Work};
 use crate::board::{Board, Object, ObjectId};
 use crate::key::{Key, KeyCode};
 
@@ -140,10 +150,12 @@ pub struct Engine {
     /// In Visual mode, the objects inside the rectangle, in z-order.
     selection: Vec<ObjectId>,
     /// Counts every change to the board, undo and redo included, so a write can tell whether
-    /// the board is still the one it wrote.
+    /// the board is still the one it wrote. Every change to the board bumps it (see
+    /// [`Engine::changed`]).
     version: u64,
-    /// The write asked for with [`Effect::Write`], until [`Engine::write_done`].
-    pending_write: Option<PendingWrite>,
+    /// The writes asked for with [`Effect::Write`] and not yet reported with
+    /// [`Engine::write_done`], oldest first, at most [`MAX_PENDING_WRITES`].
+    pending_writes: VecDeque<PendingWrite>,
     /// The text block being edited: in Insert and block-Normal mode, and on a command line
     /// opened from block-Normal mode.
     block: Option<Block>,
@@ -152,6 +164,8 @@ pub struct Engine {
     settings: Settings,
     /// Key mappings and the typeahead.
     keymap: Keymap,
+    /// The work done for the key being run (see [`MAX_KEY_WORK`]).
+    work: Work,
 }
 
 impl Engine {
@@ -173,11 +187,12 @@ impl Engine {
             visual: None,
             selection: Vec::new(),
             version: 0,
-            pending_write: None,
+            pending_writes: VecDeque::new(),
             block: None,
             session: None,
             settings: Settings::default(),
             keymap: Keymap::default(),
+            work: Work::default(),
         }
     }
 
@@ -233,6 +248,7 @@ impl Engine {
     /// keys (those waiting for a mapping too), and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units).
     /// A point that is not finite leaves the cursor where it is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
+        self.reset_work();
         if self.session.is_some() {
             self.end_session(false, measure);
         }
@@ -310,7 +326,7 @@ impl Engine {
 
     /// The position of object `id` in z-order.
     fn index_of(&self, id: &ObjectId) -> Option<usize> {
-        self.board.objects().iter().position(|o| &o.id == id)
+        self.board.position(id)
     }
 
     /// The bounds of every object, in z-order.
@@ -349,19 +365,33 @@ impl Engine {
             byte_before,
             byte_after,
         });
+        self.changed();
+    }
+
+    /// The board has changed: a write asked for before now no longer has it as it is.
+    fn changed(&mut self) {
         self.version = self.version.wrapping_add(1);
     }
 
     /// Takes back up to `count` steps, putting the cursor where it was before the last one. In
-    /// block-Normal mode it stays in the block while the cursor is on it.
+    /// block-Normal mode it stays in the block while the cursor is on it. It stops at the
+    /// oldest step, and when the key runs out of work (see [`MAX_KEY_WORK`]): each step counts
+    /// its edits twice (making them, then indexing the objects they put) and the objects on the
+    /// board.
     fn undo(&mut self, count: u32) {
         let mut byte = None;
         for done in 0..count {
+            let size = self.history.undo_size();
+            let edits = size.saturating_mul(2).saturating_add(self.board.len());
+            let work = EDIT_WORK.saturating_mul(edits);
+            if !self.charge(work) {
+                break;
+            }
             match self.history.undo(&mut self.board) {
                 Some(Ok((cursor, at))) => {
                     self.cursor = cursor;
                     byte = at;
-                    self.version = self.version.wrapping_add(1);
+                    self.changed();
                 }
                 Some(Err(error)) => {
                     self.error(format!("cannot undo: {error}"));
@@ -378,15 +408,22 @@ impl Engine {
     }
 
     /// Makes again up to `count` undone steps, putting the cursor where it was after the last.
-    /// In block-Normal mode it stays in the block while the cursor is on it.
+    /// In block-Normal mode it stays in the block while the cursor is on it. It stops at the
+    /// newest step, and when the key runs out of work, as [`Engine::undo`] does.
     fn redo(&mut self, count: u32) {
         let mut byte = None;
         for done in 0..count {
+            let size = self.history.redo_size();
+            let edits = size.saturating_mul(2).saturating_add(self.board.len());
+            let work = EDIT_WORK.saturating_mul(edits);
+            if !self.charge(work) {
+                break;
+            }
             match self.history.redo(&mut self.board) {
                 Some(Ok((cursor, at))) => {
                     self.cursor = cursor;
                     byte = at;
-                    self.version = self.version.wrapping_add(1);
+                    self.changed();
                 }
                 Some(Err(error)) => {
                     self.error(format!("cannot redo: {error}"));

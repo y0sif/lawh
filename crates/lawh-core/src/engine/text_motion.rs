@@ -9,7 +9,11 @@
 //!
 //! Every key in Insert and block-Normal mode runs some of these, so they look only around the
 //! cursor: the graphemes next to it, its line, and the lines a motion crosses. None splits the
-//! whole text into lines or graphemes.
+//! whole text into lines or graphemes, and none goes through the text more than once whatever
+//! its count. A step back is the costly direction: whether a run of regional indicators (flag
+//! halves) breaks before one depends on how many come before it, so finding the grapheme before
+//! a byte can read the whole run. Motions that step back more than once (`h` with a count, `b`,
+//! `e`) split the line into graphemes once and step back through that instead.
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};
 
@@ -51,7 +55,8 @@ impl Line {
     }
 }
 
-/// The grapheme breaks a line.
+/// The grapheme breaks a line: the oracle's test for the lines that [`line_at`] finds.
+#[cfg(test)]
 fn is_break(grapheme: &str) -> bool {
     matches!(
         grapheme,
@@ -69,26 +74,63 @@ fn is_break_char(c: char) -> bool {
 }
 
 /// The line `byte` is on; a line's end (its break) counts as on it. It looks from `byte` back
-/// and forward to the nearest line breaks only.
+/// and forward to the nearest line breaks only, a byte at a time: going a character at a time
+/// cost ten times as much in a debug build.
 pub(super) fn line_at(text: &str, byte: usize) -> Line {
     let mut byte = text.floor_char_boundary(byte);
     // Between the CR and the LF of one break: on the line after it.
     if byte > 0 && text.get(byte - 1..=byte) == Some("\r\n") {
         byte += 1;
     }
-    let start = text
-        .get(..byte)
-        .unwrap_or_default()
-        .char_indices()
-        .rev()
-        .find(|&(_, c)| is_break_char(c))
-        .map_or(0, |(i, c)| i + c.len_utf8());
-    let end = text
-        .get(byte..)
-        .unwrap_or_default()
-        .find(is_break_char)
-        .map_or(text.len(), |i| byte + i);
+    let bytes = text.as_bytes();
+    // The last break before `byte`, found by the byte it ends with.
+    let mut start = byte.min(bytes.len());
+    while start > 0 {
+        let ends_break = match bytes.get(start - 1) {
+            Some(b'\n' | b'\r' | 0x0B | 0x0C) => true,
+            // U+0085 is C2 85; U+2028 and U+2029 are E2 80 A8 and E2 80 A9.
+            Some(0x85) => start >= 2 && bytes.get(start - 2) == Some(&0xC2),
+            Some(0xA8 | 0xA9) => {
+                start >= 3 && bytes.get(start - 3..start - 1) == Some(&[0xE2, 0x80])
+            }
+            _ => false,
+        };
+        if ends_break {
+            break;
+        }
+        start -= 1;
+    }
+    // The first break from `byte` on, found by the byte it starts with.
+    let mut end = byte.min(bytes.len());
+    while end < bytes.len() {
+        let starts_break = match bytes.get(end) {
+            Some(b'\n' | b'\r' | 0x0B | 0x0C) => true,
+            Some(0xC2) => bytes.get(end + 1) == Some(&0x85),
+            Some(0xE2) => {
+                bytes.get(end + 1) == Some(&0x80) && matches!(bytes.get(end + 2), Some(0xA8 | 0xA9))
+            }
+            _ => false,
+        };
+        if starts_break {
+            break;
+        }
+        end += 1;
+    }
     Line { start, end }
+}
+
+/// Bytes of regional indicators (the halves of flags) right before `byte`: how far finding the
+/// grapheme before `byte`, or whether `byte` is a grapheme boundary, may have to look back,
+/// since that depends on how many come before it.
+pub(super) fn indicators_before(text: &str, byte: usize) -> usize {
+    text.get(..byte).map_or(0, |before| {
+        let rest = before.trim_end_matches(is_regional_indicator);
+        before.len() - rest.len()
+    })
+}
+
+fn is_regional_indicator(c: char) -> bool {
+    matches!(c, '\u{1F1E6}'..='\u{1F1FF}')
 }
 
 /// The line after `line`, or `None` on the last line.
@@ -101,20 +143,23 @@ fn prev_line(text: &str, line: Line) -> Option<Line> {
     (line.start > 0).then(|| line_at(text, prev_grapheme(text, line.start)))
 }
 
-/// `byte` starts a line: the text's start, or just after a line break.
+/// `byte` starts a line: the text's start, or just after a line break. Every break is a
+/// grapheme of its own, so the character before `byte` tells.
 fn at_line_start(text: &str, byte: usize) -> bool {
     byte == 0
         || text
-            .get(prev_grapheme(text, byte)..byte)
-            .is_some_and(is_break)
+            .get(..byte)
+            .and_then(|before| before.chars().next_back())
+            .is_some_and(is_break_char)
 }
 
-/// `byte` ends a line: the text's end, or a line break.
+/// `byte` ends a line: the text's end, or a line break. The character at `byte` tells.
 fn at_line_end(text: &str, byte: usize) -> bool {
     byte >= text.len()
         || text
-            .get(byte..next_grapheme(text, byte))
-            .is_some_and(is_break)
+            .get(byte..)
+            .and_then(|rest| rest.chars().next())
+            .is_some_and(is_break_char)
 }
 
 /// Where the grapheme at `byte` ends; `byte` at the end of the text.
@@ -230,16 +275,25 @@ pub(super) fn after_insert(text: &str, byte: usize) -> usize {
     on_grapheme(text, back)
 }
 
-/// `count` graphemes left of `byte`, within its line.
+/// `count` graphemes left of `byte`, within its line. More than one step goes through the
+/// line before `byte` once (see the module's notes on regional indicators).
 pub(super) fn left(text: &str, byte: usize, count: u32) -> usize {
-    let mut at = byte;
-    for _ in 0..count {
-        if at_line_start(text, at) {
-            break;
-        }
-        at = prev_grapheme(text, at);
+    if count == 0 || at_line_start(text, byte) {
+        return byte;
     }
-    at
+    if count == 1 {
+        return prev_grapheme(text, byte);
+    }
+    let line = Line {
+        start: line_at(text, byte).start,
+        end: byte,
+    };
+    let before = starts(text, line);
+    let back = usize::try_from(count).unwrap_or(usize::MAX);
+    before
+        .get(before.len().saturating_sub(back))
+        .copied()
+        .unwrap_or(line.start)
 }
 
 /// `count` graphemes right of `byte`, within its line: up to its end when `past_end`, else up
@@ -358,6 +412,10 @@ struct Walk<'a> {
     /// The line the walk is on.
     line: Line,
     byte: usize,
+    /// Where the graphemes of `line` start, once a step back has needed them: stepping back
+    /// through them costs nothing, where finding each grapheme before a byte afresh could read
+    /// the whole line every time.
+    starts: Option<Vec<usize>>,
 }
 
 impl<'a> Walk<'a> {
@@ -367,7 +425,14 @@ impl<'a> Walk<'a> {
             text,
             line: line_at(text, byte),
             byte,
+            starts: None,
         }
+    }
+
+    fn enter(&mut self, line: Line, byte: usize) {
+        self.line = line;
+        self.byte = byte;
+        self.starts = None;
     }
 
     fn current(&self) -> Line {
@@ -397,8 +462,7 @@ impl<'a> Walk<'a> {
         }
         match next_line(self.text, line) {
             Some(next) => {
-                self.line = next;
-                self.byte = next.start;
+                self.enter(next, next.start);
                 Step::Crossed
             }
             None => Step::Stuck,
@@ -410,19 +474,20 @@ impl<'a> Walk<'a> {
     fn dec(&mut self) -> Step {
         let line = self.current();
         if self.byte > line.start {
-            let prev = prev_grapheme(self.text, self.byte);
-            self.byte = if prev < self.byte {
-                prev.max(line.start)
-            } else {
-                line.start
-            };
+            let text = self.text;
+            let starts = self.starts.get_or_insert_with(|| starts(text, line));
+            let before = starts.partition_point(|&s| s < self.byte);
+            self.byte = before
+                .checked_sub(1)
+                .and_then(|i| starts.get(i))
+                .copied()
+                .unwrap_or(line.start);
             return Step::Within;
         }
         let Some(prev) = prev_line(self.text, line) else {
             return Step::Stuck;
         };
-        self.line = prev;
-        self.byte = prev.end;
+        self.enter(prev, prev.end);
         Step::Crossed
     }
 
@@ -597,6 +662,8 @@ mod tests {
             "a\r\nb\rc\n\r\n",
             "\u{B}x\u{C}y\u{85}z\u{2028}\u{2029}é\u{301}",
             "\r\n\u{301}q\n\u{1F468}\u{200D}\u{1F469}",
+            // Characters whose last byte is that of a break (85, A8, A9), but not a break.
+            "\u{C5}\u{A8}\u{20A8}\u{145}\u{2028}\u{A9}x\u{2029}\u{20A9}",
         ];
         for text in texts {
             let all = lines(text);
@@ -674,5 +741,102 @@ mod tests {
         assert_eq!(word_backward(text, 0, 1), 0);
         // Blanks at the end: `w` stops on the last grapheme.
         assert_eq!(word_forward("ab  ", 0, 1), 3);
+    }
+
+    /// Texts with every kind of line break, combining marks, joined emoji and flags.
+    const TRICKY: &[&str] = &[
+        "",
+        "abc",
+        "ab\ncd\n",
+        "\n\n",
+        "a\r\nb\rc\n\r\n",
+        "\u{B}x\u{C}y\u{85}z\u{2028}\u{2029}e\u{301}",
+        "\r\n\u{301}q\n\u{1F468}\u{200D}\u{1F469}",
+        "\u{1F1E6}\u{1F1E8}\u{1F1E9}\n\u{1F1EA}\u{1F1EB}\u{1F1EC}x \u{1F1ED}",
+        "a\u{2028}\u{1F1E6}\u{1F1E6}\u{1F1E6} b",
+    ];
+
+    /// The grapheme boundaries of `text`, its end included.
+    fn boundaries(text: &str) -> Vec<usize> {
+        let mut all: Vec<usize> = text.grapheme_indices(true).map(|(i, _)| i).collect();
+        all.push(text.len());
+        all
+    }
+
+    #[test]
+    fn line_ends_are_found_from_the_characters_next_to_them() {
+        // What the grapheme before or at a boundary says, as these used to ask.
+        for text in TRICKY {
+            for byte in boundaries(text) {
+                let before = text
+                    .get(..byte)
+                    .and_then(|b| b.graphemes(true).next_back())
+                    .is_some_and(is_break);
+                assert_eq!(
+                    at_line_start(text, byte),
+                    byte == 0 || before,
+                    "{text:?} {byte}"
+                );
+                let at = text
+                    .get(byte..)
+                    .and_then(|r| r.graphemes(true).next())
+                    .is_some_and(is_break);
+                assert_eq!(
+                    at_line_end(text, byte),
+                    byte >= text.len() || at,
+                    "{text:?} {byte}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn left_with_a_count_lands_where_steps_of_one_do() {
+        for text in TRICKY {
+            for byte in boundaries(text) {
+                let mut at = byte;
+                for count in 0..6 {
+                    assert_eq!(left(text, byte, count), at, "{text:?} {byte} {count}");
+                    at = left(text, at, 1);
+                }
+                assert_eq!(left(text, byte, u32::MAX), line_at(text, byte).start);
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_back_in_a_walk_is_the_grapheme_before() {
+        for text in TRICKY {
+            for byte in boundaries(text) {
+                let line = line_at(text, byte);
+                let mut walk = Walk::new(text, byte);
+                // Back to the line's start, the line split once.
+                let mut at = byte;
+                while at > line.start {
+                    assert_eq!(walk.dec(), Step::Within);
+                    at = prev_grapheme(text, at).max(line.start);
+                    assert_eq!(walk.byte, at, "{text:?} from {byte}");
+                }
+                let crossed = walk.dec();
+                assert_eq!(crossed == Step::Stuck, line.start == 0, "{text:?} {byte}");
+            }
+        }
+    }
+
+    #[test]
+    fn steps_left_through_flags_split_the_line_once() {
+        // 5,000 flag halves on one line: a step back used to read every half before it, so
+        // `h` with a count and `b` read the line once a grapheme, 2,500 times. 100 of each took
+        // seconds; now each reads the line once.
+        let text = "\u{1F1E6}".repeat(5000);
+        let started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(left(&text, text.len(), 10_000), 0);
+        }
+        for _ in 0..20 {
+            assert_eq!(word_backward(&text, text.len(), 1), 0);
+        }
+        let elapsed = started.elapsed();
+        assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
     }
 }

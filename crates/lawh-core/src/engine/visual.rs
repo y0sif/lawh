@@ -78,8 +78,13 @@ impl Engine {
     }
 
     /// Selects the objects whose bounds lie inside the Visual rectangle, edges included.
+    /// Measuring the board counts as work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)): when the
+    /// key has run out, nothing is selected.
     fn select(&mut self, measure: &mut dyn Measure) {
         self.selection.clear();
+        if !self.charge(self.layout_work()) {
+            return;
+        }
         let Some(rect) = self.visual_rect(measure) else {
             return;
         };
@@ -137,6 +142,9 @@ impl Engine {
         self.leave_visual();
         if selected.is_empty() {
             self.info("nothing selected");
+            return;
+        }
+        if !self.charge(self.layout_work()) {
             return;
         }
         let bounds = self.layout(measure);

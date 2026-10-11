@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::mem::size_of;
 
 use super::cursor::Cursor;
-use crate::board::{Board, BoardError, Object, ObjectId, Shape};
+use crate::board::{Board, BoardError, Change, Object, ObjectId, Shape};
 
 /// Most steps the undo history keeps; the oldest are dropped past it. Vim's default
 /// `undolevels`.
@@ -41,19 +41,36 @@ pub(crate) enum Edit {
 impl Edit {
     /// Makes the edit on `board`.
     pub(crate) fn apply(&self, board: &mut Board) -> Result<(), BoardError> {
+        board.apply(&[self.forward()])
+    }
+
+    /// The change that makes the edit, for a batch.
+    pub(crate) fn forward(&self) -> Change<'_> {
         match self {
-            Self::Insert { index, object } => board.insert_at(*index, object.clone()),
-            Self::Remove { object, .. } => remove(board, &object.id),
-            Self::Replace { id, after, .. } => board.replace(id, after.clone()).map(|_| ()),
+            Self::Insert { index, object } => Change::Insert {
+                index: *index,
+                object,
+            },
+            Self::Remove { index, object } => Change::Remove {
+                id: &object.id,
+                at: *index,
+            },
+            Self::Replace { id, after, .. } => Change::Replace { id, shape: after },
         }
     }
 
-    /// Takes the edit back on `board`.
-    pub(crate) fn revert(&self, board: &mut Board) -> Result<(), BoardError> {
+    /// The change that takes the edit back, for a batch.
+    fn backward(&self) -> Change<'_> {
         match self {
-            Self::Insert { object, .. } => remove(board, &object.id),
-            Self::Remove { index, object } => board.insert_at(*index, object.clone()),
-            Self::Replace { id, before, .. } => board.replace(id, before.clone()).map(|_| ()),
+            Self::Insert { index, object } => Change::Remove {
+                id: &object.id,
+                at: *index,
+            },
+            Self::Remove { index, object } => Change::Insert {
+                index: *index,
+                object,
+            },
+            Self::Replace { id, before, .. } => Change::Replace { id, shape: before },
         }
     }
 
@@ -68,13 +85,6 @@ impl Edit {
                     id.as_str().len() + content_bytes(before) + content_bytes(after)
                 }
             }
-    }
-}
-
-fn remove(board: &mut Board, id: &ObjectId) -> Result<(), BoardError> {
-    match board.remove(id) {
-        Some(_) => Ok(()),
-        None => Err(BoardError::NoSuchObject(id.clone())),
     }
 }
 
@@ -104,34 +114,18 @@ impl Step {
         size_of::<Self>() + self.edits.iter().map(Edit::bytes).sum::<usize>()
     }
 
-    /// Makes the edits in order. When one fails, those made are taken back, so the board is
-    /// as it was, and the error is returned.
+    /// Makes the edits in order, as one batch (see [`Board::apply`]): when one fails, the board
+    /// stays as it was and the error is returned.
     fn redo(&self, board: &mut Board) -> Result<(), BoardError> {
-        for (made, edit) in self.edits.iter().enumerate() {
-            if let Err(error) = edit.apply(board) {
-                for edit in self.edits.iter().take(made).rev() {
-                    // Taking back an edit just made cannot fail.
-                    let _ = edit.revert(board);
-                }
-                return Err(error);
-            }
-        }
-        Ok(())
+        let changes: Vec<Change<'_>> = self.edits.iter().map(Edit::forward).collect();
+        board.apply(&changes)
     }
 
-    /// Takes the edits back, newest first. When one fails, those taken back are made again,
-    /// so the board is as it was, and the error is returned.
+    /// Takes the edits back, newest first, as one batch: when one fails, the board stays as it
+    /// was and the error is returned.
     fn undo(&self, board: &mut Board) -> Result<(), BoardError> {
-        for (taken, edit) in self.edits.iter().rev().enumerate() {
-            if let Err(error) = edit.revert(board) {
-                for edit in self.edits.iter().rev().take(taken).rev() {
-                    // Making again an edit just taken back cannot fail.
-                    let _ = edit.apply(board);
-                }
-                return Err(error);
-            }
-        }
-        Ok(())
+        let changes: Vec<Change<'_>> = self.edits.iter().rev().map(Edit::backward).collect();
+        board.apply(&changes)
     }
 }
 
@@ -214,6 +208,19 @@ impl History {
         }
         self.done += 1;
         Some(Ok((step.cursor_after.clone(), step.byte_after)))
+    }
+
+    /// Edits in the step [`History::undo`] would take back; 0 when there is none.
+    pub(crate) fn undo_size(&self) -> usize {
+        self.done
+            .checked_sub(1)
+            .and_then(|i| self.steps.get(i))
+            .map_or(0, |step| step.edits.len())
+    }
+
+    /// Edits in the step [`History::redo`] would make again; 0 when there is none.
+    pub(crate) fn redo_size(&self) -> usize {
+        self.steps.get(self.done).map_or(0, |step| step.edits.len())
     }
 
     /// The board differs from when it was last saved.

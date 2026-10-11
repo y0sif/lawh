@@ -33,7 +33,16 @@ pub(crate) enum Side {
 /// `y=4.3`, and the box never moves back into what it just cleared) and x with [`round3`]: the
 /// box tested is the box placed. Boxes that only touch do not overlap, unless one is flat (see
 /// [`overlaps`]).
-pub(crate) fn place(reference: Rect, size: Size, obstacles: &[Rect], on: Side) -> Option<Point> {
+///
+/// Adds the obstacles it looked at, one per obstacle a try, to `looked`: at most about the
+/// square of their number, when each try clears only one.
+pub(crate) fn place(
+    reference: Rect,
+    size: Size,
+    obstacles: &[Rect],
+    on: Side,
+    looked: &mut usize,
+) -> Option<Point> {
     let x = round3(reference.x0);
     let mut y = match on {
         Side::Below => ceil_tenth(reference.y1 + PLACE_GAP),
@@ -46,6 +55,7 @@ pub(crate) fn place(reference: Rect, size: Size, obstacles: &[Rect], on: Side) -
         if !within_limits(candidate) {
             return None;
         }
+        *looked = looked.saturating_add(obstacles.len());
         let hits = obstacles.iter().filter(|o| overlaps(candidate, **o));
         let next = match on {
             Side::Below => hits
@@ -141,6 +151,32 @@ mod tests {
 
     fn r(x0: f64, y0: f64, x1: f64, y1: f64) -> Rect {
         Rect::new(x0, y0, x1, y1)
+    }
+
+    /// [`super::place`], not counting what it looks at.
+    fn place(reference: Rect, size: Size, obstacles: &[Rect], on: Side) -> Option<Point> {
+        super::place(reference, size, obstacles, on, &mut 0)
+    }
+
+    #[test]
+    fn place_counts_the_obstacles_it_looks_at() {
+        let reference = r(0.0, 0.0, 1.0, 1.0);
+        let size = Size::new(1.0, 1.0);
+        // A column of boxes right under the reference, each in the way of the try before:
+        // every try looks at all of them.
+        let column: Vec<Rect> = (0..10)
+            .map(|i| {
+                let y = 1.2 + f64::from(i) * 1.6;
+                r(0.0, y, 1.0, y + 1.0)
+            })
+            .collect();
+        let mut looked = 0;
+        let at = super::place(reference, size, &column, Side::Below, &mut looked);
+        assert_eq!(at, Some(Point::new(0.0, 17.1)));
+        assert_eq!(looked, 11 * 10);
+        let mut looked = 0;
+        super::place(reference, size, &[], Side::Below, &mut looked);
+        assert_eq!(looked, 0);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use super::text_motion::{
     word_backward, word_end, word_forward,
 };
 use super::undo::Edit;
+use super::work::TextPosition;
 use super::{Effect, Engine, Measure, Mode};
 use crate::key::{Key, KeyCode};
 
@@ -98,7 +99,57 @@ impl Engine {
         }
     }
 
+    /// Runs a block-Normal command. Those that go through the block's text (motions, `x`,
+    /// `i a I A`) do nothing once the key has run out of work, and count what they went
+    /// through after they ran (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)).
     fn run_block(
+        &mut self,
+        command: BlockCommand,
+        count: Option<u32>,
+        measure: &mut dyn Measure,
+    ) -> Vec<Effect> {
+        let walks_text = !matches!(
+            command,
+            BlockCommand::Leave
+                | BlockCommand::Undo
+                | BlockCommand::Redo
+                | BlockCommand::Repeat
+                | BlockCommand::CommandLine
+        );
+        if !walks_text {
+            return self.run_block_command(command, count, measure);
+        }
+        if self.out_of_work() {
+            return Vec::new();
+        }
+        let Some(before) = self.text_position() else {
+            return self.run_block_command(command, count, measure);
+        };
+        let effects = self.run_block_command(command, count, measure);
+        let after = self.text_position();
+        let moved = after.map_or(0, |a| a.byte.abs_diff(before.byte));
+        let line = |p: TextPosition| p.line.end - p.line.start;
+        let lines = line(before).saturating_add(after.map_or(0, line));
+        // Bytes walked a grapheme at a time, and bytes split into graphemes.
+        let (steps, split) = match command {
+            BlockCommand::Left if count.unwrap_or(1) <= 1 => (moved, 0),
+            BlockCommand::Left => (0, before.byte - before.line.start),
+            BlockCommand::Right | BlockCommand::WordNext => (moved, 0),
+            BlockCommand::WordBack | BlockCommand::WordEnd => (moved, lines.saturating_add(moved)),
+            BlockCommand::Down | BlockCommand::Up => (0, lines),
+            BlockCommand::Delete => {
+                let deleted = after.map_or(0, |a| a.len.abs_diff(before.len));
+                (moved.saturating_add(deleted), 0)
+            }
+            BlockCommand::Insert(InsertAt::FirstNonBlank) => (0, line(before)),
+            _ => (0, 0),
+        };
+        let work = self.text_work(before, steps, split);
+        self.charge(work);
+        effects
+    }
+
+    fn run_block_command(
         &mut self,
         command: BlockCommand,
         count: Option<u32>,

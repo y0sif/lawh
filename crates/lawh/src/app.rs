@@ -214,7 +214,9 @@ impl App {
         if translated.keys.is_empty() {
             return;
         }
-        if keys::is_close_request(&translated.keys) {
+        // Only macOS has Cmd+Q as its quit key; elsewhere Super+Q is the desktop's, and goes to
+        // the engine as `<D-q>`.
+        if cfg!(target_os = "macos") && keys::is_close_request(&translated.keys) {
             // A held Cmd+Q repeats: only the press counts, so holding it can't skip the
             // unsaved-changes warning. Like the close button, it leaves the timer and the
             // message alone.
@@ -313,7 +315,7 @@ impl App {
         }
     }
 
-    /// The window's close button, the system's close shortcut, or Cmd+Q
+    /// The window's close button, the system's close shortcut, or Cmd+Q on macOS
     /// ([`keys::is_close_request`]).
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
         if close_now(self.engine.is_modified(), self.close_refused) {

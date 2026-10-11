@@ -22,6 +22,7 @@ use super::repeat::{Context, MAX_REPEAT_KEYS};
 use super::settings::Escape;
 use super::text_motion::{after_insert, content, on_grapheme};
 use super::undo::Edit;
+use super::work::PLACE_WORK;
 use super::{Cursor, Engine, Measure, Mode, bounds, exec};
 use crate::board::{Object, ObjectId, Shape};
 use crate::key::{Key, KeyCode};
@@ -180,13 +181,19 @@ impl Engine {
     fn open_block(&mut self, side: Side, count: Option<u32>, measure: &mut dyn Measure) {
         match self.open_position(side, measure) {
             Some(at) => self.new_block(at, Some(side), count),
+            None if self.out_of_work() => {}
             None => self.error("no room for a new text block"),
         }
     }
 
     /// Where a new text block goes on `side` of the current object, by the place rule. With a
-    /// grid cursor, the grid point is the object, of no size. `None` when there is no room.
-    fn open_position(&self, side: Side, measure: &mut dyn Measure) -> Option<Point> {
+    /// grid cursor, the grid point is the object, of no size. `None` when there is no room, or
+    /// when the key runs out of work measuring the board or placing the block (see
+    /// [`MAX_KEY_WORK`](super::MAX_KEY_WORK)).
+    fn open_position(&mut self, side: Side, measure: &mut dyn Measure) -> Option<Point> {
+        if !self.charge(self.layout_work().saturating_add(self.id_work())) {
+            return None;
+        }
         let obstacles = self.layout(measure);
         let point = self.cursor_point();
         let reference = match &self.cursor {
@@ -195,7 +202,19 @@ impl Engine {
         }
         .unwrap_or_else(|| Rect::from_points(point, point));
         let empty = Object::new(self.board.fresh_id("t"), empty_text(Point::ZERO));
-        place(reference, bounds(&empty, measure).size(), &obstacles, side)
+        let mut looked = 0;
+        let at = place(
+            reference,
+            bounds(&empty, measure).size(),
+            &obstacles,
+            side,
+            &mut looked,
+        );
+        if self.charge(PLACE_WORK.saturating_mul(looked)) {
+            at
+        } else {
+            None
+        }
     }
 
     /// Puts an empty text block at `at` on top of the board and starts Insert mode in it.
@@ -216,9 +235,16 @@ impl Engine {
     /// Puts an empty text block at `at` on top of the board: its id, or `None` with a message
     /// when the board refuses it.
     fn add_empty_block(&mut self, at: Point) -> Option<ObjectId> {
+        if !self.charge(self.id_work()) {
+            return None;
+        }
         let id = self.board.fresh_id("t");
         match self.board.insert(Object::new(id.clone(), empty_text(at))) {
-            Ok(()) => Some(id),
+            Ok(()) => {
+                // The board shows the block from now on: a write asked for earlier lacks it.
+                self.changed();
+                Some(id)
+            }
             Err(error) => {
                 self.error(exec::refusal(&error));
                 None
@@ -316,6 +342,9 @@ impl Engine {
             // A click ends the session: `.` replays it with the `<Esc>` it did not type.
             self.repeat.push(Key::named(KeyCode::Esc));
         }
+        // Where the cursor goes back a grapheme looks back through flag halves (see
+        // `MAX_KEY_WORK`); the session ends whatever the work.
+        self.charge(self.grapheme_work().saturating_mul(2));
         let (Some(mut session), Some(block)) = (self.session.take(), self.block.take()) else {
             self.mode = Mode::Normal;
             return;
@@ -328,6 +357,7 @@ impl Engine {
             (None, Some(object), Some(index)) => {
                 if content(&object.shape).is_none_or(str::is_empty) {
                     self.board.remove(&block.id);
+                    self.changed();
                     kept = session.last_done.take();
                 } else {
                     edits.push(Edit::Insert { index, object });
@@ -386,12 +416,18 @@ impl Engine {
 
     /// A count on the key that started the session: types the session's keys `count - 1` more
     /// times, as Vim does (`3ia<Esc>` inserts `aaa`). After `o` or `O`, each time in a new
-    /// block on the same side of the last. Stops at the first edit the board refuses, and once
-    /// [`MAX_REPEAT_KEYS`] keys would be replayed. The keys count against what the typed key
-    /// may set off ([`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS)), which matters only for a
-    /// `<Esc>` that `.` or a mapping typed: past it, the rest of the count and the typeahead are
-    /// dropped with a message.
+    /// block on the same side of the last. Stops at the first edit the board refuses, after a
+    /// time that leaves the block as it found it (text, cursor and column alike: every time
+    /// after would too, so `10000a<Left><Right><Esc>` types its keys once more, not 9,999
+    /// times), once [`MAX_REPEAT_KEYS`] keys would be replayed, and when the key runs out of
+    /// work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)). The keys count against what the typed
+    /// key may set off ([`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS)), which matters only
+    /// for a `<Esc>` that `.` or a mapping typed: past it, the rest of the count and the
+    /// typeahead are dropped with a message.
     fn repeat_session(&mut self, measure: &mut dyn Measure) {
+        if self.out_of_work() {
+            return;
+        }
         let Some(session) = &self.session else {
             return;
         };
@@ -418,12 +454,24 @@ impl Engine {
             {
                 return;
             }
+            let before = self.block_state();
             for &key in &keys {
                 if !self.insert_edit(key) {
                     return;
                 }
             }
+            // A new block each time is progress; in the same block, a time that left it as it
+            // was would leave it so every time after.
+            if open.is_none() && self.block_state() == before {
+                return;
+            }
         }
+    }
+
+    /// What Insert-mode keys can change in the block being edited: the board's version (its
+    /// text), the cursor and the column kept for `<Up>` and `<Down>`.
+    fn block_state(&self) -> (u64, Option<(usize, Option<usize>)>) {
+        (self.version, self.block.as_ref().map(|b| (b.byte, b.want)))
     }
 
     /// For a count on `o` or `O`: finishes the current block and starts the next on `side` of
@@ -442,7 +490,9 @@ impl Engine {
             return false;
         }
         let Some(at) = self.open_position(side, measure) else {
-            self.error("no room for a new text block");
+            if !self.out_of_work() {
+                self.error("no room for a new text block");
+            }
             return false;
         };
         let Some(id) = self.add_empty_block(at) else {
@@ -465,6 +515,9 @@ impl Engine {
     /// it and it still has text, with the cursor at `byte` (from the undo step) if given, else
     /// where it was, on a grapheme. Otherwise leaves it: block-Normal mode becomes Normal mode.
     pub(super) fn sync_block(&mut self, byte: Option<usize>) {
+        // Keeping the cursor on a grapheme looks back through flag halves (see
+        // `MAX_KEY_WORK`); the block is kept or left whatever the work.
+        self.charge(self.grapheme_work().saturating_mul(2));
         let Some(block) = &self.block else {
             return;
         };
