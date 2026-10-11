@@ -1,46 +1,90 @@
 //! The window: winit events in, frames drawn by lawh-render out through softbuffer.
+//!
+//! Keys go to the editing engine ([`Engine`]), which changes the board; the app does what the
+//! engine asks of it ([`Effect`]): it writes the board, quits, and times out keys waiting for a
+//! longer mapping. Each frame draws the board with the engine's cursor, selection, caret and
+//! status line over it. The mouse pans (drag), zooms (wheel) and selects (click).
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use lawh_core::{Board, Point};
-use lawh_render::{Renderer, Viewport};
+use lawh_core::{Cursor, Effect, Engine, Mode, Point, Rect, to_lawh};
+use lawh_render::{
+    Caret, Overlay, OverlayCursor, Renderer, StatusLine, Viewport, status_bar_height_px,
+};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::ActiveEventLoop;
+use winit::event::{ElementState, KeyEvent, MouseButton, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use crate::view;
+use crate::{files, keys, status, view};
 
 /// Window size on open, in logical pixels.
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 800.0);
+
+/// Furthest the pointer may move, in logical pixels, between pressing and releasing the left
+/// button for it to be a click (select) and not a drag (pan). A hand never holds a mouse
+/// perfectly still; past this the press pans.
+const CLICK_SLOP_PX: f64 = 4.0;
+
+/// How near an object, in logical pixels, a click still selects it, so a thin line is easy to
+/// click.
+const HIT_TOLERANCE_PX: f64 = 4.0;
+
+/// The status line on a close request while the board has unwritten changes. A second close
+/// request, with no key between, closes.
+const CLOSE_MODIFIED: &str = "unsaved changes: :w to save, :q! to discard, or close again";
 
 /// Sent to the event loop by the math engine's waker when a formula finishes compiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MathReady;
 
 /// The open board and its window.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent facts about the window: a button held, the view kept, a close refused, quitting"
+)]
 pub struct App {
-    board: Board,
+    engine: Engine,
+    /// The file the board was opened from, as the engine names it and as the system does (the
+    /// two differ only for a path that isn't UTF-8).
+    file: Option<(String, PathBuf)>,
+    /// The directory lawh started in: `:w` takes a relative path from here.
+    launch_dir: Option<PathBuf>,
+    /// The window title, kept to set it only when it changes.
     title: String,
-    /// Draws the board; its math engine never blocks a frame, and its work budget keeps frames
-    /// short whatever the board holds.
+    /// Draws the board and measures it for the engine; its math engine never blocks a frame,
+    /// and its work budget keeps frames short whatever the board holds.
     renderer: Renderer,
     /// Created on the first `resumed`.
     gfx: Option<Gfx>,
-    /// `None` until the next frame fits the board in the window; after that it holds the user's
-    /// pan and zoom.
+    /// `None` until the next frame fits the board in the window; after that it holds the
+    /// user's pan and zoom.
     viewport: Option<Viewport>,
-    /// The user has panned or zoomed. Until then the view is fitted again whenever a formula
-    /// finishes, since its real size replaces its placeholder's.
-    view_moved: bool,
-    /// Last cursor position in physical pixels, once the cursor has been over the window.
-    cursor: Option<Point>,
-    left_down: bool,
+    /// The view no longer fits the board again when a formula finishes (its real size replacing
+    /// its placeholder's): the user has panned, zoomed, clicked or typed a key.
+    keep_view: bool,
+    /// Last pointer position in physical pixels, once the pointer has been over the window.
+    pointer: Option<Point>,
+    /// The left button, while it is held.
+    left: Option<LeftPress>,
     middle_down: bool,
+    modifiers: ModifiersState,
+    /// The engine's timer for keys waiting for a longer mapping.
+    timer: Timer,
+    /// The app's own message for the status line (a lawhrc warning, a refused close), until
+    /// the next key, click or timeout.
+    message: Option<String>,
+    /// Closing while the board has unwritten changes was refused once, and no key came since.
+    close_refused: bool,
+    /// The engine asked to quit: keys still queued are dropped.
+    quitting: bool,
     /// When lawh started, for the first-frame log.
     started: Instant,
     frames: u64,
@@ -56,18 +100,72 @@ struct Gfx {
     surface_size: Option<(NonZeroU32, NonZeroU32)>,
 }
 
+/// The left mouse button, while it is held.
+#[derive(Debug, Clone, Copy)]
+struct LeftPress {
+    /// Where it went down, in physical pixels.
+    at: Point,
+    /// It moved past [`CLICK_SLOP_PX`]: it pans, and its release is no click.
+    dragging: bool,
+}
+
+/// The one timer the engine may ask for ([`Effect::ArmTimer`]).
+#[derive(Debug, Default)]
+struct Timer {
+    deadline: Option<Instant>,
+}
+
+impl Timer {
+    /// Arms the timer `ms` milliseconds after `now`, in place of any armed before.
+    fn arm(&mut self, now: Instant, ms: u64) {
+        self.deadline = Some(now.checked_add(Duration::from_millis(ms)).unwrap_or(now));
+    }
+
+    fn cancel(&mut self) {
+        self.deadline = None;
+    }
+
+    /// True once, when the deadline has passed at `now`; the timer is then disarmed.
+    fn fire(&mut self, now: Instant) -> bool {
+        self.deadline.take_if(|deadline| now >= *deadline).is_some()
+    }
+
+    /// How the event loop waits: until the deadline, or for the next event.
+    fn control_flow(&self) -> ControlFlow {
+        self.deadline
+            .map_or(ControlFlow::Wait, ControlFlow::WaitUntil)
+    }
+}
+
 impl App {
-    pub fn new(board: Board, renderer: Renderer, title: String, started: Instant) -> Self {
+    /// The app for `engine`, whose board was opened from `file` (see
+    /// [`files::write_target`]), with `message` on the status line until the first key.
+    pub fn new(
+        engine: Engine,
+        file: Option<PathBuf>,
+        launch_dir: Option<PathBuf>,
+        renderer: Renderer,
+        started: Instant,
+        message: Option<String>,
+    ) -> Self {
+        let file = engine.file_name().map(str::to_owned).zip(file);
         Self {
-            board,
-            title,
+            title: status::title(&engine),
+            engine,
+            file,
+            launch_dir,
             renderer,
             gfx: None,
             viewport: None,
-            view_moved: false,
-            cursor: None,
-            left_down: false,
+            keep_view: false,
+            pointer: None,
+            left: None,
             middle_down: false,
+            modifiers: ModifiersState::empty(),
+            timer: Timer::default(),
+            message,
+            close_refused: false,
+            quitting: false,
             started,
             frames: 0,
             error: None,
@@ -91,53 +189,217 @@ impl App {
         }
     }
 
-    fn dragging(&self) -> bool {
-        self.left_down || self.middle_down
+    fn scale_factor(&self) -> f64 {
+        self.viewport.map_or(1.0, |vp| vp.scale_factor)
     }
 
-    fn cursor_moved(&mut self, to: Point) {
-        let from = self.cursor.replace(to);
-        if !self.dragging() {
+    /// A key press, not a release or a synthetic one.
+    fn key(&mut self, event_loop: &ActiveEventLoop, event: &KeyEvent) {
+        if self.quitting {
             return;
         }
+        let text_mode = matches!(self.engine.mode(), Mode::Insert | Mode::CommandLine);
+        let translated = keys::translate(&event.logical_key, self.modifiers, text_mode);
+        if translated.reset_dead_keys
+            && let Some(gfx) = &self.gfx
+        {
+            gfx.window.reset_dead_keys();
+        }
+        // A modifier alone is no key: it must not cut short the engine's timer.
+        if translated.keys.is_empty() {
+            return;
+        }
+        self.timer.cancel();
+        self.message = None;
+        self.close_refused = false;
+        self.keep_view = true;
+        for key in translated.keys {
+            let effects = self.engine.feed(key, &mut self.renderer);
+            self.apply(event_loop, effects);
+            if self.quitting {
+                return;
+            }
+        }
+        self.after_input();
+    }
+
+    /// The engine's timer went off: keys waiting for a longer mapping run now.
+    fn timeout(&mut self, event_loop: &ActiveEventLoop) {
+        self.message = None;
+        let effects = self.engine.timeout(&mut self.renderer);
+        self.apply(event_loop, effects);
+        if !self.quitting {
+            self.after_input();
+        }
+    }
+
+    /// Does what the engine asked for.
+    fn apply(&mut self, event_loop: &ActiveEventLoop, effects: Vec<Effect>) {
+        let mut queue = VecDeque::from(effects);
+        while let Some(effect) = queue.pop_front() {
+            match effect {
+                Effect::Write { path, .. } => {
+                    let result = self.write(&path);
+                    queue.extend(self.engine.write_done(&path, result));
+                }
+                Effect::Quit => {
+                    tracing::info!("quitting");
+                    self.quitting = true;
+                    self.timer.cancel();
+                    event_loop.exit();
+                    return;
+                }
+                Effect::ArmTimer { ms } => self.timer.arm(Instant::now(), ms),
+            }
+        }
+    }
+
+    /// Writes the board for `:w` to `path`, as the engine names it.
+    fn write(&self, path: &str) -> Result<(), String> {
+        let opened = self
+            .file
+            .as_ref()
+            .map(|(name, real)| (name.as_str(), real.as_path()));
+        let target = files::write_target(path, opened, self.launch_dir.as_deref());
+        let started = Instant::now();
+        match files::write_atomic(&target, to_lawh(self.engine.board()).as_bytes()) {
+            Ok(()) => {
+                tracing::info!(
+                    path = %target.display(),
+                    ms = ms(started.elapsed()),
+                    "board written"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(path = %target.display(), %err, "could not write the board");
+                Err(err.to_string())
+            }
+        }
+    }
+
+    /// After keys: the title shows whether the board has changes, the view follows the cursor,
+    /// and the frame is drawn again.
+    fn after_input(&mut self) {
+        self.update_title();
+        if let Some(vp) = self.viewport.as_mut() {
+            let focus = focus(&self.engine, &mut self.renderer);
+            view::follow(vp, focus, f64::from(status_bar_height_px(vp.scale_factor)));
+        }
+        self.request_redraw();
+    }
+
+    fn update_title(&mut self) {
+        let title = status::title(&self.engine);
+        if title != self.title {
+            if let Some(gfx) = &self.gfx {
+                gfx.window.set_title(&title);
+            }
+            self.title = title;
+        }
+    }
+
+    /// The window's close button (or the system's close shortcut).
+    fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        if close_now(self.engine.is_modified(), self.close_refused) {
+            event_loop.exit();
+            return;
+        }
+        self.close_refused = true;
+        self.message = Some(CLOSE_MODIFIED.to_owned());
+        self.request_redraw();
+    }
+
+    fn pointer_moved(&mut self, to: Point) {
+        let last = self.pointer.replace(to);
+        let scale = self.scale_factor();
+        let from = match self.left.as_mut() {
+            Some(press) if !press.dragging => {
+                if !past_click_slop(press.at, to, scale) {
+                    return;
+                }
+                // The pan starts where the button went down, so the drag loses no distance.
+                press.dragging = true;
+                Some(press.at)
+            }
+            Some(_) => last,
+            None if self.middle_down => last,
+            None => return,
+        };
         if let (Some(from), Some(vp)) = (from, self.viewport.as_mut()) {
             view::pan(vp, from, to);
-            self.view_moved = true;
+            self.keep_view = true;
             self.request_redraw();
         }
     }
 
-    /// A formula finished compiling: draw it, fitting the view again if the user hasn't moved it.
+    /// A formula finished compiling: draw it, fitting the view again if the user hasn't moved
+    /// it, clicked or typed a key yet.
     fn math_ready(&mut self) {
-        if !self.view_moved && self.viewport.take().is_some() {
+        if !self.keep_view && self.viewport.take().is_some() {
             tracing::debug!("math finished; fitting the board to the window again");
         }
         self.request_redraw();
     }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) {
-        let down = state.is_pressed();
-        match button {
-            MouseButton::Left => self.left_down = down,
-            MouseButton::Middle => self.middle_down = down,
+        match (button, state) {
+            (MouseButton::Left, ElementState::Pressed) => {
+                self.left = self.pointer.map(|at| LeftPress {
+                    at,
+                    dragging: false,
+                });
+            }
+            (MouseButton::Left, ElementState::Released) => {
+                if let Some(press) = self.left.take()
+                    && !press.dragging
+                {
+                    self.click(press.at);
+                }
+            }
+            (MouseButton::Middle, state) => self.middle_down = state.is_pressed(),
             _ => {}
         }
+    }
+
+    /// A left click at `at` (physical pixels): the engine's cursor goes to the object there, or
+    /// to the grid point nearest it. A click on the status bar does nothing.
+    fn click(&mut self, at: Point) {
+        if self.quitting {
+            return;
+        }
+        let Some((point, tolerance)) = self.viewport.and_then(|vp| click_point(&vp, at)) else {
+            return;
+        };
+        let hit = self
+            .renderer
+            .hit_test(self.engine.board(), point, tolerance);
+        tracing::debug!(?point, ?hit, "click");
+        // The click drops keys waiting for a mapping, and with them their timer.
+        self.timer.cancel();
+        self.message = None;
+        // A formula finishing must not move the board from under what was just clicked.
+        self.keep_view = true;
+        self.engine.click(point, hit, &mut self.renderer);
+        self.update_title();
+        self.request_redraw();
     }
 
     fn zoom(&mut self, factor: f64) {
         let Some(vp) = self.viewport.as_mut() else {
             return;
         };
-        let at = self.cursor.unwrap_or(Point::new(
+        let at = self.pointer.unwrap_or(Point::new(
             f64::from(vp.width) / 2.0,
             f64::from(vp.height) / 2.0,
         ));
         view::zoom_at(vp, at, factor);
-        self.view_moved = true;
+        self.keep_view = true;
         self.request_redraw();
     }
 
-    /// Draws the board and presents it. Does nothing while the window has no area.
+    /// Draws the board and the overlay and presents them. Does nothing while the window has no
+    /// area.
     fn redraw(&mut self) -> anyhow::Result<()> {
         let Some(gfx) = self.gfx.as_mut() else {
             return Ok(());
@@ -165,16 +427,31 @@ impl App {
             vp.scale_factor = scale_factor;
             *vp
         } else {
-            let vp = match self.renderer.board_bounds(&self.board) {
-                Some(bounds) => Viewport::fit(bounds, width, height, scale_factor),
-                None => Viewport::new(Point::ZERO, 1.0, width, height, scale_factor),
-            };
+            let bounds = self.renderer.board_bounds(self.engine.board());
+            let vp = view::opening(bounds, width, height, scale_factor);
             tracing::debug!(?vp, "fitted the board to the window");
             *self.viewport.insert(vp)
         };
 
         let render_start = Instant::now();
-        let pixels = self.renderer.render(&self.board, &vp);
+        let status = status::status(&self.engine, self.message.as_deref());
+        let visual = self.engine.visual_rect(&mut self.renderer);
+        let text_cursor = self.engine.text_cursor();
+        let overlay = Overlay {
+            cursor: OverlayCursor::from(self.engine.cursor()),
+            selection: self.engine.selection(),
+            visual,
+            caret: text_cursor.as_ref().map(Caret::from),
+            status: StatusLine {
+                left: &status.left,
+                right: &status.right,
+                error: status.error,
+            },
+            command_line: self.engine.command_line(),
+        };
+        let pixels = self
+            .renderer
+            .render_with(self.engine.board(), &vp, &overlay);
         let render_time = render_start.elapsed();
 
         let mut buffer = gfx
@@ -253,6 +530,12 @@ impl Gfx {
 }
 
 impl ApplicationHandler<MathReady> for App {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
+        if self.timer.fire(Instant::now()) {
+            self.timeout(event_loop);
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.gfx.is_some() {
             return;
@@ -272,7 +555,7 @@ impl ApplicationHandler<MathReady> for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.close_requested(event_loop),
             WindowEvent::Resized(size) => {
                 if let Some(vp) = self.viewport.as_mut() {
                     vp.width = u16::try_from(size.width).unwrap_or(u16::MAX);
@@ -291,22 +574,86 @@ impl ApplicationHandler<MathReady> for App {
                     self.fail(event_loop, err);
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::KeyboardInput {
+                event,
+                is_synthetic,
+                ..
+            } => {
+                // Synthetic presses are keys held when the window gains focus; repeats count.
+                if event.state == ElementState::Pressed && !is_synthetic {
+                    self.key(event_loop, &event);
+                }
+            }
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_moved(Point::new(position.x, position.y));
+                self.pointer_moved(Point::new(position.x, position.y));
             }
             WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => {
-                let scale_factor = self.viewport.map_or(1.0, |vp| vp.scale_factor);
-                self.zoom(view::wheel_zoom_factor(delta, scale_factor));
+                self.zoom(view::wheel_zoom_factor(delta, self.scale_factor()));
             }
             // A release that happens while another window has focus never arrives here.
             WindowEvent::Focused(false) => {
-                self.left_down = false;
+                self.left = None;
                 self.middle_down = false;
+                self.modifiers = ModifiersState::empty();
             }
             _ => {}
         }
     }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        event_loop.set_control_flow(self.timer.control_flow());
+    }
+}
+
+/// What the view keeps in sight after a key: the caret in a text block, else the current
+/// object, else the cursor's grid point (all in grid units).
+fn focus(engine: &Engine, renderer: &mut Renderer) -> Rect {
+    let board = engine.board();
+    if let Some(caret) = engine.text_cursor()
+        && let Some(rect) = renderer.caret_rect(board, &caret.id, caret.byte)
+    {
+        return rect;
+    }
+    if let Cursor::Object(id) = engine.cursor()
+        && let Some(bounds) = board.get(id).and_then(|o| renderer.object_bounds(o))
+    {
+        return bounds;
+    }
+    let p = engine.cursor_point();
+    Rect::from_points(p, p)
+}
+
+/// Where a click at `at` (physical pixels) lands on the board through `vp`, and how near an
+/// object it may land to hit it ([`HIT_TOLERANCE_PX`]), both in grid units. `None` on the
+/// status bar.
+fn click_point(vp: &Viewport, at: Point) -> Option<(Point, f64)> {
+    let bar = f64::from(status_bar_height_px(vp.scale_factor));
+    if at.y >= f64::from(vp.height) - bar {
+        return None;
+    }
+    let tolerance = HIT_TOLERANCE_PX * vp.scale_factor / vp.px_per_unit();
+    Some((vp.to_board(at), tolerance))
+}
+
+/// A close request closes the window when the board has no unwritten changes, or when one was
+/// refused already with no key since.
+fn close_now(modified: bool, refused_before: bool) -> bool {
+    !modified || refused_before
+}
+
+/// The pointer moved far enough from where the left button went down (physical pixels, at
+/// `scale_factor`) for the press to be a drag, not a click.
+fn past_click_slop(from: Point, to: Point, scale_factor: f64) -> bool {
+    let scale = if scale_factor.is_finite() && scale_factor > 0.0 {
+        scale_factor
+    } else {
+        1.0
+    };
+    let moved = (to - from).hypot();
+    // A pointer position that isn't a number is no click.
+    moved.is_nan() || moved >= CLICK_SLOP_PX * scale
 }
 
 /// Copies premultiplied RGBA8 into softbuffer's `0RGB` pixels. The paper is opaque, so every
@@ -325,6 +672,8 @@ fn ms(d: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use lawh_core::{FixedMeasure, from_lawh, parse_keys};
+
     use super::*;
 
     #[test]
@@ -333,6 +682,122 @@ mod tests {
         let mut out = [0xDEAD_BEEF; 2];
         rgba_to_0rgb(&rgba, &mut out);
         assert_eq!(out, [0x0011_2233, 0x00FA_FAF7]);
+    }
+
+    #[test]
+    fn the_timer_fires_once_after_its_deadline() {
+        let now = Instant::now();
+        let mut timer = Timer::default();
+        assert_eq!(timer.control_flow(), ControlFlow::Wait);
+        assert!(!timer.fire(now));
+
+        timer.arm(now, 1000);
+        let deadline = now + Duration::from_millis(1000);
+        assert_eq!(timer.control_flow(), ControlFlow::WaitUntil(deadline));
+        assert!(!timer.fire(now + Duration::from_millis(999)));
+        assert!(timer.fire(deadline));
+        assert!(!timer.fire(deadline), "only once");
+        assert_eq!(timer.control_flow(), ControlFlow::Wait);
+    }
+
+    #[test]
+    fn a_key_cancels_the_timer_and_a_new_one_replaces_it() {
+        let now = Instant::now();
+        let mut timer = Timer::default();
+        timer.arm(now, 1000);
+        timer.cancel();
+        assert!(!timer.fire(now + Duration::from_secs(5)));
+
+        timer.arm(now, 1000);
+        timer.arm(now + Duration::from_millis(500), 1000);
+        assert!(!timer.fire(now + Duration::from_millis(1200)));
+        assert!(timer.fire(now + Duration::from_millis(1500)));
+    }
+
+    #[test]
+    fn closing_asks_once_when_there_are_changes() {
+        assert!(close_now(false, false));
+        assert!(!close_now(true, false));
+        assert!(close_now(true, true));
+    }
+
+    #[test]
+    fn a_click_is_a_press_that_barely_moves() {
+        let at = Point::new(100.0, 100.0);
+        assert!(!past_click_slop(at, at, 1.0));
+        assert!(!past_click_slop(at, Point::new(103.0, 102.0), 1.0));
+        assert!(past_click_slop(at, Point::new(104.0, 100.0), 1.0));
+        // At scale factor 2 the slop is twice as many physical pixels.
+        assert!(!past_click_slop(at, Point::new(107.0, 100.0), 2.0));
+        assert!(past_click_slop(at, Point::new(108.0, 100.0), 2.0));
+        assert!(past_click_slop(at, Point::new(f64::NAN, 100.0), 1.0));
+        assert!(!past_click_slop(at, Point::new(103.0, 100.0), f64::NAN));
+    }
+
+    #[test]
+    fn a_click_selects_what_is_under_it_or_the_nearest_grid_point() {
+        let mut renderer = Renderer::new_trusted();
+        let board = from_lawh("lawh version=1\nline id=l1 x1=0 y1=0 x2=4 y2=0\n").unwrap();
+        let mut engine = Engine::new(board);
+        // 40 px a unit, the origin at the window's centre (400, 300).
+        let vp = Viewport::new(Point::ZERO, 1.0, 800, 600, 1.0);
+        let click = |engine: &mut Engine, renderer: &mut Renderer, at: Point| {
+            let (point, tolerance) = click_point(&vp, at).unwrap();
+            let hit = renderer.hit_test(engine.board(), point, tolerance);
+            engine.click(point, hit, renderer);
+        };
+
+        // 3 px below the line: on it.
+        click(&mut engine, &mut renderer, Point::new(480.0, 303.0));
+        assert_eq!(
+            engine.cursor(),
+            &Cursor::Object(lawh_core::ObjectId::new("l1").unwrap())
+        );
+        // 5 px below: past the tolerance, so the nearest grid point.
+        click(&mut engine, &mut renderer, Point::new(480.0, 305.0));
+        assert_eq!(engine.cursor(), &Cursor::Grid(Point::new(2.0, 0.0)));
+        click(&mut engine, &mut renderer, Point::new(530.0, 250.0));
+        assert_eq!(engine.cursor(), &Cursor::Grid(Point::new(3.0, -1.0)));
+    }
+
+    #[test]
+    fn the_click_tolerance_is_logical_pixels_and_the_status_bar_is_not_the_board() {
+        let vp = Viewport::new(Point::new(5.0, 5.0), 2.0, 800, 600, 2.0);
+        let (point, tolerance) = click_point(&vp, Point::new(400.0, 300.0)).unwrap();
+        assert_eq!(point, Point::new(5.0, 5.0));
+        // 4 logical px at zoom 2: 4 / (40 x 2) units.
+        assert!((tolerance - 0.05).abs() < 1e-12, "{tolerance}");
+        // The bar is 48 physical px at scale factor 2.
+        assert!(click_point(&vp, Point::new(10.0, 551.0)).is_some());
+        assert!(click_point(&vp, Point::new(10.0, 552.0)).is_none());
+    }
+
+    fn feed(engine: &mut Engine, keys: &str) {
+        for key in parse_keys(keys).unwrap() {
+            engine.feed(key, &mut FixedMeasure);
+        }
+    }
+
+    #[test]
+    fn the_view_follows_the_caret_then_the_object_then_the_point() {
+        let mut renderer = Renderer::new_trusted();
+        let board = from_lawh("lawh version=1\nrect id=r1 x=10 y=20 w=4 h=2\n").unwrap();
+        let mut engine = Engine::new(board);
+        assert_eq!(focus(&engine, &mut renderer), Rect::new(0.0, 0.0, 0.0, 0.0));
+        feed(&mut engine, "3l");
+        assert_eq!(focus(&engine, &mut renderer), Rect::new(3.0, 0.0, 3.0, 0.0));
+        feed(&mut engine, "w");
+        assert_eq!(
+            focus(&engine, &mut renderer),
+            Rect::new(10.0, 20.0, 14.0, 22.0)
+        );
+        // A new text block below the rectangle: the caret, zero wide, one line high.
+        feed(&mut engine, "o");
+        assert_eq!(engine.mode(), Mode::Insert);
+        let caret = focus(&engine, &mut renderer);
+        assert!(caret.width().abs() < 1e-9, "{caret:?}");
+        assert!(caret.height() > 0.0, "{caret:?}");
+        assert!(caret.y0 > 22.0, "{caret:?}");
     }
 
     /// The copy runs in the app crate, outside lawh-render's bench; see the dev profile in the

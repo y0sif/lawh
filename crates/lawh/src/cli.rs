@@ -6,10 +6,16 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 const USAGE: &str = "\
-Usage: lawh <file.lawh>
+Usage: lawh [file.lawh]
 
-Opens a lawh board in a window. Drag with the left or middle mouse button to
-pan, and scroll to zoom.
+Opens a lawh board in a window, to edit with Vim keys. A file that doesn't exist
+yet opens as an empty board, and :w creates it. Without a file the board has no
+name until :w name.lawh gives it one.
+
+Drag with the left or middle mouse button to pan, click to select, and scroll to
+zoom. Settings and key maps are read from lawhrc in lawh's config directory:
+~/.config/lawh/lawhrc on Linux and macOS, %APPDATA%\\y0sif\\lawh\\config\\lawhrc on
+Windows.
 
 Options:
   -h, --help     Print this help
@@ -22,8 +28,8 @@ pub const MATH_WORKER_FLAG: &str = "--math-worker";
 /// What the command line asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    /// Open this board in a window.
-    Open(PathBuf),
+    /// Open this board file in a window, or an unnamed board.
+    Open(Option<PathBuf>),
     /// Print the version.
     Version,
     /// Print the help.
@@ -33,8 +39,6 @@ pub enum Command {
 /// Arguments that don't make a valid command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageError {
-    /// No board file was given.
-    MissingFile,
     /// A second file, or anything else after the file.
     UnexpectedArgument(String),
     /// An option lawh doesn't have.
@@ -44,14 +48,13 @@ pub enum UsageError {
 impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingFile => f.write_str("no board file given"),
             Self::UnexpectedArgument(arg) => write!(f, "unexpected argument '{arg}'"),
             Self::UnknownOption(arg) => write!(f, "unknown option '{arg}'"),
         }
     }
 }
 
-/// Parses the arguments after the program name.
+/// Parses the arguments after the program name: at most one file.
 ///
 /// `--help` and `--version` win wherever they appear before `--`. Everything after `--` is a
 /// file, so `lawh -- -odd-name.lawh` opens a file whose name starts with `-`.
@@ -84,7 +87,7 @@ where
         }
         file = Some(PathBuf::from(arg));
     }
-    file.map(Command::Open).ok_or(UsageError::MissingFile)
+    Ok(Command::Open(file))
 }
 
 // The CLI writes with `writeln!` and ignores write errors: `println!` panics when stdout is a
@@ -126,7 +129,7 @@ mod tests {
     fn a_file_opens_it() {
         assert_eq!(
             parse(&["board.lawh"]),
-            Ok(Command::Open(PathBuf::from("board.lawh")))
+            Ok(Command::Open(Some(PathBuf::from("board.lawh"))))
         );
     }
 
@@ -145,9 +148,9 @@ mod tests {
     }
 
     #[test]
-    fn no_arguments_is_an_error() {
-        assert_eq!(parse(&[]), Err(UsageError::MissingFile));
-        assert_eq!(parse(&["--"]), Err(UsageError::MissingFile));
+    fn no_file_opens_an_unnamed_board() {
+        assert_eq!(parse(&[]), Ok(Command::Open(None)));
+        assert_eq!(parse(&["--"]), Ok(Command::Open(None)));
     }
 
     #[test]
@@ -174,17 +177,17 @@ mod tests {
     fn double_dash_ends_options() {
         assert_eq!(
             parse(&["--", "-odd.lawh"]),
-            Ok(Command::Open(PathBuf::from("-odd.lawh")))
+            Ok(Command::Open(Some(PathBuf::from("-odd.lawh"))))
         );
         assert_eq!(
             parse(&["--", "--help"]),
-            Ok(Command::Open(PathBuf::from("--help")))
+            Ok(Command::Open(Some(PathBuf::from("--help"))))
         );
     }
 
     #[test]
     fn a_lone_dash_is_a_file_name() {
-        assert_eq!(parse(&["-"]), Ok(Command::Open(PathBuf::from("-"))));
+        assert_eq!(parse(&["-"]), Ok(Command::Open(Some(PathBuf::from("-")))));
     }
 
     #[cfg(unix)]
@@ -194,7 +197,7 @@ mod tests {
         let name = OsString::from_vec(vec![b'b', 0xFF, b'.', b'l']);
         assert_eq!(
             parse_args([name.clone()]),
-            Ok(Command::Open(PathBuf::from(name)))
+            Ok(Command::Open(Some(PathBuf::from(name))))
         );
     }
 }

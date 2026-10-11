@@ -50,6 +50,9 @@ icu_properties = { version = "2.3.0", default-features = false }
 winit = "0.30.13"
 softbuffer = "0.4.8"
 anyhow = "1.0.104"
+# The config directory lawhrc is read from: XDG on Linux and macOS (`~/.config/lawh`), the
+# roaming AppData folder on Windows.
+etcetera = "0.11.0"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

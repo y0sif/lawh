@@ -2,7 +2,7 @@
 //!
 //! Points here are physical pixel positions in the window, y down, as winit reports them.
 
-use lawh_core::Point;
+use lawh_core::{Point, Rect};
 use lawh_render::Viewport;
 use winit::event::MouseScrollDelta;
 
@@ -16,6 +16,88 @@ const ZOOM_PER_LINE: f64 = 1.1;
 
 /// Logical pixels of touchpad scrolling that count as one wheel line.
 const PIXELS_PER_LINE: f64 = 50.0;
+
+/// Room [`follow`] keeps between what the cursor is on and the window's edges, in logical
+/// pixels: a little more than one grid unit at zoom 1, so the cursor's outline and what is next
+/// to it stay in view.
+const FOLLOW_MARGIN_PX: f64 = 48.0;
+
+/// The view a board opens with: all of it fitted to the window (see [`Viewport::fit`]), or for
+/// an empty board the grid's origin at the centre, at zoom 1. `bounds` are the board's, in grid
+/// units.
+pub fn opening(bounds: Option<Rect>, width: u16, height: u16, scale_factor: f64) -> Viewport {
+    match bounds {
+        Some(bounds) => Viewport::fit(bounds, width, height, scale_factor),
+        None => Viewport::new(Point::ZERO, 1.0, width, height, scale_factor),
+    }
+}
+
+/// Pans `vp` as little as possible to bring `focus` (grid units) into view, at least
+/// [`FOLLOW_MARGIN_PX`] inside the window's edges, above the bottom `bottom_px` physical pixels
+/// (the status bar). The zoom never changes.
+///
+/// A focus too big for the room has its top-left corner brought into view instead. A tiny
+/// window gets a smaller margin; a focus or view that isn't finite changes nothing.
+pub fn follow(vp: &mut Viewport, focus: Rect, bottom_px: f64) {
+    let ppu = vp.px_per_unit();
+    if !(focus.is_finite() && ppu.is_finite() && ppu > 0.0 && vp.center.is_finite()) {
+        return;
+    }
+    let scale = if vp.scale_factor.is_finite() && vp.scale_factor > 0.0 {
+        vp.scale_factor
+    } else {
+        1.0
+    };
+    let width = f64::from(vp.width);
+    let height = f64::from(vp.height) - bottom_px.max(0.0);
+    if width <= 0.0 || height <= 0.0 {
+        return;
+    }
+    let margin = (FOLLOW_MARGIN_PX * scale)
+        .min(width / 4.0)
+        .min(height / 4.0);
+    let a = vp.to_screen(Point::new(focus.x0, focus.y0));
+    let b = vp.to_screen(Point::new(focus.x1, focus.y1));
+    // Less than half a pixel is no pan: it would only be rounding from the last one.
+    let whole = |d: f64| if d.abs() < 0.5 { 0.0 } else { d };
+    let dx = whole(into_view(
+        a.x.min(b.x),
+        a.x.max(b.x),
+        margin,
+        width - margin,
+    ));
+    let dy = whole(into_view(
+        a.y.min(b.y),
+        a.y.max(b.y),
+        margin,
+        height - margin,
+    ));
+    if dx == 0.0 && dy == 0.0 {
+        return;
+    }
+    let center = vp.center - Point::new(dx, dy).to_vec2() / ppu;
+    if center.is_finite() {
+        vp.center = center;
+    }
+}
+
+/// How far to move the span `from..to` (screen pixels, one axis) to bring it into `lo..hi`:
+/// just enough, or, for a span longer than the room, enough to bring its start into it.
+fn into_view(from: f64, to: f64, lo: f64, hi: f64) -> f64 {
+    if to - from > hi - lo {
+        if (lo..=hi).contains(&from) {
+            0.0
+        } else {
+            lo - from
+        }
+    } else if from < lo {
+        lo - from
+    } else if to > hi {
+        hi - to
+    } else {
+        0.0
+    }
+}
 
 /// Moves the view so the board point that was under `from` is now under `to`.
 pub fn pan(vp: &mut Viewport, from: Point, to: Point) {
@@ -139,6 +221,115 @@ mod tests {
             zoom_at(&mut vp, Point::new(1.0, 2.0), factor);
             assert_eq!(vp, viewport());
         }
+    }
+
+    #[test]
+    fn an_empty_board_opens_at_the_origin_at_zoom_1() {
+        let vp = opening(None, 800, 600, 2.0);
+        assert_eq!(vp, Viewport::new(Point::ZERO, 1.0, 800, 600, 2.0));
+        let bounds = Rect::new(10.0, 10.0, 20.0, 12.0);
+        assert_eq!(
+            opening(Some(bounds), 800, 600, 2.0),
+            Viewport::fit(bounds, 800, 600, 2.0)
+        );
+    }
+
+    /// A 800x600 view at scale factor 1 and zoom 1 (40 px a unit) on the origin, with a 24 px
+    /// status bar: the margin is 48 px, so what may be seen without a pan is x from -8.8 to
+    /// 8.8 units and y from -6.3 to 5.7.
+    fn origin_view() -> Viewport {
+        Viewport::new(Point::ZERO, 1.0, 800, 600, 1.0)
+    }
+
+    const BAR: f64 = 24.0;
+
+    fn point(x: f64, y: f64) -> Rect {
+        Rect::new(x, y, x, y)
+    }
+
+    #[test]
+    fn a_focus_in_view_does_not_move_it() {
+        for focus in [
+            point(0.0, 0.0),
+            point(8.8, 5.7),
+            point(-8.8, -6.3),
+            Rect::new(-3.0, -2.0, 4.0, 3.0),
+        ] {
+            let mut vp = origin_view();
+            follow(&mut vp, focus, BAR);
+            assert_eq!(vp, origin_view(), "{focus:?}");
+        }
+    }
+
+    #[test]
+    fn the_view_pans_just_enough() {
+        let mut vp = origin_view();
+        follow(&mut vp, point(20.0, 0.0), BAR);
+        assert_near(
+            vp.to_screen(Point::new(20.0, 0.0)),
+            Point::new(752.0, 300.0),
+        );
+
+        let mut vp = origin_view();
+        follow(&mut vp, point(-20.0, -30.0), BAR);
+        assert_near(
+            vp.to_screen(Point::new(-20.0, -30.0)),
+            Point::new(48.0, 48.0),
+        );
+
+        // The bottom edge is the status bar's top, less the margin.
+        let mut vp = origin_view();
+        follow(&mut vp, Rect::new(1.0, 9.0, 2.0, 10.0), BAR);
+        assert_near(
+            vp.to_screen(Point::new(1.0, 10.0)),
+            Point::new(440.0, 528.0),
+        );
+        assert!((vp.zoom - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn a_focus_bigger_than_the_window_shows_its_top_left() {
+        let big = Rect::new(30.0, 40.0, 100.0, 140.0);
+        let mut vp = origin_view();
+        follow(&mut vp, big, BAR);
+        assert_near(vp.to_screen(Point::new(30.0, 40.0)), Point::new(48.0, 48.0));
+        // Once its corner is in view, another follow leaves it.
+        let before = vp;
+        follow(&mut vp, big, BAR);
+        assert_eq!(vp, before);
+    }
+
+    #[test]
+    fn the_margin_scales_and_shrinks_in_a_tiny_window() {
+        let mut vp = Viewport::new(Point::ZERO, 1.0, 800, 600, 2.0);
+        follow(&mut vp, point(20.0, 0.0), 48.0);
+        assert_near(
+            vp.to_screen(Point::new(20.0, 0.0)),
+            Point::new(704.0, 300.0),
+        );
+
+        let mut vp = Viewport::new(Point::ZERO, 1.0, 40, 40, 1.0);
+        follow(&mut vp, point(5.0, 5.0), 24.0);
+        // 16 px of room above the bar: a 4 px margin.
+        assert_near(vp.to_screen(Point::new(5.0, 5.0)), Point::new(36.0, 12.0));
+    }
+
+    #[test]
+    fn nothing_moves_for_what_cannot_be_followed() {
+        for focus in [
+            point(f64::NAN, 0.0),
+            Rect::new(0.0, 0.0, f64::INFINITY, 1.0),
+        ] {
+            let mut vp = origin_view();
+            follow(&mut vp, focus, BAR);
+            assert_eq!(vp, origin_view(), "{focus:?}");
+        }
+        let mut vp = origin_view();
+        follow(&mut vp, point(100.0, 100.0), 600.0);
+        assert_eq!(vp, origin_view(), "no room above the bar");
+        let mut vp = Viewport::new(Point::ZERO, 0.0, 800, 600, 1.0);
+        follow(&mut vp, point(100.0, 100.0), BAR);
+        assert_eq!(vp.center, Point::ZERO, "zoom 0");
     }
 
     #[test]

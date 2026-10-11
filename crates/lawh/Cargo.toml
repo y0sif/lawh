@@ -19,6 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+etcetera.workspace = true
 lawh-core.workspace = true
 lawh-math.workspace = true
 lawh-render.workspace = true

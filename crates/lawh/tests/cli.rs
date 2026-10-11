@@ -1,11 +1,14 @@
-//! The `lawh` command line: version, usage errors and board loading errors.
+//! The `lawh` command line: version, usage errors, board loading errors and the math worker's
+//! stdout and stderr.
 //!
 //! None of these open a window. Display variables are removed from the child's environment, so a
 //! run that got as far as opening one would fail with a different message instead of showing it.
+//! What opens a window (a missing file, no file) is tested through `files::plan_open`.
 
 // Lets the helpers below unwrap like test functions (see clippy.toml).
 #![cfg(test)]
 
+use std::io::Write as _;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 
@@ -72,7 +75,7 @@ fn version_prints_name_and_version() {
 fn help_prints_usage_on_stdout() {
     let out = lawh(&["--help".as_ref()]);
     assert_eq!(out.status.code(), Some(0));
-    assert!(stdout(&out).starts_with("Usage: lawh <file.lawh>"));
+    assert!(stdout(&out).starts_with("Usage: lawh [file.lawh]\n"));
     assert!(!stdout(&out).contains("worker"), "{}", stdout(&out));
     assert_eq!(stderr(&out), "");
 }
@@ -92,6 +95,27 @@ fn math_worker_flag_runs_the_worker_until_stdin_closes() {
 }
 
 #[test]
+fn math_worker_logs_go_to_stderr_only() {
+    let mut worker = Command::new(env!("CARGO_BIN_EXE_lawh"))
+        .arg("--math-worker")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("RUST_LOG")
+        .spawn()
+        .unwrap();
+    // Half a frame's length, then the end of input: a bad request frame, which the worker logs
+    // as a warning before it exits.
+    worker.stdin.take().unwrap().write_all(&[7, 0]).unwrap();
+    let out = worker.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(stdout(&out), "lawh-math-worker 1\n");
+    let err = stderr(&out);
+    assert!(err.contains("WARN"), "{err}");
+    assert!(err.contains("math worker got a bad request frame"), "{err}");
+}
+
+#[test]
 fn math_worker_flag_only_counts_first() {
     let out = lawh(&["a.lawh".as_ref(), "--math-worker".as_ref()]);
     assert_eq!(out.status.code(), Some(2));
@@ -103,39 +127,27 @@ fn math_worker_flag_only_counts_first() {
 }
 
 #[test]
-fn no_arguments_prints_usage_and_exits_2() {
-    let out = lawh(&[]);
-    assert_eq!(out.status.code(), Some(2));
-    assert_eq!(stdout(&out), "");
-    assert!(
-        stderr(&out).contains("Usage: lawh <file.lawh>"),
-        "{}",
-        stderr(&out)
-    );
-}
-
-#[test]
 fn extra_arguments_print_usage_and_exit_2() {
     let out = lawh(&["a.lawh".as_ref(), "b.lawh".as_ref()]);
     assert_eq!(out.status.code(), Some(2));
     let err = stderr(&out);
     assert!(err.contains("unexpected argument 'b.lawh'"), "{err}");
-    assert!(err.contains("Usage: lawh <file.lawh>"), "{err}");
+    assert!(err.contains("Usage: lawh [file.lawh]"), "{err}");
 }
 
 #[test]
-fn missing_file_names_the_path_and_exits_1() {
-    let path = std::env::temp_dir().join(format!(
-        "lawh-cli-test-{}-does-not-exist.lawh",
-        std::process::id()
-    ));
-    let out = lawh(&[path.as_os_str()]);
+fn a_directory_names_the_path_and_exits_1() {
+    let dir = std::env::temp_dir().join(format!("lawh-cli-test-{}-dir.lawh", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = lawh(&[dir.as_os_str()]);
+    let _ = std::fs::remove_dir(&dir);
     assert_eq!(out.status.code(), Some(1));
     let err = stderr(&out);
     assert!(
-        err.starts_with(&format!("lawh: {}: ", path.display())),
+        err.starts_with(&format!("lawh: {}: ", dir.display())),
         "{err}"
     );
+    assert!(!err.contains("window"), "{err}");
 }
 
 #[test]
