@@ -660,6 +660,22 @@ fn invalid_escapes() {
 }
 
 #[test]
+fn raw_string_that_reads_as_a_quote() {
+    // kdl rejects a raw string that reads as a lone `"`, on one line or several, and so did
+    // lawh's kdl-based reader, with this message.
+    let e = body_err("text id=t1 x=0 y=0 #\"\"\"\n\"\n\"\"\"#\n");
+    assert!(matches!(e, FormatError::Syntax { .. }), "{e:?}");
+    assert_eq!((e.line(), e.column()), (2, 20), "{e}");
+    assert_snapshot!(e.to_string());
+    // That reader never showed kdl a slashdashed node, so it read this one.
+    let board = from_lawh(&format!(
+        "{HEADER}/-text id=t1 x=0 y=0 #\"\"\"\n\"\n\"\"\"#\n"
+    ))
+    .unwrap();
+    assert_eq!(board.objects().len(), 0);
+}
+
+#[test]
 fn unclosed_block_comment() {
     let e = body_err("circle id=c1 x=0 y=0 r=1 /* /* */\nrect id=r1 x=0 y=0 w=1 h=1\n");
     assert!(matches!(e, FormatError::Syntax { .. }), "{e:?}");

@@ -16,17 +16,19 @@ use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
 use std::ops::Range;
 use std::sync::{Arc, LazyLock};
 
-use icu_properties::props::{BidiClass, Script};
+use icu_properties::CodePointMapData;
+use icu_properties::props::{BidiClass, BidiMirroringGlyph, BidiPairedBracketType, Script};
 use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
+use parley::setting::{FontFeature, Tag};
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, Layout, LayoutContext,
-    PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontFeatures, Layout,
+    LayoutContext, PositionedLayoutItem, StyleProperty,
 };
 
 use parley_data::Properties;
 
-use crate::budget::GlyphSums;
+use crate::budget::{self, GlyphSums};
 use crate::glyphs::GlyphTable;
 
 /// Em size text is laid out at, in layout units. Drawing scales layout units
@@ -35,6 +37,21 @@ pub(crate) const LAYOUT_EM: f32 = 20.0;
 
 /// Family used when the bundled font list is somehow empty.
 const FALLBACK_FAMILY: &str = "Inter";
+
+/// Font features turned off, so every character shows as itself whatever is around it, as typed:
+/// the cursor of a Vim editor moves over what is on screen, a glyph per character. Inter's
+/// contextual alternates (`calt`) join `->`, `=>` and the like into one arrow glyph and raise
+/// brackets, `:` and other punctuation next to capitals or between digits; automatic fractions
+/// (`frac`, `numr`, `dnom`) shrink the digits around U+2044 FRACTION SLASH. `calt` also made
+/// laying out brackets and most other punctuation 3 to 20 times slower, `)`, `]` and `}` worst
+/// (`calibrate_text_layout`, 2026-10-11). Inter has no `liga`, `clig` or `rlig`, and the shaper
+/// leaves `dlig` and `case` off. `ccmp` stays: it only joins a letter and its combining marks.
+const FEATURES_OFF: [FontFeature; 4] = [
+    FontFeature::new(Tag::new(b"calt"), 0),
+    FontFeature::new(Tag::new(b"frac"), 0),
+    FontFeature::new(Tag::new(b"numr"), 0),
+    FontFeature::new(Tag::new(b"dnom"), 0),
+];
 
 /// Most glyphs in one [`Chunk`] of a [`Plan`].
 const CHUNK_GLYPHS: u32 = 64;
@@ -110,6 +127,11 @@ pub(crate) struct Facts {
     /// Places where parley starts another run to shape within a line, because the script or
     /// the bidi level changes there ([`Splits`]): what makes laying text out costly.
     pub(crate) changes: usize,
+    /// Paired brackets (`Bidi_Paired_Bracket`, such as `(` and `]`) when the text holds a
+    /// character that can make a right-to-left level ([`Brackets`]), else 0. The bidi algorithm
+    /// gives each pair the direction of what is inside it or around it (rule N0), which can start
+    /// runs [`Splits`] doesn't count, so each counts as one more possible change.
+    pub(crate) brackets: usize,
     /// Lines, as lawh-core counts them (`lawh_core::board::MAX_TEXT_LINES`).
     pub(crate) lines: usize,
     /// Characters in the longest line.
@@ -122,6 +144,7 @@ impl Facts {
             chars: 0,
             non_ascii: 0,
             changes: 0,
+            brackets: 0,
             lines: 1,
             longest_line: 0,
         };
@@ -147,8 +170,18 @@ impl Facts {
             after_cr = c == '\r';
         }
         facts.longest_line = facts.longest_line.max(line);
-        facts.changes = splits.finish();
+        (facts.changes, facts.brackets) = splits.finish();
         facts
+    }
+
+    /// The estimated cost of laying this text out and planning it ([`budget::layout`]).
+    pub(crate) fn layout_cost(&self) -> f64 {
+        budget::layout(
+            self.chars,
+            self.non_ascii,
+            self.changes + self.brackets,
+            self.lines,
+        )
     }
 
     /// The estimated bytes of this text's layout and plan. A line break counts as a line, not
@@ -175,10 +208,13 @@ impl Facts {
 /// segment breaks are at the text's level; marks go with the character before them. Explicit
 /// embeddings, overrides and isolates count as a split each. A test checks this against the
 /// runs parley lays out (`changes_are_where_parley_starts_a_run`).
+///
+/// Paired brackets are counted apart (see [`Facts::brackets`]).
 struct Splits {
     ascii: &'static [Class; 128],
     /// The text's direction is right-to-left.
     rtl: bool,
+    brackets: Brackets,
     /// The level of the text's direction.
     base_level: u8,
     /// The level of left-to-right letters.
@@ -197,12 +233,23 @@ struct Splits {
     last: Option<Class>,
 }
 
+/// Paired brackets so far, and whether a character that can make a right-to-left level came:
+/// right-to-left, an Arabic digit or an explicit embedding, override or isolate. Only then can
+/// the brackets start runs ([`Facts::brackets`]).
+#[derive(Default)]
+struct Brackets {
+    count: usize,
+    rtl: bool,
+}
+
 /// What [`Splits`] needs to know of a character.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Class {
     /// Its script, unless it takes the script of the text around it.
     script: Option<Script>,
     bidi: Bidi,
+    /// It is a paired bracket.
+    bracket: bool,
 }
 
 /// Bidi classes, as far as [`Splits`] tells them apart.
@@ -248,10 +295,15 @@ impl Class {
             | BidiClass::PopDirectionalIsolate => Bidi::Explicit,
             _ => Bidi::Neutral,
         };
+        let bracket = const { CodePointMapData::<BidiMirroringGlyph>::new() }
+            .get(c)
+            .paired_bracket_type
+            != BidiPairedBracketType::None;
         Self {
             script: (!matches!(script, Script::Common | Script::Inherited | Script::Unknown))
                 .then_some(script),
             bidi,
+            bracket,
         }
     }
 }
@@ -282,6 +334,7 @@ impl Splits {
         Self {
             ascii,
             rtl,
+            brackets: Brackets::default(),
             base_level: u8::from(rtl),
             ltr_level: if rtl { 2 } else { 0 },
             count: 0,
@@ -296,6 +349,8 @@ impl Splits {
     /// Takes the next character of the text.
     fn push(&mut self, c: char) {
         let class = class(self.ascii, c);
+        self.brackets.count += usize::from(class.bracket);
+        self.brackets.rtl |= matches!(class.bidi, Bidi::Rtl | Bidi::Arabic | Bidi::Explicit);
         if self.last.replace(class) == Some(class) && class.bidi != Bidi::Explicit {
             return;
         }
@@ -358,12 +413,18 @@ impl Splits {
         level
     }
 
-    /// The splits in the whole text.
-    fn finish(mut self) -> usize {
+    /// The splits in the whole text, and its paired brackets if it holds a character that can
+    /// make a right-to-left level ([`Facts::brackets`]).
+    fn finish(mut self) -> (usize, usize) {
         if self.neutrals {
             self.neutrals_before(self.rtl);
         }
-        self.count
+        let brackets = if self.brackets.rtl {
+            self.brackets.count
+        } else {
+            0
+        };
+        (self.count, brackets)
     }
 }
 
@@ -798,6 +859,7 @@ impl TextShaper {
             FontFamilyName::named(self.family),
         )));
         builder.push_default(StyleProperty::FontSize(LAYOUT_EM));
+        builder.push_default(FontFeatures::from(&FEATURES_OFF));
         let mut layout = builder.build(text);
         layout.break_all_lines(None);
         layout.align(Alignment::Start, AlignmentOptions::default());
@@ -902,6 +964,70 @@ mod tests {
             let runs = shaper.shaped(key, text).unwrap().plan.glyph_runs();
             assert_eq!(facts.changes + 1, runs as usize, "{text:?}");
         }
+    }
+
+    /// Every character shows as its own glyph, the same whatever is around it ([`FEATURES_OFF`]).
+    #[test]
+    fn characters_show_as_themselves_whatever_is_around_them() {
+        let mut glyphs = GlyphTable::new();
+        let mut shaper = TextShaper::new();
+        let mut ids = |text: &str| {
+            lay_out(&mut shaper, &mut glyphs, text);
+            let key = shaper.key(text);
+            let layout = &shaper.shaped(key, text).unwrap().layout;
+            let mut ids = Vec::new();
+            for line in layout.lines() {
+                for item in line.items() {
+                    if let PositionedLayoutItem::GlyphRun(run) = item {
+                        ids.extend(run.positioned_glyphs().map(|glyph| glyph.id));
+                    }
+                }
+            }
+            ids
+        };
+        // No arrows from `->` or `=>`.
+        assert_eq!(ids("a->b=>c<-d").len(), 10);
+        // No raised brackets next to capitals, or `:` between digits.
+        let (lower, upper) = (ids("(a)"), ids("(A)"));
+        assert_eq!((lower[0], lower[2]), (upper[0], upper[2]));
+        assert_eq!(ids("12:30")[2], ids("a:")[1]);
+        // No small digits around a fraction slash.
+        assert_eq!(ids("1\u{2044}2")[0], ids("1")[0]);
+    }
+
+    /// In a text with a right-to-left character, the bidi algorithm resolves pairs of brackets on
+    /// their own, which can start more runs than `changes` counts: each paired bracket counts as
+    /// one more.
+    #[test]
+    fn paired_brackets_in_right_to_left_text_count_as_changes() {
+        let mut glyphs = GlyphTable::new();
+        let mut shaper = TextShaper::new();
+        let runs = |shaper: &mut TextShaper, glyphs: &mut GlyphTable, text: &str| {
+            lay_out(shaper, glyphs, text);
+            let key = shaper.key(text);
+            shaper.shaped(key, text).unwrap().plan.glyph_runs() as usize
+        };
+        let nested = "\u{5D0}((a))b".repeat(50);
+        let facts = Facts::of(&nested);
+        let laid_out = runs(&mut shaper, &mut glyphs, &nested);
+        assert!(laid_out > facts.changes + 1, "{laid_out} runs, {facts:?}");
+        for text in [
+            nested.as_str(),
+            "a [\u{5D0}] {b} (\u{661}) \u{2329}c\u{232A}",
+            "\u{627} (x) \u{FF08}y\u{FF09}",
+            "x\u{202B}(a)\u{202C}",
+        ] {
+            let facts = Facts::of(text);
+            assert!(facts.brackets > 0, "{text:?}");
+            let laid_out = runs(&mut shaper, &mut glyphs, text);
+            assert!(
+                laid_out <= facts.changes + facts.brackets + 1,
+                "{text:?}: {laid_out} runs, {facts:?}"
+            );
+        }
+        // Without a right-to-left character, brackets split nothing.
+        assert_eq!(Facts::of("f(g(x)) [a] {b} \u{6F22}(c)").brackets, 0);
+        assert_eq!(Facts::of("f(x) \u{5D0}").brackets, 2);
     }
 
     #[test]

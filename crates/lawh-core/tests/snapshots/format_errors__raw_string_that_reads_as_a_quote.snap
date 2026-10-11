@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:20: Single-line raw strings cannot look like multi-line ones (Consider using a regular escaped string if all you want is a single quote: "\"")

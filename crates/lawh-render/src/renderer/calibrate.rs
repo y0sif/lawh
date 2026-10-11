@@ -483,10 +483,17 @@ const WORDS: &str = "lorem ipsum dolor sit amet consectetur adipiscing elit sed 
 
 /// Kinds of text, as the alphabets they cycle through: the costliest ones lawh-core's text caps
 /// were measured with (`text_caps_worst_cases` in `tests/bench.rs`) and plainer ones.
-const TEXT_KINDS: [(&str, &str); 14] = [
+const TEXT_KINDS: [(&str, &str); 20] = [
     ("words", WORDS),
     ("one word", "x"),
+    ("greek", "αβγδε ζηθικ λμνξο "),
     ("digits and punctuation", "1,2.3;4:5!6?"),
+    // Brackets and the like, the costliest ASCII text to lay out while the font's contextual
+    // alternates were on (`crate::text`).
+    ("closing parens", ")"),
+    ("closing braces", "}"),
+    ("letter and paren", "a)"),
+    ("math source", "f(g(h(x)))+(a+b)*(c-d) "),
     ("spaces", " "),
     ("cjk", "漢字仮名交じり文"),
     (
@@ -495,6 +502,8 @@ const TEXT_KINDS: [(&str, &str); 14] = [
     ),
     ("bidi", "ab אב "),
     ("bidi per char", "aא"),
+    // Brackets in right-to-left text: the bidi algorithm pairs them, which splits runs.
+    ("hebrew and brackets", "א((a))b"),
     ("scripts per char", "aαа漢ا"),
     ("arabic", "سلام عليكم "),
     // The script and the direction changing at every character, within one 128-code-point
@@ -591,8 +600,7 @@ fn calibrate_text_layout() {
                     shaper.known(key, &texts[0])
                 };
                 let facts = known.facts;
-                let estimate =
-                    budget::layout(facts.chars, facts.non_ascii, facts.changes, facts.lines) / 1e6;
+                let estimate = facts.layout_cost() / 1e6;
                 // Two to warm up, then the median of seven.
                 let mut times: Vec<Duration> = texts
                     .drain(..)
@@ -607,8 +615,8 @@ fn calibrate_text_layout() {
                 times.sort();
                 rows.add(
                     &format!(
-                        "lay out {kind}, {shape}: {} chars {} changes {} lines",
-                        facts.chars, facts.changes, facts.lines
+                        "lay out {kind}, {shape}: {} chars {} changes {} brackets {} lines",
+                        facts.chars, facts.changes, facts.brackets, facts.lines
                     ),
                     estimate,
                     ms(times[times.len() / 2]),

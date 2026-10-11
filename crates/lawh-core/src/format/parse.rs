@@ -9,8 +9,10 @@
 //! - A slashdash `/-` may not apply to another slashdash.
 //!
 //! It rejects a few exotic forms that kdl accepts (`/- /-`, a keyword running straight into the
-//! next token) and never accepts text kdl rejects. Property tests below compare the two on random
-//! documents, values included.
+//! next token) and accepts one text kdl rejects: a slashdashed multi-line raw string that reads as
+//! a lone `"`. kdl rejects every raw string that does, where KDL v2 only forbids the single-line
+//! `#"""#`; lawh's kdl-based reader did too, except where slashdashed, which it never showed kdl.
+//! Property tests below compare the two on random documents, values included.
 //!
 //! Every cap is checked while reading, so the time and memory a file costs follow what a board
 //! holds, not the length of the file:
@@ -287,6 +289,8 @@ pub(super) struct Parser<'a> {
     pos: usize,
     /// Nodes started so far, the header included.
     nodes: usize,
+    /// Reading a slashdashed node or entry.
+    dropped: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -300,6 +304,7 @@ impl<'a> Parser<'a> {
             src,
             pos: bom,
             nodes: 0,
+            dropped: false,
         }
     }
 
@@ -460,8 +465,16 @@ impl<'a> Parser<'a> {
             }
             self.pos += 2;
             while self.line_space()? {}
-            self.node(false)?;
+            self.dropping(|p| p.node(false))?;
         }
+    }
+
+    /// Runs `read` on a slashdashed node or entry.
+    fn dropping<T>(&mut self, read: impl FnOnce(&mut Self) -> Step<T>) -> Step<T> {
+        let outer = std::mem::replace(&mut self.dropped, true);
+        let result = read(self);
+        self.dropped = outer;
+        result
     }
 
     /// `;`, a newline or a line comment after a node.
@@ -525,7 +538,7 @@ impl<'a> Parser<'a> {
                         // kdl accepts this, recursing once per `/-`.
                         return self.error(self.pos, "`/-` cannot follow another `/-`", None);
                     }
-                    self.entry(false)?;
+                    self.dropping(|p| p.entry(false))?;
                 }
                 Some(_) => {
                     let Some(n) = node.as_mut() else {
@@ -997,11 +1010,7 @@ impl<'a> Parser<'a> {
                 None => return self.error(start, "unclosed raw string", None),
                 Some('"') if self.closes_raw(self.pos, hashes) => {
                     if self.src.get(body..self.pos) == Some("\"") {
-                        return self.error(
-                            start,
-                            "Single-line raw strings cannot look like multi-line ones",
-                            None,
-                        );
+                        return self.lone_quote(start);
                     }
                     self.pos += 1 + hashes;
                     self.check_length(start)?;
@@ -1017,6 +1026,18 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    /// kdl's error for the raw string at byte `start`, which reads as a lone `"`.
+    fn lone_quote<T>(&self, start: usize) -> Step<T> {
+        self.error(
+            start,
+            "Single-line raw strings cannot look like multi-line ones",
+            Some(
+                "Consider using a regular escaped string if all you want is a single quote: \
+                 \"\\\"\"",
+            ),
+        )
     }
 
     /// True when `"` and `hashes` times `#` start at byte `at`.
@@ -1048,6 +1069,23 @@ impl<'a> Parser<'a> {
         let body = self.pos;
         let (close, indent, quotes) = self.closing_line(start, raw)?;
         let prefix = self.src.get(close..indent).unwrap_or_default();
+        // kdl rejects a multi-line raw string that reads as a lone `"`, as it does a single-line
+        // one: one line of the spaces, `"` and a line break. A slashdashed one is read, as lawh's
+        // kdl-based reader did (see the module docs).
+        let after = body + prefix.len() + 1;
+        if raw.is_some()
+            && !self.dropped
+            && self
+                .src
+                .get(body..after)
+                .and_then(|l| l.strip_prefix(prefix))
+                == Some("\"")
+            && self
+                .newline_at(after)
+                .is_some_and(|len| after + len == close)
+        {
+            return self.lone_quote(start);
+        }
         self.pos = body;
         let mut text = Builder::new(keep);
         while self.pos < close {
@@ -1607,6 +1645,71 @@ mod tests {
         }
     }
 
+    /// A raw string that reads as a lone `"`, on one line or several, is rejected where kdl
+    /// rejects it, with kdl's message. A slashdashed multi-line one is read, as lawh's kdl-based
+    /// reader read it (see the module docs).
+    #[test]
+    fn raw_strings_that_read_as_a_quote() {
+        let quote = "#\"\"\"\n\"\n\"\"\"#";
+        for src in [
+            format!("n {quote}"),
+            format!("n x={quote}"),
+            format!("n {quote}=1"),
+            format!("{quote} x"),
+            format!("n ({quote})1"),
+            format!("lawh version=1\ntext id=t x=0 y=0 {quote}"),
+            "n #\"\"\"\n  \"\n  \"\"\"#".to_owned(),
+            "n ##\"\"\"\r\n\t\"\r\n\t\"\"\"##".to_owned(),
+            "n #\"\"\"\u{2028}\"\u{85}\"\"\"#".to_owned(),
+            "n #\"\"\"#".to_owned(),
+            "/-n #\"\"\"#".to_owned(),
+            "n /-#\"\"\"#".to_owned(),
+        ] {
+            let kdl = KdlDocument::parse_v2(&src).unwrap_err();
+            let kdl = &kdl.diagnostics[0];
+            let Err(Stop::Error(FormatError::Syntax {
+                line,
+                column,
+                message,
+                ..
+            })) = read(&src)
+            else {
+                panic!("{src:?}: {:?}", read(&src));
+            };
+            assert_eq!(
+                (line, column),
+                line_column(&src, kdl.span.offset()),
+                "{src:?}"
+            );
+            assert_eq!(Some(message), kdl.message.clone(), "{src:?}");
+        }
+        for src in [
+            format!("/-n {quote}"),
+            format!("/-n ({quote})1 {quote}=2"),
+            format!("n /-{quote}"),
+            format!("n /-x={quote} y"),
+            // kdl calls this one an invalid node name, at the raw string.
+            format!("/-{quote} \"/*\"\r\n"),
+        ] {
+            assert!(KdlDocument::parse_v2(&src).is_err(), "{src:?}");
+            assert!(matches!(read(&src), Ok(Read::All(_))), "{src:?}");
+            agree_with_kdl(&src).unwrap();
+        }
+        // Text around the `"`, or more lines, is not a lone `"`.
+        for src in [
+            "n #\"\"\"\n\"\n\n\"\"\"#",
+            "n #\"\"\"\n\n\"\n\"\"\"#",
+            "n #\"\"\"\n\" \n\"\"\"#",
+            "n #\"\"\"\n   \"\n  \"\"\"#",
+            "n #\"\"\"\n\"\"\n\"\"\"#",
+            "n \"\"\"\n\\\"\n\"\"\"",
+            "n \"\"\"\n\"\n\"\"\"",
+        ] {
+            assert!(KdlDocument::parse_v2(src).is_ok(), "{src:?}");
+            agree_with_kdl(src).unwrap();
+        }
+    }
+
     /// Flat KDL that hand-written files may use.
     #[test]
     fn flat_kdl_is_read_as_kdl_reads_it() {
@@ -1789,6 +1892,8 @@ mod tests {
         "\"\"\"\n \\\n \"\"\"",
         "#\"a\"##",
         "#\"\"#",
+        "#\"\"\"\n\"\n\"\"\"#",
+        "##\"\"\"\r\n  \"\r\n  \"\"\"##",
     ];
 
     /// Random pieces, mostly invalid, or flat documents with at most one random piece spliced in.
@@ -1883,6 +1988,7 @@ mod tests {
                 "  ",
                 "\\s",
                 "\"\"x",
+                "\"",
             ][..],
         );
         let newline = prop::sample::select(&["\n", "\r\n", "\u{85}", "\u{2028}"][..]);
@@ -1907,23 +2013,24 @@ mod tests {
             })
     }
 
+    /// Node and property names for [`flat_document`], besides quoted strings.
+    const NAMES: &[&str] = &[
+        "a",
+        "node",
+        "x",
+        "\"k\"",
+        "#\"r\"#",
+        "-",
+        ".a",
+        "é",
+        "\"\"\"\n  n\n  \"\"\"",
+        "#\"\"\"\n\"\n\"\"\"#",
+    ];
+
     fn flat_document() -> impl Strategy<Value = String> {
         let name = || {
             prop_oneof![
-                4 => prop::sample::select(
-                    &[
-                        "a",
-                        "node",
-                        "x",
-                        "\"k\"",
-                        "#\"r\"#",
-                        "-",
-                        ".a",
-                        "é",
-                        "\"\"\"\n  n\n  \"\"\"",
-                    ][..],
-                )
-                .prop_map(str::to_owned),
+                4 => prop::sample::select(NAMES).prop_map(str::to_owned),
                 1 => quoted(),
             ]
         };
@@ -1944,6 +2051,7 @@ mod tests {
                     "##\"a\"#\"##",
                     "\"\"\"\n  v\n  \"\"\"",
                     "#\"\"\"\n r\n \"\"\"#",
+                    "#\"\"\"\n \"\n \"\"\"#",
                     "b",
                     "-inf",
                     "(t)1",
@@ -2024,26 +2132,76 @@ mod tests {
             })
     }
 
+    /// The length of the multi-line raw string at the start of `s` if it reads as a lone `"`:
+    /// hashes and `"""`, a line of spaces and `"`, then the same spaces, `"""` and hashes.
+    fn lone_quote_len(s: &str) -> Option<usize> {
+        let newline = |at: usize| {
+            [
+                "\r\n", "\n", "\r", "\u{B}", "\u{C}", "\u{85}", "\u{2028}", "\u{2029}",
+            ]
+            .into_iter()
+            .find(|n| s[at..].starts_with(n))
+            .map(str::len)
+        };
+        let hashes = s.len() - s.trim_start_matches('#').len();
+        let mut at = hashes + 3;
+        if hashes == 0 || s.get(hashes..at) != Some("\"\"\"") {
+            return None;
+        }
+        at += newline(at)?;
+        let line = &s[at..];
+        let prefix = &line[..line.len() - line.trim_start_matches(is_space).len()];
+        at += prefix.len();
+        at += s[at..].starts_with('"').then_some(1)?;
+        at += newline(at)?;
+        let close = format!("{prefix}\"\"\"{}", "#".repeat(hashes));
+        s[at..].starts_with(&close).then_some(at + close.len())
+    }
+
+    /// What kdl reads of `src`, with each multi-line raw string that reads as a lone `"` and that
+    /// kdl stops at swapped for a quoted string as long: kdl rejects one even where it is
+    /// slashdashed, the parser only where it is kept (see the module docs). The parser never reads
+    /// the swapped text from the raw string, so the two can't agree on a kept one.
+    fn kdl_read(src: &str) -> Result<KdlDocument, kdl::KdlError> {
+        let mut src = src.to_owned();
+        loop {
+            let read = KdlDocument::parse_v2(&src);
+            // kdl's message depends on where the string is, but its span starts at the string.
+            let lone_quote = (read.as_ref().err())
+                .into_iter()
+                .flat_map(|e| &e.diagnostics)
+                .find_map(|d| {
+                    let at = d.span.offset();
+                    lone_quote_len(src.get(at..)?).map(|len| at..at + len)
+                });
+            let Some(span) = lone_quote else {
+                return read;
+            };
+            let swap = format!("\"{}\"", "x".repeat(span.len() - 2));
+            src.replace_range(span, &swap);
+        }
+    }
+
     /// What kdl reads of the text before a children block whose `{` is at byte `brace`: up to
     /// the brace, or, when that ends in a slashdash that drops the block, up to the slashdash.
     fn kdl_before(src: &str, brace: usize) -> Result<KdlDocument, kdl::KdlError> {
-        KdlDocument::parse_v2(&src[..brace]).or_else(|e| {
+        kdl_read(&src[..brace]).or_else(|e| {
             src[..brace]
                 .rfind("/-")
-                .map_or(Err(e), |dash| KdlDocument::parse_v2(&src[..dash]))
+                .map_or(Err(e), |dash| kdl_read(&src[..dash]))
         })
     }
 
     /// The parser and kdl agree on `src`: whatever the parser reads, kdl reads the same, values
     /// included, and whatever flat KDL kdl reads, the parser reads too. The exceptions are
-    /// slashdash chains, which the parser rejects, and keywords glued to what follows: kdl does
+    /// slashdash chains, which the parser rejects, keywords glued to what follows (kdl does
     /// not check the end of a keyword, so it reads `/-a #true"s"` as a dropped node `a #true`,
-    /// then a node `"s"`.
+    /// then a node `"s"`), and slashdashed raw strings that read as a lone `"` ([`kdl_read`]).
     fn agree_with_kdl(src: &str) -> Result<(), TestCaseError> {
         let ours = read(src);
         match &ours {
             Ok(Read::All(nodes)) => {
-                let kdl = KdlDocument::parse_v2(src);
+                let kdl = kdl_read(src);
                 prop_assert!(kdl.is_ok(), "the parser read {:?}, kdl: {:?}", src, kdl);
                 if let Ok(kdl) = kdl {
                     prop_assert_eq!(outline(nodes), outline_kdl(&kdl), "{:?}", src);

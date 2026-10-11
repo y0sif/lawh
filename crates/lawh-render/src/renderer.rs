@@ -574,8 +574,7 @@ impl Renderer {
                 // The same text again, laid out above.
                 continue;
             }
-            let facts = known.facts;
-            let cost = budget::layout(facts.chars, facts.non_ascii, facts.changes, facts.lines);
+            let cost = known.facts.layout_cost();
             if first {
                 budget.charge(cost);
             } else if !budget.spend(cost) {

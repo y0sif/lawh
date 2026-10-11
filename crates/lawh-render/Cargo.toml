@@ -15,7 +15,7 @@ publish.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
-icu_properties.workspace = true
+icu_properties = { workspace = true, features = ["compiled_data"] }
 kurbo.workspace = true
 lawh-core.workspace = true
 lawh-math.workspace = true
