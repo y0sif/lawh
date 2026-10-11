@@ -1217,6 +1217,63 @@ mod tests {
     }
 
     #[test]
+    fn a_pushed_out_layout_no_longer_asked_for_is_not_compiled_again() {
+        let one = one_glyph_bytes();
+        // Wanted for far less than the cooldown: by the time it has cooled down, a formula asked
+        // for once is no longer wanted.
+        let (cooldown, wanted_for) = (Duration::from_millis(400), Duration::from_millis(40));
+        let engine = MathEngine::new().with_cache_limits(CacheLimits {
+            layout_bytes: one + one / 2,
+            cooldown,
+            wanted_for,
+            ..CacheLimits::DEFAULT
+        });
+        let rx = with_waker(&engine);
+        // Laid out by the queue thread, which keeps running.
+        assert_eq!(engine.request("x"), MathStatus::Pending);
+        woken(&rx);
+        // `y`, laid out on this thread, pushes `x` out, and `x` is asked for once, at once.
+        engine.layout("y").unwrap();
+        assert!(matches!(engine.request("x"), MathStatus::Evicted(_)));
+        // Never asked for again: the waker isn't called, well past the cooldown and
+        // `wanted_for`, and `x` isn't compiled again, being compiled or wanted (however slow
+        // a compile is).
+        assert!(
+            rx.recv_timeout(cooldown * 2 + wanted_for).is_err(),
+            "the waker was called"
+        );
+        let mut state = engine.shared.lock();
+        assert_eq!(state.compiles, 2);
+        assert_eq!(state.current, None);
+        assert_eq!(state.recompile(Instant::now()), None);
+        assert!(state.wanted.is_empty());
+    }
+
+    #[test]
+    fn a_full_wanted_set_forgets_the_formula_asked_for_longest_ago() {
+        let mut state = State::new(CacheLimits {
+            records: 3,
+            ..CacheLimits::DEFAULT
+        });
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let wanted = |state: &State| {
+            let mut wanted: Vec<String> = state.wanted.keys().cloned().collect();
+            wanted.sort_unstable();
+            wanted
+        };
+        for (src, ms) in [("a", 0), ("b", 1), ("c", 2)] {
+            assert!(state.want(src, at(ms)), "{src}");
+        }
+        // Asking for `a` again leaves `b` asked for longest ago.
+        assert!(!state.want("a", at(3)));
+        assert!(state.want("d", at(4)));
+        assert_eq!(wanted(&state), ["a", "c", "d"]);
+        assert!(state.want("e", at(5)));
+        assert_eq!(wanted(&state), ["a", "d", "e"]);
+    }
+
+    #[test]
     fn formulas_that_do_not_fit_in_the_cache_are_compiled_again_at_a_bounded_rate() {
         // Twenty formulas, only a quarter of which fit in the cache together, as forty formulas
         // at the complexity caps don't fit in `MAX_CACHED_LAYOUT_BYTES`. Asked for over and

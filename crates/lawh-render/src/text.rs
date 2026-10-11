@@ -125,7 +125,7 @@ pub(crate) struct Facts {
     /// Characters outside ASCII, which cost more to lay out.
     pub(crate) non_ascii: usize,
     /// Places where parley starts another run to shape within a line, because the script or
-    /// the bidi level changes there ([`Splits`]): what makes laying text out costly.
+    /// the bidi level changes there, or may ([`Splits`]): what makes laying text out costly.
     pub(crate) changes: usize,
     /// Paired brackets (`Bidi_Paired_Bracket`, such as `(` and `]`) when the text holds a
     /// character that can make a right-to-left level ([`Brackets`]), else 0. The bidi algorithm
@@ -200,22 +200,25 @@ impl Facts {
 ///
 /// As in parley, characters of no particular script (spaces, digits, punctuation, combining
 /// marks) take the script before them. Bidi levels follow the bidi algorithm for a text without
-/// explicit embeddings, in short: the text's direction is that of its first strong character;
-/// left-to-right letters are at level 0 in a left-to-right text and 2 in a right-to-left one,
-/// right-to-left letters at 1, Arabic digits at 2, and European digits go with left-to-right
-/// letters before them, else are at 2. Neutral characters between two of the same direction
-/// (digits at 2 count as right-to-left) take that direction, the others the text's; line and
-/// segment breaks are at the text's level; marks go with the character before them. Explicit
-/// embeddings, overrides and isolates count as a split each. A test checks this against the
-/// runs parley lays out (`changes_are_where_parley_starts_a_run`).
+/// explicit embeddings, in short: the text's direction is that of its first strong character
+/// outside isolates; left-to-right letters are at level 0 in a left-to-right text and 2 in a
+/// right-to-left one, right-to-left letters at 1, Arabic digits at 2, and European digits go
+/// with left-to-right letters before them, else are at 2. Neutral characters between two of the
+/// same direction (digits at 2 count as right-to-left) take that direction, the others the
+/// text's; line and segment breaks are at the text's level; marks go with the character before
+/// them. A test checks this against the runs parley lays out
+/// (`changes_are_where_parley_starts_a_run`).
+///
+/// Explicit embeddings, overrides and isolates (U+202A to U+202E, U+2066 to U+2069) aren't
+/// modelled: after one, letters stay at its level but a segment break goes back to the text's
+/// (bidi rule L1), and so on. From the first of them on, every character counts as a split, the
+/// most a character can split. Real text almost never holds these characters.
 ///
 /// Paired brackets are counted apart (see [`Facts::brackets`]).
 struct Splits {
     ascii: &'static [Class; 128],
-    /// The text's direction is right-to-left.
-    rtl: bool,
     brackets: Brackets,
-    /// The level of the text's direction.
+    /// The level of the text's direction: 1 for right-to-left, else 0.
     base_level: u8,
     /// The level of left-to-right letters.
     ltr_level: u8,
@@ -231,6 +234,9 @@ struct Splits {
     /// The class of the last character, once there is one: another of the same class splits
     /// nothing.
     last: Option<Class>,
+    /// An explicit embedding, override or isolate came: every character from it on counts as a
+    /// split.
+    explicit: bool,
 }
 
 /// Paired brackets so far, and whether a character that can make a right-to-left level came:
@@ -323,17 +329,30 @@ fn class(ascii: &[Class; 128], c: char) -> Class {
 impl Splits {
     fn new(text: &str) -> Self {
         let ascii = &*ASCII;
+        // As in parley, strong characters between an isolate and its end (or the end of the
+        // text) don't count (bidi rule P2).
+        let mut isolates = 0_usize;
         let rtl = text
             .chars()
-            .find_map(|c| match class(ascii, c).bidi {
-                Bidi::Ltr => Some(false),
-                Bidi::Rtl => Some(true),
-                _ => None,
+            .find_map(|c| match c {
+                '\u{2066}'..='\u{2068}' => {
+                    isolates += 1;
+                    None
+                }
+                '\u{2069}' => {
+                    isolates = isolates.saturating_sub(1);
+                    None
+                }
+                _ if isolates > 0 => None,
+                _ => match class(ascii, c).bidi {
+                    Bidi::Ltr => Some(false),
+                    Bidi::Rtl => Some(true),
+                    _ => None,
+                },
             })
             .unwrap_or(false);
         Self {
             ascii,
-            rtl,
             brackets: Brackets::default(),
             base_level: u8::from(rtl),
             ltr_level: if rtl { 2 } else { 0 },
@@ -343,6 +362,7 @@ impl Splits {
             neutrals: false,
             strong_ltr: !rtl,
             last: None,
+            explicit: false,
         }
     }
 
@@ -351,7 +371,11 @@ impl Splits {
         let class = class(self.ascii, c);
         self.brackets.count += usize::from(class.bracket);
         self.brackets.rtl |= matches!(class.bidi, Bidi::Rtl | Bidi::Arabic | Bidi::Explicit);
-        if self.last.replace(class) == Some(class) && class.bidi != Bidi::Explicit {
+        if self.explicit {
+            self.count += 1;
+            return;
+        }
+        if self.last.replace(class) == Some(class) {
             return;
         }
         let new_script = class
@@ -368,14 +392,15 @@ impl Splits {
             }
             Bidi::European if self.strong_ltr => (self.ltr_level, false),
             Bidi::European | Bidi::Arabic => (2, true),
-            Bidi::Break => (self.base_level, self.rtl),
+            Bidi::Break => (self.base_level, self.rtl()),
             Bidi::Attached if !self.neutrals && self.before.is_some() => {
                 self.count += usize::from(new_script);
                 return;
             }
+            // The first explicit code: it and every character after it count.
             Bidi::Explicit => {
                 self.count += 1;
-                self.neutrals = true;
+                self.explicit = true;
                 return;
             }
             Bidi::Attached | Bidi::Neutral => {
@@ -396,10 +421,15 @@ impl Splits {
         self.neutrals = false;
     }
 
+    /// The text's direction is right-to-left.
+    fn rtl(&self) -> bool {
+        self.base_level == 1
+    }
+
     /// Settles the neutral characters before one resolved to `next_rtl` (or the end of the
     /// text): counts the split at the first of them, and returns their level.
     fn neutrals_before(&mut self, next_rtl: bool) -> u8 {
-        let before_rtl = self.before.map_or(self.rtl, |(_, rtl)| rtl);
+        let before_rtl = self.before.map_or(self.rtl(), |(_, rtl)| rtl);
         let level = if before_rtl != next_rtl {
             self.base_level
         } else if next_rtl {
@@ -417,7 +447,7 @@ impl Splits {
     /// make a right-to-left level ([`Facts::brackets`]).
     fn finish(mut self) -> (usize, usize) {
         if self.neutrals {
-            self.neutrals_before(self.rtl);
+            self.neutrals_before(self.rtl());
         }
         let brackets = if self.brackets.rtl {
             self.brackets.count
@@ -891,6 +921,13 @@ mod tests {
         shaper.known(key, text)
     }
 
+    /// The glyph runs parley lays `text` out in.
+    fn glyph_runs(shaper: &mut TextShaper, glyphs: &mut GlyphTable, text: &str) -> usize {
+        lay_out(shaper, glyphs, text);
+        let key = shaper.key(text);
+        shaper.shaped(key, text).unwrap().plan.glyph_runs() as usize
+    }
+
     /// `n` characters of `alphabet` after `tag`, in lines of `per_line` characters.
     fn cycled(tag: usize, n: usize, per_line: usize, alphabet: &str) -> String {
         let mut out = format!("{tag} ");
@@ -959,11 +996,56 @@ mod tests {
             "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{FE0F} family",
         ] {
             let facts = Facts::of(text);
-            lay_out(&mut shaper, &mut glyphs, text);
-            let key = shaper.key(text);
-            let runs = shaper.shaped(key, text).unwrap().plan.glyph_runs();
-            assert_eq!(facts.changes + 1, runs as usize, "{text:?}");
+            let runs = glyph_runs(&mut shaper, &mut glyphs, text);
+            assert_eq!(facts.changes + 1, runs, "{text:?}");
         }
+
+        // From an explicit embedding, override or isolate on, every character counts, which is
+        // no fewer than the runs parley starts. In a right-to-left embedding or isolate, letters
+        // stay at its level and a tab goes back to the text's (bidi rule L1): a run each.
+        let mut texts: Vec<String> = ['\u{202B}', '\u{2067}']
+            .into_iter()
+            .map(|code| {
+                let mut text = String::from(code);
+                text.extend("a\t".chars().cycle().take(4995));
+                text
+            })
+            .collect();
+        // Strong characters in an isolate don't set the text's direction: this one is
+        // right-to-left, so its digits and spaces take turns.
+        texts.push("1 2 3 4 5 6 \u{2066}a\u{2069}\u{5D0}".to_owned());
+        // Short texts of explicit codes, tabs, letters of both directions, digits, brackets and
+        // spaces, drawn from a fixed seed.
+        let alphabet: Vec<char> = ('\u{202A}'..='\u{202E}')
+            .chain('\u{2066}'..='\u{2069}')
+            .chain("\tab\u{5D0}\u{5D1}\u{627}12\u{661}\u{662}()[] ".chars())
+            .collect();
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut below = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % u64::try_from(n).unwrap()).unwrap()
+        };
+        texts.extend((0..4000).map(|_| {
+            let len = 1 + below(16);
+            (0..len).map(|_| alphabet[below(alphabet.len())]).collect()
+        }));
+        let mut under = Vec::new();
+        for text in &texts {
+            let facts = Facts::of(text);
+            let runs = glyph_runs(&mut shaper, &mut glyphs, text);
+            if facts.changes + facts.brackets + 1 < runs {
+                under.push(format!("{text:?}: {runs} runs, {facts:?}"));
+            }
+        }
+        assert!(
+            under.is_empty(),
+            "{} of {} texts have more runs than counted:\n{}",
+            under.len(),
+            texts.len(),
+            under.join("\n")
+        );
     }
 
     /// Every character shows as its own glyph, the same whatever is around it ([`FEATURES_OFF`]).
@@ -1002,14 +1084,9 @@ mod tests {
     fn paired_brackets_in_right_to_left_text_count_as_changes() {
         let mut glyphs = GlyphTable::new();
         let mut shaper = TextShaper::new();
-        let runs = |shaper: &mut TextShaper, glyphs: &mut GlyphTable, text: &str| {
-            lay_out(shaper, glyphs, text);
-            let key = shaper.key(text);
-            shaper.shaped(key, text).unwrap().plan.glyph_runs() as usize
-        };
         let nested = "\u{5D0}((a))b".repeat(50);
         let facts = Facts::of(&nested);
-        let laid_out = runs(&mut shaper, &mut glyphs, &nested);
+        let laid_out = glyph_runs(&mut shaper, &mut glyphs, &nested);
         assert!(laid_out > facts.changes + 1, "{laid_out} runs, {facts:?}");
         for text in [
             nested.as_str(),
@@ -1019,7 +1096,7 @@ mod tests {
         ] {
             let facts = Facts::of(text);
             assert!(facts.brackets > 0, "{text:?}");
-            let laid_out = runs(&mut shaper, &mut glyphs, text);
+            let laid_out = glyph_runs(&mut shaper, &mut glyphs, text);
             assert!(
                 laid_out <= facts.changes + facts.brackets + 1,
                 "{text:?}: {laid_out} runs, {facts:?}"

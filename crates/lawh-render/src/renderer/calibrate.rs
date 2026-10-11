@@ -483,7 +483,7 @@ const WORDS: &str = "lorem ipsum dolor sit amet consectetur adipiscing elit sed 
 
 /// Kinds of text, as the alphabets they cycle through: the costliest ones lawh-core's text caps
 /// were measured with (`text_caps_worst_cases` in `tests/bench.rs`) and plainer ones.
-const TEXT_KINDS: [(&str, &str); 20] = [
+const TEXT_KINDS: [(&str, &str); 21] = [
     ("words", WORDS),
     ("one word", "x"),
     ("greek", "αβγδε ζηθικ λμνξο "),
@@ -512,6 +512,9 @@ const TEXT_KINDS: [(&str, &str); 20] = [
     // The bidi level changing at every character, in one script: an Arabic letter and an
     // Arabic-Indic digit.
     ("arabic and digits per char", "\u{627}\u{661}"),
+    // Letters in a right-to-left embedding, between tabs: the letters stay at the embedding's
+    // level and a tab goes back to the text's (bidi rule L1), so every character is a run.
+    ("embedding and tabs", "\u{202B}a\t"),
     ("emoji", "👨\u{200D}👩\u{200D}👧\u{FE0F}"),
     // Lines of nothing but their tag: every character a line break.
     ("newlines", "\n"),
@@ -519,7 +522,9 @@ const TEXT_KINDS: [(&str, &str); 20] = [
 
 /// `n` characters (line breaks included) cycling through `alphabet`, in lines of about
 /// `per_line` characters, starting with `tag` so no two texts are the same. An alphabet of line
-/// breaks makes a line per character, as many as a text may have.
+/// breaks makes a line per character, as many as a text may have. An alphabet that starts with
+/// an explicit bidi code (U+202A to U+202E, U+2066 to U+2069) has it at the start of every line
+/// (after the tag on the first), and cycles through the rest.
 fn cycled(tag: usize, n: usize, per_line: usize, alphabet: &str) -> String {
     let mut out = format!("{tag} ");
     if alphabet == "\n" {
@@ -529,15 +534,25 @@ fn cycled(tag: usize, n: usize, per_line: usize, alphabet: &str) -> String {
         out.push_str(&"\n".repeat(breaks));
         return out;
     }
+    let lead = alphabet
+        .chars()
+        .next()
+        .filter(|c| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'));
     let mut count = out.chars().count();
     let mut column = count;
-    let mut chars = alphabet.chars().cycle();
+    let mut opened = false;
+    let mut chars = alphabet.chars().skip(usize::from(lead.is_some())).cycle();
     while count < n {
         if column + 1 >= per_line {
             out.push('\n');
             column = 0;
+            opened = false;
         } else {
-            out.push(chars.next().unwrap());
+            out.push(match lead {
+                Some(lead) if !opened => lead,
+                _ => chars.next().unwrap(),
+            });
+            opened = true;
             column += 1;
         }
         count += 1;
