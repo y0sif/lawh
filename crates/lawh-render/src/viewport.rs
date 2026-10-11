@@ -85,6 +85,21 @@ impl Viewport {
     /// Empty or degenerate bounds give zoom 1; small bounds stop at zoom 4.
     /// The centre and zoom are always finite, and the zoom above zero.
     pub fn fit(bounds: Rect, width: u16, height: u16, scale_factor: f64) -> Viewport {
+        Self::fit_with_margin(bounds, width, height, scale_factor, FIT_MARGIN_PX)
+    }
+
+    /// [`Self::fit`] with a margin of `margin_px` logical pixels (times the
+    /// scale factor) in place of its own, shrunk to a quarter of the image's
+    /// width and height when they are smaller. A margin that isn't a number at
+    /// or above zero counts as 0.
+    pub fn fit_with_margin(
+        bounds: Rect,
+        width: u16,
+        height: u16,
+        scale_factor: f64,
+        margin_px: f64,
+    ) -> Viewport {
+        let margin_px = if margin_px > 0.0 { margin_px } else { 0.0 };
         let scale_factor = if scale_factor.is_finite() && scale_factor > 0.0 {
             scale_factor
         } else {
@@ -105,7 +120,7 @@ impl Viewport {
             )
         };
         let (w, h) = (f64::from(width), f64::from(height));
-        let margin = (FIT_MARGIN_PX * scale_factor).min(w / 4.0).min(h / 4.0);
+        let margin = (margin_px * scale_factor).min(w / 4.0).min(h / 4.0);
         let unit = BASE_PX_PER_UNIT * scale_factor;
         let mut zoom = FIT_MAX_ZOOM;
         if bounds.width() > 0.0 {

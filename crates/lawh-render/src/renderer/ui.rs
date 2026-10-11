@@ -57,14 +57,13 @@ impl Renderer {
     /// Cost: the overlay is drawn after the board's budgeted work, and isn't charged to the
     /// frame's budget or counted in [`FrameStats`](crate::FrameStats). Its cost is bounded by
     /// the image, not the board: a few outlines and fills cut to the image, a caret, and at most
-    /// two status strings of [`STATUS_WINDOW_CHARS`](crate::status::STATUS_WINDOW_CHARS)
-    /// characters, laid out only when they change. Highlighting the objects of a Visual
-    /// selection has its own budget (`HIGHLIGHT_BUDGET_NS`, 3 ms of estimated work); past it the
-    /// rest of the selection isn't highlighted. Measured in release (`overlay_frame_time` in
-    /// `tests/bench.rs`, Linux `x86_64`, 2026-10-11): an everyday overlay adds 0.1 ms to a frame
-    /// at 1920x1080 and 0.2 ms at 2880x1800; the worst (a full board selected, a Visual
-    /// rectangle over the whole view, the longest command line changing every frame) 1.9 ms and
-    /// 4.2 ms.
+    /// two status strings of `STATUS_WINDOW_CHARS` characters, laid out only when they change.
+    /// Highlighting the objects of a Visual selection has its own budget (`HIGHLIGHT_BUDGET_NS`,
+    /// 3 ms of estimated work); past it the rest of the selection isn't highlighted. Measured in
+    /// release (`overlay_frame_time` in `tests/bench.rs`, Linux `x86_64`, 2026-10-11): an
+    /// everyday overlay adds 0.1 ms to a frame at 1920x1080 and 0.2 ms at 2880x1800; the worst
+    /// (a full board selected, a Visual rectangle over the whole view, the longest command line
+    /// changing every frame) 1.9 ms and 4.2 ms.
     pub fn render_with(&mut self, board: &Board, vp: &Viewport, overlay: &Overlay<'_>) -> &[u8] {
         self.draw_frame_with(board, vp, MathWait::No, Some(overlay))
     }
@@ -83,10 +82,20 @@ impl Renderer {
         self.caret_box(at, key, text, byte, false)
     }
 
-    /// The topmost object (the last in board order) whose bounds ([`Self::object_bounds`]),
-    /// grown by `tolerance` grid units on every side, hold `at`; `None` when there is none.
-    /// A few screen pixels of tolerance make thin lines easy to click. A tolerance that isn't
-    /// a number above zero counts as 0.
+    /// The object a click at `at` selects; `None` when it hits none. Each kind is hit where it
+    /// is drawn, within `tolerance` grid units:
+    ///
+    /// - a line or an arrow near its segment (not anywhere in its bounding box, which for a
+    ///   long diagonal covers much of the board);
+    /// - an ellipse inside its shape or near its outline (not in the corners of its box);
+    /// - a rectangle inside it or near its outline;
+    /// - a text or a formula in its box ([`Self::object_bounds`]).
+    ///
+    /// When several are hit, a text or a formula wins over a shape (a label inside a frame is
+    /// what the click is for), then the one covering the smallest area (a line covers none, so
+    /// it wins over the shape it crosses), then the topmost (the last in board order). A few
+    /// screen pixels of tolerance make thin lines easy to click. A tolerance that isn't a
+    /// number above zero counts as 0.
     ///
     /// Lays out only texts whose estimated bounds hold `at`.
     pub fn hit_test(&mut self, board: &Board, at: Point, tolerance: f64) -> Option<ObjectId> {
@@ -98,19 +107,41 @@ impl Renderer {
         } else {
             0.0
         };
-        let hits = |bounds: Rect| {
+        let in_box = |bounds: Rect| {
             let grown = bounds.inflate(reach, reach);
             grown.x0 <= at.x && at.x <= grown.x1 && grown.y0 <= at.y && at.y <= grown.y1
         };
-        for object in board.objects().iter().rev() {
-            // A text's estimated bounds are no smaller than its layout's, so only texts that may
-            // be hit are laid out.
-            let near = self.bounds_with(object, None, None, TextSize::Known);
-            if near.is_some_and(hits) && self.object_bounds(object).is_some_and(hits) {
-                return Some(object.id.clone());
+        let mut best: Option<(Hit, &ObjectId)> = None;
+        for object in board.objects() {
+            // Nothing outside an object's bounds grown by the tolerance can hit it. A text's
+            // estimated bounds are no smaller than its layout's, so only texts that may be hit
+            // are laid out.
+            let Some(near) = self
+                .bounds_with(object, None, None, TextSize::Known)
+                .filter(|bounds| in_box(*bounds))
+            else {
+                continue;
+            };
+            let hit = match &object.shape {
+                Shape::Line { a, b } | Shape::Arrow { a, b } => {
+                    (segment_distance(at, *a, *b) <= reach).then_some(Hit::shape(0.0))
+                }
+                Shape::Ellipse { center, rx, ry } => ellipse_hit(at, *center, *rx, *ry, reach)
+                    .then(|| Hit::shape(std::f64::consts::PI * rx.abs() * ry.abs())),
+                Shape::Rect { .. } => Some(Hit::shape(near.area().abs())),
+                Shape::Text { .. } | Shape::Math { .. } => self
+                    .object_bounds(object)
+                    .filter(|bounds| in_box(*bounds))
+                    .map(|bounds| Hit::block(bounds.area().abs())),
+            };
+            // Later objects are drawn on top, so they win a tie.
+            if let Some(hit) = hit
+                && best.is_none_or(|(best, _)| !best.beats(hit))
+            {
+                best = Some((hit, &object.id));
             }
         }
-        None
+        best.map(|(_, id)| id.clone())
     }
 
     /// Draws `overlay` over the board drawn from `seen`, cut to `clip`.
@@ -425,10 +456,125 @@ impl Renderer {
 }
 
 /// The renderer measures objects for the engine as it draws them: [`Renderer::object_bounds`].
+///
+/// A formula this renderer hasn't seen laid out yet (one still compiling, as right after
+/// `:ma ...`) is measured by its source text, as it is drawn until it compiles; its bounds
+/// change once it has. So a command that places by size right after making one (`o` in the
+/// same mapping as `:ma ...`) places by the source's size, not the formula's. This is
+/// deliberate: measuring never waits for the math engine.
 impl Measure for Renderer {
     fn bounds(&mut self, object: &Object) -> Option<Rect> {
         self.object_bounds(object)
     }
+}
+
+/// What a click hits of one object, for [`Renderer::hit_test`] to choose between the objects it
+/// hits.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Hit {
+    /// A text or a formula: these win over shapes, which often frame them.
+    block: bool,
+    /// The area the object covers, in square grid units (0 for a line or an arrow): the
+    /// smallest wins.
+    area: f64,
+}
+
+impl Hit {
+    fn shape(area: f64) -> Self {
+        Self { block: false, area }
+    }
+
+    fn block(area: f64) -> Self {
+        Self { block: true, area }
+    }
+
+    /// True when this hit wins over `other` whatever their board order.
+    fn beats(self, other: Self) -> bool {
+        if self.block != other.block {
+            return self.block;
+        }
+        self.area.total_cmp(&other.area).is_lt()
+    }
+}
+
+/// The distance from `p` to the segment from `a` to `b`, in grid units.
+fn segment_distance(p: Point, a: Point, b: Point) -> f64 {
+    let ab = b - a;
+    let length_sq = ab.hypot2();
+    let t = if length_sq > 0.0 {
+        ((p - a).dot(ab) / length_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (p - (a + ab * t)).hypot()
+}
+
+/// An ellipse whose short radius is under this fraction of its long one is hit as the segment
+/// along its long axis. The two differ by less than a millionth of the ellipse's size, far less
+/// than a pixel at any zoom that shows the whole ellipse, and the exact distance squares the
+/// ratio of the radii, which for a flatter ellipse can overflow.
+const FLAT_ELLIPSE_RATIO: f64 = 1e-6;
+
+/// Most halvings [`outside_ellipse_distance`] makes. Bisection on an `f64` interval reaches
+/// two neighbouring floats within 1074 halvings (53 bits of mantissa and 1021 of exponent),
+/// the bound in Eberly's "Distance from a Point to an Ellipse"; real inputs take about 60.
+const MAX_ELLIPSE_HALVINGS: u32 = 1074;
+
+/// True when `at` is inside the ellipse at `center` with radii `rx` and `ry`, or within `reach`
+/// of its outline (all in grid units).
+fn ellipse_hit(at: Point, center: Point, rx: f64, ry: f64, reach: f64) -> bool {
+    // By symmetry, the quarter at or above 0 on both axes, with the long radius along the first.
+    let (dx, dy) = ((at.x - center.x).abs(), (at.y - center.y).abs());
+    let (long, short, along, across) = if rx.abs() >= ry.abs() {
+        (rx.abs(), ry.abs(), dx, dy)
+    } else {
+        (ry.abs(), rx.abs(), dy, dx)
+    };
+    if !(long > 0.0 && short >= long * FLAT_ELLIPSE_RATIO) {
+        // Flat (or a point): its long axis, from -long to long.
+        return (along - long).max(0.0).hypot(across) <= reach;
+    }
+    let (on_long, on_short) = (along / long, across / short);
+    if on_long * on_long + on_short * on_short <= 1.0 {
+        return true;
+    }
+    outside_ellipse_distance(long, short, along, across) <= reach
+}
+
+/// The distance from the point (`along`, `across`), outside the ellipse with radius `long`
+/// along the first axis and `short` along the second (`long >= short > 0`, both coordinates at
+/// or above 0), to the ellipse: Eberly's robust bisection ("Distance from a Point to an
+/// Ellipse, an Ellipsoid, or a Hyperellipsoid").
+fn outside_ellipse_distance(long: f64, short: f64, along: f64, across: f64) -> f64 {
+    if across <= 0.0 {
+        return along - long;
+    }
+    if along <= 0.0 {
+        return across - short;
+    }
+    let (z0, z1) = (along / long, across / short);
+    let r0 = (long / short) * (long / short);
+    let n0 = r0 * z0;
+    // The root of g(t) = (n0 / (t + r0))^2 + (z1 / (t + 1))^2 - 1 lies in [lo, hi].
+    let (mut lo, mut hi) = (z1 - 1.0, n0.hypot(z1) - 1.0);
+    let mut mid = lo;
+    for _ in 0..MAX_ELLIPSE_HALVINGS {
+        mid = lo / 2.0 + hi / 2.0;
+        if mid <= lo || mid >= hi {
+            break;
+        }
+        let (q0, q1) = (n0 / (mid + r0), z1 / (mid + 1.0));
+        let excess = q0 * q0 + q1 * q1 - 1.0;
+        if excess > 0.0 {
+            lo = mid;
+        } else if excess < 0.0 {
+            hi = mid;
+        } else {
+            break;
+        }
+    }
+    let nearest = Point::new(r0 * along / (mid + r0), across / (mid + 1.0));
+    (Point::new(along, across) - nearest).hypot()
 }
 
 /// Where a text or math block's text starts, and its text (a formula's source).
@@ -696,6 +842,79 @@ mod tests {
             (renderer.work.highlighted, renderer.work.not_highlighted),
             (3, 0)
         );
+    }
+
+    #[test]
+    fn the_distance_to_an_ellipse_matches_a_dense_sampling_of_it() {
+        let ellipses: [(f64, f64); 4] = [(4.0, 2.0), (1.0, 1.0), (100.0, 0.5), (3.0, 2.999)];
+        let points: [(f64, f64); 7] = [
+            (5.0, 0.5),
+            (0.2, 3.0),
+            (4.5, 4.5),
+            (0.0, 7.0),
+            (9.0, 0.0),
+            (101.0, 0.2),
+            (50.0, 1.0),
+        ];
+        for (long, short) in ellipses {
+            // The distance to the point at angle `t`.
+            let at = |t: f64, x: f64, y: f64| (long * t.cos() - x).hypot(short * t.sin() - y);
+            for (x, y) in points {
+                if (x / long).powi(2) + (y / short).powi(2) <= 1.0_f64 {
+                    continue;
+                }
+                // Every 1/20,000th of a turn, then 2,000 steps on each side of the nearest.
+                let coarse = std::f64::consts::TAU / 20_000.0;
+                let best = (0..20_000_u32)
+                    .map(|i| f64::from(i) * coarse)
+                    .min_by(|a, b| at(*a, x, y).total_cmp(&at(*b, x, y)))
+                    .unwrap();
+                let sampled = (0..=4000_u32)
+                    .map(|i| at(best + (f64::from(i) - 2000.0) * coarse / 2000.0, x, y))
+                    .fold(f64::INFINITY, f64::min);
+                let exact = outside_ellipse_distance(long, short, x, y);
+                assert!(
+                    (exact - sampled).abs() < 1e-6 && exact <= sampled + 1e-9,
+                    "{long}x{short} at ({x}, {y}): {exact} vs {sampled}"
+                );
+            }
+        }
+        // A flat ellipse is hit as its long axis; a point as itself.
+        assert!(ellipse_hit(
+            Point::new(5.05, 0.0),
+            Point::ZERO,
+            5.0,
+            1e-9,
+            0.1
+        ));
+        assert!(ellipse_hit(
+            Point::new(0.0, 0.09),
+            Point::ZERO,
+            5.0,
+            1e-9,
+            0.1
+        ));
+        assert!(!ellipse_hit(
+            Point::new(0.0, 0.11),
+            Point::ZERO,
+            5.0,
+            1e-9,
+            0.1
+        ));
+        assert!(ellipse_hit(
+            Point::new(0.06, 0.06),
+            Point::ZERO,
+            0.0,
+            0.0,
+            0.1
+        ));
+        assert!(!ellipse_hit(
+            Point::new(f64::NAN, 0.0),
+            Point::ZERO,
+            1.0,
+            1.0,
+            0.1
+        ));
     }
 
     #[test]

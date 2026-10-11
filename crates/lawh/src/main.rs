@@ -95,9 +95,17 @@ fn run(path: Option<&Path>, started: Instant) -> anyhow::Result<()> {
         .inspect_err(|err| tracing::warn!(%err, "no current directory; :w paths stay relative"))
         .ok();
 
-    let event_loop = EventLoop::<app::MathReady>::with_user_event()
-        .build()
-        .context("could not open a window")?;
+    let mut builder = EventLoop::<app::MathReady>::with_user_event();
+    // macOS's default menu sends Cmd+Q to its Quit item, which quits at once: the window gets
+    // no close request, so unwritten changes would be lost without a warning. Without the menu
+    // the key reaches the app, which takes it as a close request (`keys::is_close_request`).
+    // The menu's other items (Hide, Hide Others, Show All) go with it.
+    #[cfg(target_os = "macos")]
+    {
+        use winit::platform::macos::EventLoopBuilderExtMacOS as _;
+        builder.with_default_menu(false);
+    }
+    let event_loop = builder.build().context("could not open a window")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let math = math_engine()?;

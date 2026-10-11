@@ -11,9 +11,9 @@
 //! - Ctrl without Alt and a character is `<C-x>` (a letter lowercased, `Ctrl+[` is `<Esc>`).
 //! - Cmd (the Super or Windows key elsewhere) and a character is `<D-x>`.
 //!
-//! There is no app shortcut yet (M2 has none), so every chord goes to the engine. When app
-//! shortcuts come, they go through one modifier setting (Ctrl, or Cmd on macOS) as
-//! `CLAUDE.md` says, and are taken here before the engine sees the key.
+//! The one key the app takes before the engine is Cmd+Q ([`is_close_request`]); every other
+//! chord goes to the engine. When app shortcuts come, they go through one modifier setting
+//! (Ctrl, or Cmd on macOS) as `CLAUDE.md` says, and are taken before the engine sees the key.
 //!
 //! The caller drops key releases and synthetic presses (the keys winit reports as held when the
 //! window gains focus); repeats are kept, so a held `j` keeps moving.
@@ -64,6 +64,21 @@ pub fn translate(logical: &WinitKey, mods: ModifiersState, text_mode: bool) -> T
         }
         WinitKey::Dead(_) | WinitKey::Unidentified(_) => Translated::default(),
     }
+}
+
+/// True for Cmd+Q alone (`<D-q>`; Super+Q off macOS): the app takes it as a close request,
+/// as the window's close button, which warns once about unwritten changes. macOS's default
+/// menu would quit on it without any warning; lawh has no such menu (see `main`), so the key
+/// arrives here. Cmd+Shift+Q (`<D-Q>`, log out on macOS) and other chords are not it.
+pub fn is_close_request(keys: &[Key]) -> bool {
+    let cmd_q = Key::new(
+        KeyCode::Char('q'),
+        Mods {
+            cmd: true,
+            ..Mods::NONE
+        },
+    );
+    matches!(keys, [key] if *key == cmd_q)
 }
 
 /// The key for typed character `c` with `mods` held: a Ctrl or Cmd chord, or the character
@@ -235,6 +250,28 @@ mod tests {
                 assert_eq!(parse_keys(want).unwrap(), got.keys, "{want}");
             }
         }
+    }
+
+    #[test]
+    fn cmd_q_alone_is_a_close_request() {
+        for text_mode in [false, true] {
+            let keys = |logical: &WinitKey, mods| translate(logical, mods, text_mode).keys;
+            assert!(is_close_request(&keys(&ch("q"), SUPER)));
+            for (logical, mods) in [
+                (ch("q"), NONE),
+                (ch("q"), CTRL),
+                (ch("Q"), SUPER | SHIFT),
+                (ch("q"), SUPER | CTRL),
+                (ch("w"), SUPER),
+                (ch("qq"), SUPER),
+            ] {
+                assert!(
+                    !is_close_request(&keys(&logical, mods)),
+                    "{logical:?} {mods:?}"
+                );
+            }
+        }
+        assert!(is_close_request(&parse_keys("<D-q>").unwrap()));
     }
 
     #[test]

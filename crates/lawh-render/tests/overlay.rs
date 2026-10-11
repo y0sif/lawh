@@ -220,6 +220,145 @@ fn a_thin_line_is_hit_within_the_tolerance() {
     }
 }
 
+fn segment(name: &str, arrow: bool, a: (f64, f64), b: (f64, f64)) -> Object {
+    let (a, b) = (Point::new(a.0, a.1), Point::new(b.0, b.1));
+    let shape = if arrow {
+        Shape::Arrow { a, b }
+    } else {
+        Shape::Line { a, b }
+    };
+    Object::new(id(name), shape)
+}
+
+fn ellipse(name: &str, x: f64, y: f64, rx: f64, ry: f64) -> Object {
+    Object::new(
+        id(name),
+        Shape::Ellipse {
+            center: Point::new(x, y),
+            rx,
+            ry,
+        },
+    )
+}
+
+/// The id `hit_test` returns at `(x, y)` within `tolerance`.
+fn hit_at(
+    renderer: &mut Renderer,
+    board: &Board,
+    x: f64,
+    y: f64,
+    tolerance: f64,
+) -> Option<String> {
+    renderer
+        .hit_test(board, Point::new(x, y), tolerance)
+        .map(|id| id.as_str().to_owned())
+}
+
+#[test]
+fn a_click_on_a_text_inside_a_rectangle_selects_the_text() {
+    // `:te hi` then `:re 6 2` at the same point: the rectangle is drawn on top of the text.
+    let board = board_of([
+        text("t1", Point::ZERO, "hi"),
+        rect("r1", 0.0, 0.0, 6.0, 2.0),
+    ]);
+    let mut renderer = Renderer::new_trusted();
+    let hi = renderer
+        .object_bounds(&board.objects()[0])
+        .unwrap()
+        .center();
+    assert_eq!(
+        hit_at(&mut renderer, &board, hi.x, hi.y, 0.1).as_deref(),
+        Some("t1")
+    );
+    // Inside the rectangle, away from the text.
+    assert_eq!(
+        hit_at(&mut renderer, &board, 4.0, 1.5, 0.1).as_deref(),
+        Some("r1")
+    );
+}
+
+#[test]
+fn a_line_or_an_arrow_is_hit_near_its_segment_not_in_its_box() {
+    // A long diagonal arrow drawn after a small rectangle inside its bounding box.
+    let board = board_of([
+        rect("r1", 7.0, 1.0, 1.0, 1.0),
+        segment("a1", true, (0.0, 0.0), (10.0, 10.0)),
+    ]);
+    let mut renderer = Renderer::new_trusted();
+    assert_eq!(
+        hit_at(&mut renderer, &board, 7.5, 1.5, 0.1).as_deref(),
+        Some("r1")
+    );
+    // In the arrow's box, 2 units from its shaft.
+    assert_eq!(hit_at(&mut renderer, &board, 6.0, 3.0, 0.1), None);
+    // 0.07 units from the shaft.
+    assert_eq!(
+        hit_at(&mut renderer, &board, 5.0, 5.1, 0.1).as_deref(),
+        Some("a1")
+    );
+    assert_eq!(hit_at(&mut renderer, &board, 5.0, 5.2, 0.1), None);
+
+    // A line across a rectangle drawn after it: near the line, the line (it covers no area).
+    let board = board_of([
+        segment("l1", false, (-1.0, 0.5), (11.0, 0.5)),
+        rect("r2", 0.0, 0.0, 10.0, 10.0),
+    ]);
+    assert_eq!(
+        hit_at(&mut renderer, &board, 5.0, 0.55, 0.1).as_deref(),
+        Some("l1")
+    );
+    assert_eq!(
+        hit_at(&mut renderer, &board, 5.0, 5.0, 0.1).as_deref(),
+        Some("r2")
+    );
+}
+
+#[test]
+fn an_ellipse_is_hit_in_its_shape_not_in_the_corners_of_its_box() {
+    let board = board_of([
+        ellipse("e1", 0.0, 0.0, 4.0, 2.0),
+        ellipse("e2", 10.0, 0.0, 1.0, 3.0),
+    ]);
+    let mut renderer = Renderer::new_trusted();
+    let mut hit = |x: f64, y: f64| hit_at(&mut renderer, &board, x, y, 0.1);
+    assert_eq!(hit(0.0, 0.0).as_deref(), Some("e1"));
+    assert_eq!(hit(3.0, 1.0).as_deref(), Some("e1"));
+    // The corner of its box.
+    assert_eq!(hit(3.9, 1.9), None);
+    // Just outside its outline, at the ends of its axes, within the tolerance and past it.
+    assert_eq!(hit(4.05, 0.0).as_deref(), Some("e1"));
+    assert_eq!(hit(4.2, 0.0), None);
+    assert_eq!(hit(0.0, -2.05).as_deref(), Some("e1"));
+    assert_eq!(hit(0.0, -2.2), None);
+    // Off the outline at 45 degrees, along its normal: 0.08 units out, then 0.12.
+    let on = Point::new(4.0 * 0.5_f64.sqrt(), 2.0 * 0.5_f64.sqrt());
+    let normal = kurbo::Vec2::new(2.0, 4.0).normalize();
+    let out = |d: f64| on + normal * d;
+    assert_eq!(hit(out(0.08).x, out(0.08).y).as_deref(), Some("e1"));
+    assert_eq!(hit(out(0.12).x, out(0.12).y), None);
+    // A tall one (its long radius along y).
+    assert_eq!(hit(10.0, 3.05).as_deref(), Some("e2"));
+    assert_eq!(hit(10.95, 2.9), None);
+    assert_eq!(hit(10.5, 0.0).as_deref(), Some("e2"));
+}
+
+#[test]
+fn the_smallest_object_hit_wins_then_the_topmost() {
+    let board = board_of([
+        rect("small", 2.0, 2.0, 2.0, 2.0),
+        ellipse("c1", 5.0, 5.0, 5.0, 5.0),
+        rect("big", 0.0, 0.0, 10.0, 10.0),
+        rect("same", 0.0, 0.0, 10.0, 10.0),
+    ]);
+    let mut renderer = Renderer::new_trusted();
+    let mut hit = |x: f64, y: f64| hit_at(&mut renderer, &board, x, y, 0.0);
+    assert_eq!(hit(3.0, 3.0).as_deref(), Some("small"));
+    // A circle covers less than the square around it.
+    assert_eq!(hit(5.0, 5.0).as_deref(), Some("c1"));
+    // In the square's corner, outside the circle: the topmost of two equal squares.
+    assert_eq!(hit(0.5, 0.5).as_deref(), Some("same"));
+}
+
 #[test]
 fn the_renderer_measures_objects_as_object_bounds_does() {
     let board = common::area_board();

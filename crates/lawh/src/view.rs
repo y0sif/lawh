@@ -22,14 +22,36 @@ const PIXELS_PER_LINE: f64 = 50.0;
 /// to it stay in view.
 const FOLLOW_MARGIN_PX: f64 = 48.0;
 
-/// The view a board opens with: all of it fitted to the window (see [`Viewport::fit`]), or for
-/// an empty board the grid's origin at the centre, at zoom 1. `bounds` are the board's, in grid
-/// units.
-pub fn opening(bounds: Option<Rect>, width: u16, height: u16, scale_factor: f64) -> Viewport {
-    match bounds {
-        Some(bounds) => Viewport::fit(bounds, width, height, scale_factor),
-        None => Viewport::new(Point::ZERO, 1.0, width, height, scale_factor),
-    }
+/// The view a board opens with: all of it fitted to the window above the bottom `bottom_px`
+/// physical pixels (the status bar), [`FOLLOW_MARGIN_PX`] inside the edges (see
+/// [`Viewport::fit_with_margin`]); for an empty board the grid's origin at the centre, at zoom 1.
+/// `bounds` are the board's, in grid units.
+///
+/// It leaves the room [`follow`] keeps, so the first key finds the whole board, and the object
+/// the cursor starts on, already in view and doesn't pan.
+pub fn opening(
+    bounds: Option<Rect>,
+    width: u16,
+    height: u16,
+    scale_factor: f64,
+    bottom_px: u32,
+) -> Viewport {
+    let Some(bounds) = bounds else {
+        return Viewport::new(Point::ZERO, 1.0, width, height, scale_factor);
+    };
+    let room = u32::from(height).saturating_sub(bottom_px);
+    let room = u16::try_from(room).unwrap_or(height);
+    let fit = Viewport::fit_with_margin(bounds, width, room, scale_factor, FOLLOW_MARGIN_PX);
+    // The fit centres the board in the room above the bar, whose middle is half the bar's
+    // height above the window's.
+    let bar = f64::from(height - room);
+    let center = Point::new(fit.center.x, fit.center.y + bar / 2.0 / fit.px_per_unit());
+    let center = if center.is_finite() {
+        center
+    } else {
+        fit.center
+    };
+    Viewport::new(center, fit.zoom, width, height, fit.scale_factor)
 }
 
 /// Pans `vp` as little as possible to bring `focus` (grid units) into view, at least
@@ -225,13 +247,54 @@ mod tests {
 
     #[test]
     fn an_empty_board_opens_at_the_origin_at_zoom_1() {
-        let vp = opening(None, 800, 600, 2.0);
+        let vp = opening(None, 800, 600, 2.0, 48);
         assert_eq!(vp, Viewport::new(Point::ZERO, 1.0, 800, 600, 2.0));
-        let bounds = Rect::new(10.0, 10.0, 20.0, 12.0);
-        assert_eq!(
-            opening(Some(bounds), 800, 600, 2.0),
-            Viewport::fit(bounds, 800, 600, 2.0)
-        );
+    }
+
+    #[test]
+    fn a_board_opens_whole_above_the_status_bar_and_the_first_follow_keeps_it() {
+        let boards = [
+            // Wider than the window: the fit is set by the width.
+            Rect::new(10.0, 10.0, 90.0, 20.0),
+            // Taller than it.
+            Rect::new(-5.0, -50.0, 0.0, 50.0),
+            // Small: the fit stops at its largest zoom.
+            Rect::new(1.0, 1.0, 2.0, 1.5),
+        ];
+        for bounds in boards {
+            for (scale, bar) in [(1.0, 24), (2.0, 48)] {
+                let vp = opening(Some(bounds), 800, 600, scale, bar);
+                assert!((vp.scale_factor - scale).abs() < f64::EPSILON);
+                // All of it is in the room above the bar, the margin inside its edges.
+                let margin = FOLLOW_MARGIN_PX * scale - 1e-6;
+                let (a, b) = (
+                    vp.to_screen(Point::new(bounds.x0, bounds.y0)),
+                    vp.to_screen(Point::new(bounds.x1, bounds.y1)),
+                );
+                assert!(a.x >= margin && a.y >= margin, "{bounds:?} {a:?}");
+                assert!(b.x <= 800.0 - margin, "{bounds:?} {b:?}");
+                assert!(b.y <= 600.0 - f64::from(bar) - margin, "{bounds:?} {b:?}");
+                // Centred in that room.
+                let mid = vp.to_screen(bounds.center());
+                assert!((mid.x - 400.0).abs() < 1e-6, "{mid:?}");
+                assert!(
+                    (mid.y - (600.0 - f64::from(bar)) / 2.0).abs() < 1e-6,
+                    "{mid:?}"
+                );
+                // Following the whole board, or any corner of it, doesn't pan.
+                for focus in [
+                    bounds,
+                    point(bounds.x0, bounds.y0),
+                    point(bounds.x1, bounds.y0),
+                    point(bounds.x0, bounds.y1),
+                    point(bounds.x1, bounds.y1),
+                ] {
+                    let mut followed = vp;
+                    follow(&mut followed, focus, f64::from(bar));
+                    assert_eq!(followed, vp, "{bounds:?} {focus:?} at {scale}");
+                }
+            }
+        }
     }
 
     /// A 800x600 view at scale factor 1 and zoom 1 (40 px a unit) on the origin, with a 24 px

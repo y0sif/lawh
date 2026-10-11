@@ -13,6 +13,11 @@ use lawh_core::{Board, FormatError};
 /// an earlier write left one behind (a crash) or another lawh writes the same file.
 const TEMP_NAME_TRIES: u32 = 100;
 
+/// Most symbolic links [`write_atomic`] follows from the path it is given to the file it
+/// writes, as Linux follows at most 40 (`MAXSYMLINKS`) when it opens a path: links that chain
+/// further loop, and the write fails.
+const MAX_LINK_HOPS: u32 = 40;
+
 /// The board lawh edits, and where it came from.
 #[derive(Debug)]
 pub struct Opened {
@@ -103,12 +108,15 @@ pub fn write_target(
 
 /// Writes `contents` to `path` so that the file is either the old one or the new one, never
 /// half written: into a new temporary file in the same directory, flushed to disk, then renamed
-/// over `path`. On an error the temporary file is removed and `path` is untouched.
+/// over `path`, and on Unix the directory flushed too, so the rename survives a power cut. On an
+/// error the temporary file is removed and `path` is untouched.
 ///
-/// A symbolic link is written through: the file it points at is replaced and the link stays.
-/// On Unix the new file keeps the old one's permissions.
+/// A symbolic link is written through ([`follow_links`]): the file it points at is replaced,
+/// or created when the link dangles, and the link stays. On Unix the new file has the old one's
+/// permissions from the moment it is created, so the board is never more readable than it was;
+/// a new file gets the default ones.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let target = follow_links(path)?;
     let name = target.file_name().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "the path does not name a file")
     })?;
@@ -116,33 +124,74 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     };
-    let (temp, mut file) = create_temp(dir, name)?;
-    let synced = file.write_all(contents).and_then(|()| {
-        keep_permissions(&target, &file);
-        file.sync_all()
-    });
+    // `target` is no link, so this is the file being replaced, if there is one.
+    let old = fs::metadata(&target).ok().map(|meta| meta.permissions());
+    let (temp, mut file) = create_temp(dir, name, old.as_ref())?;
+    let synced = file.write_all(contents).and_then(|()| file.sync_all());
     // Closed before the rename: Windows can't rename or remove an open file.
     drop(file);
     let written = synced.and_then(|()| fs::rename(&temp, &target));
-    if written.is_err()
-        && let Err(err) = fs::remove_file(&temp)
-    {
-        tracing::warn!(path = %temp.display(), %err, "could not remove a temporary file");
+    match &written {
+        Ok(()) => sync_dir(dir),
+        Err(_) => {
+            if let Err(err) = fs::remove_file(&temp) {
+                tracing::warn!(path = %temp.display(), %err, "could not remove a temporary file");
+            }
+        }
     }
     written
 }
 
-/// A new file in `dir` named after `name`, hidden on Unix: `.area.lawh.<pid>-<n>.tmp`.
-fn create_temp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)> {
+/// The file a write to `path` replaces: `path` with each symbolic link at its end replaced by
+/// what it points at (a relative target is taken from the link's directory), until a path that
+/// is no link, or names nothing yet (a new file, or what a dangling link points at). Links in
+/// the directories on the way are left to the system. Fails past [`MAX_LINK_HOPS`] links.
+fn follow_links(path: &Path) -> io::Result<PathBuf> {
+    let mut path = path.to_owned();
+    // One look more than the hops: the path after the last hop may be no link.
+    for _ in 0..=MAX_LINK_HOPS {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let to = fs::read_link(&path)?;
+                // Joining an absolute target gives the target itself.
+                path = match path.parent() {
+                    Some(dir) => dir.join(to),
+                    None => to,
+                };
+            }
+            Ok(_) => return Ok(path),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(path),
+            Err(err) => return Err(err),
+        }
+    }
+    Err(io::Error::other(format!(
+        "{}: more than {MAX_LINK_HOPS} symbolic links in a row",
+        path.display()
+    )))
+}
+
+/// A new file in `dir` named after `name`, hidden on Unix: `.area.lawh.<pid>-<n>.tmp`. On Unix
+/// it is created with `old`'s permissions when given (those of the file it will replace).
+fn create_temp(
+    dir: &Path,
+    name: &std::ffi::OsStr,
+    old: Option<&fs::Permissions>,
+) -> io::Result<(PathBuf, File)> {
     let pid = std::process::id();
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    with_permissions(&mut options, old);
     let mut last = None;
     for n in 0..TEMP_NAME_TRIES {
         let mut temp = OsString::from(".");
         temp.push(name);
         temp.push(format!(".{pid}-{n}.tmp"));
         let temp = dir.join(temp);
-        match OpenOptions::new().write(true).create_new(true).open(&temp) {
-            Ok(file) => return Ok((temp, file)),
+        match options.open(&temp) {
+            Ok(file) => {
+                keep_permissions(&temp, &file, old);
+                return Ok((temp, file));
+            }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => last = Some(err),
             Err(err) => return Err(err),
         }
@@ -150,21 +199,47 @@ fn create_temp(dir: &Path, name: &std::ffi::OsStr) -> io::Result<(PathBuf, File)
     Err(last.unwrap_or_else(|| io::Error::other("no name left for a temporary file")))
 }
 
-/// Gives the new file `file` the permissions of `target`, the file it replaces, if there is
-/// one. Unix only: on Windows the only permission is read-only, and a read-only file can't be
-/// replaced anyway. A failure is logged, not fatal: the board is still written.
+/// Creates files with the permission bits of `old`, if given; the umask may still take some
+/// away, which [`keep_permissions`] puts back. Unix only: on Windows the only permission is
+/// read-only, and a read-only file can't be replaced anyway.
 #[cfg(unix)]
-fn keep_permissions(target: &Path, file: &File) {
-    let Ok(old) = fs::metadata(target) else {
-        return;
-    };
-    if let Err(err) = file.set_permissions(old.permissions()) {
-        tracing::warn!(path = %target.display(), %err, "could not keep the file's permissions");
+fn with_permissions(options: &mut OpenOptions, old: Option<&fs::Permissions>) {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    if let Some(old) = old {
+        options.mode(old.mode() & 0o777);
     }
 }
 
 #[cfg(not(unix))]
-fn keep_permissions(_target: &Path, _file: &File) {}
+fn with_permissions(_options: &mut OpenOptions, _old: Option<&fs::Permissions>) {}
+
+/// Gives `file`, just created at `path` and still empty, exactly the permissions `old`, the
+/// umask's change undone. A failure is logged, not fatal: the board is still written, with
+/// permissions no wider than `old`'s.
+#[cfg(unix)]
+fn keep_permissions(path: &Path, file: &File, old: Option<&fs::Permissions>) {
+    if let Some(old) = old
+        && let Err(err) = file.set_permissions(old.clone())
+    {
+        tracing::warn!(path = %path.display(), %err, "could not keep the file's permissions");
+    }
+}
+
+#[cfg(not(unix))]
+fn keep_permissions(_path: &Path, _file: &File, _old: Option<&fs::Permissions>) {}
+
+/// Flushes `dir` to disk after a rename in it, so the new name survives a power cut. Unix only
+/// (Windows can't open a directory as a file). A failure is logged, not fatal: the file is
+/// written and renamed already.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) {
+    if let Err(err) = File::open(dir).and_then(|dir| dir.sync_all()) {
+        tracing::warn!(path = %dir.display(), %err, "could not flush the directory to disk");
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) {}
 
 #[cfg(test)]
 mod tests {
@@ -297,6 +372,87 @@ mod tests {
         write_atomic(&path, b"new").unwrap();
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
         assert_eq!(fs::read_to_string(&leftover).unwrap(), "old");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_temporary_file_has_the_old_permissions_before_anything_is_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = TestDir::new("temp-mode");
+        let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        // 0o666 is wider than the umask lets a new file be: it is put back.
+        for old in [0o600, 0o640, 0o444, 0o666] {
+            let name = format!("m{old:o}.lawh");
+            let perms = fs::Permissions::from_mode(old);
+            let (temp, file) = create_temp(dir.root(), name.as_ref(), Some(&perms)).unwrap();
+            assert_eq!(file.metadata().unwrap().len(), 0);
+            assert_eq!(mode(&temp), old, "{old:o}");
+        }
+        // A new file gets what any new file gets.
+        let (temp, _file) = create_temp(dir.root(), "new.lawh".as_ref(), None).unwrap();
+        let plain = dir.write("plain", "");
+        assert_eq!(mode(&temp), mode(&plain));
+
+        // A whole write: a private board stays private.
+        let private = dir.write("private.lawh", "old");
+        fs::set_permissions(&private, fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&private, b"new").unwrap();
+        assert_eq!(mode(&private), 0o600);
+        // A failed directory flush is only logged.
+        sync_dir(&dir.path("no-such-dir"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_written_through_to_a_new_file() {
+        let dir = TestDir::new("dangling");
+        let link = dir.path("link.lawh");
+        std::os::unix::fs::symlink("missing.lawh", &link).unwrap();
+        write_atomic(&link, b"new").unwrap();
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(dir.path("missing.lawh")).unwrap(), "new");
+        assert_eq!(listing(dir.root()), ["link.lawh", "missing.lawh"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_followed_from_their_own_directory_and_in_chains() {
+        let dir = TestDir::new("chain");
+        fs::create_dir(dir.path("sub")).unwrap();
+        let real = dir.write("real.lawh", "old");
+        std::os::unix::fs::symlink("../real.lawh", dir.path("sub").join("link")).unwrap();
+        let chain = dir.path("chain.lawh");
+        std::os::unix::fs::symlink("sub/link", &chain).unwrap();
+        write_atomic(&chain, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(listing(dir.root()), ["chain.lawh", "real.lawh", "sub"]);
+        assert_eq!(listing(&dir.path("sub")), ["link"]);
+
+        // As many links in a row as the system follows, and one more.
+        for (links, ok) in [(MAX_LINK_HOPS, true), (MAX_LINK_HOPS + 1, false)] {
+            let dir = TestDir::new(&format!("hops-{links}"));
+            dir.write("l0", "old");
+            for n in 1..=links {
+                std::os::unix::fs::symlink(format!("l{}", n - 1), dir.path(&format!("l{n}")))
+                    .unwrap();
+            }
+            let written = write_atomic(&dir.path(&format!("l{links}")), b"new");
+            assert_eq!(written.is_ok(), ok, "{links} links: {written:?}");
+            let want = if ok { "new" } else { "old" };
+            assert_eq!(fs::read_to_string(dir.path("l0")).unwrap(), want);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_loop_of_links_fails_and_writes_nothing() {
+        let dir = TestDir::new("loop");
+        std::os::unix::fs::symlink("b", dir.path("a")).unwrap();
+        std::os::unix::fs::symlink("a", dir.path("b")).unwrap();
+        let err = write_atomic(&dir.path("a"), b"new").unwrap_err();
+        assert!(err.to_string().contains("symbolic links"), "{err}");
+        assert_eq!(listing(dir.root()), ["a", "b"]);
     }
 
     #[cfg(unix)]

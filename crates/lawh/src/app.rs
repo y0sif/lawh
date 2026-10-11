@@ -140,14 +140,19 @@ impl Timer {
 impl App {
     /// The app for `engine`, whose board was opened from `file` (see
     /// [`files::write_target`]), with `message` on the status line until the first key.
+    ///
+    /// The cursor starts on the board's first object in reading order ([`Engine::go_first`];
+    /// an empty board keeps the grid's origin), which the opening view shows
+    /// ([`view::opening`]). Call it after the lawhrc is read, as its settings may matter.
     pub fn new(
-        engine: Engine,
+        mut engine: Engine,
         file: Option<PathBuf>,
         launch_dir: Option<PathBuf>,
-        renderer: Renderer,
+        mut renderer: Renderer,
         started: Instant,
         message: Option<String>,
     ) -> Self {
+        engine.go_first(&mut renderer);
         let file = engine.file_name().map(str::to_owned).zip(file);
         Self {
             title: status::title(&engine),
@@ -207,6 +212,15 @@ impl App {
         }
         // A modifier alone is no key: it must not cut short the engine's timer.
         if translated.keys.is_empty() {
+            return;
+        }
+        if keys::is_close_request(&translated.keys) {
+            // A held Cmd+Q repeats: only the press counts, so holding it can't skip the
+            // unsaved-changes warning. Like the close button, it leaves the timer and the
+            // message alone.
+            if !event.repeat {
+                self.close_requested(event_loop);
+            }
             return;
         }
         self.timer.cancel();
@@ -299,7 +313,8 @@ impl App {
         }
     }
 
-    /// The window's close button (or the system's close shortcut).
+    /// The window's close button, the system's close shortcut, or Cmd+Q
+    /// ([`keys::is_close_request`]).
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
         if close_now(self.engine.is_modified(), self.close_refused) {
             event_loop.exit();
@@ -428,7 +443,8 @@ impl App {
             *vp
         } else {
             let bounds = self.renderer.board_bounds(self.engine.board());
-            let vp = view::opening(bounds, width, height, scale_factor);
+            let bar = status_bar_height_px(scale_factor);
+            let vp = view::opening(bounds, width, height, scale_factor, bar);
             tracing::debug!(?vp, "fitted the board to the window");
             *self.viewport.insert(vp)
         };
@@ -798,6 +814,49 @@ mod tests {
         assert!(caret.width().abs() < 1e-9, "{caret:?}");
         assert!(caret.height() > 0.0, "{caret:?}");
         assert!(caret.y0 > 22.0, "{caret:?}");
+    }
+
+    fn app_for(board: lawh_core::Board) -> App {
+        let engine = Engine::new(board);
+        App::new(
+            engine,
+            None,
+            None,
+            Renderer::new_trusted(),
+            Instant::now(),
+            None,
+        )
+    }
+
+    #[test]
+    fn the_cursor_starts_on_the_first_object_and_the_first_key_does_not_pan() {
+        let board = from_lawh(
+            "lawh version=1\n\
+             rect id=r1 x=30 y=8 w=4 h=2\n\
+             circle id=c1 x=40 y=-3 r=1\n\
+             text id=t1 x=-20 y=-10 \"first\"\n\
+             line id=l1 x1=0 y1=12 x2=50 y2=12\n",
+        )
+        .unwrap();
+        let mut app = app_for(board);
+        assert_eq!(
+            app.engine.cursor(),
+            &Cursor::Object(lawh_core::ObjectId::new("t1").unwrap())
+        );
+        for (width, height, scale) in [(1280, 800, 1.0), (800, 1200, 2.0), (2560, 600, 1.5)] {
+            let bar = status_bar_height_px(scale);
+            let bounds = app.renderer.board_bounds(app.engine.board());
+            let vp = view::opening(bounds, width, height, scale, bar);
+            // What `after_input` does after the first key that leaves the cursor where it is.
+            let mut followed = vp;
+            let focus = focus(&app.engine, &mut app.renderer);
+            view::follow(&mut followed, focus, f64::from(bar));
+            assert_eq!(followed, vp, "{width}x{height} at {scale}");
+        }
+
+        // An empty board keeps the grid's origin.
+        let app = app_for(lawh_core::Board::new());
+        assert_eq!(app.engine.cursor(), &Cursor::Grid(Point::ZERO));
     }
 
     /// The copy runs in the app crate, outside lawh-render's bench; see the dev profile in the
