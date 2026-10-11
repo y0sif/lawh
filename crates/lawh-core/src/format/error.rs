@@ -1,6 +1,6 @@
 //! Errors from reading a `.lawh` file.
 
-use super::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
+use super::{MAX_COMMENT_DEPTH, MAX_ENTRIES, MAX_FILE_BYTES, MAX_STRING_BYTES};
 use crate::board::{
     MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_ID_CHARS, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
     MAX_TEXT_LINES,
@@ -13,7 +13,7 @@ use crate::board::{
 /// whole file, so it reports `1:1`.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum FormatError {
-    /// The file is not valid KDL.
+    /// Text that is not valid in a lawh file: lawh files are flat KDL v2.
     #[error("{line}:{column}: {message}{}", help_suffix(help.as_deref()))]
     Syntax {
         line: usize,
@@ -140,6 +140,21 @@ pub enum FormatError {
         kind: String,
     },
 
+    /// More than [`MAX_ENTRIES`] entries on one node. Points at the first entry over the limit.
+    #[error("{line}:{column}: too many entries on `{kind}`; a lawh node has at most {MAX_ENTRIES}")]
+    TooManyEntries {
+        line: usize,
+        column: usize,
+        kind: String,
+    },
+
+    /// A string, bare word or number that takes more than [`MAX_STRING_BYTES`] bytes of the
+    /// file. Points at its start.
+    #[error(
+        "{line}:{column}: this string or number takes more than {MAX_STRING_BYTES} bytes of the file"
+    )]
+    StringTooLong { line: usize, column: usize },
+
     /// A positional argument the node does not take.
     #[error("{line}:{column}: unexpected argument: {}", takes(kind))]
     ExtraArgument {
@@ -239,6 +254,8 @@ impl FormatError {
             | Self::Children { line, column, .. }
             | Self::MissingText { line, column, .. }
             | Self::TextNotString { line, column, .. }
+            | Self::TooManyEntries { line, column, .. }
+            | Self::StringTooLong { line, column }
             | Self::ExtraArgument { line, column, .. }
             | Self::TypeAnnotation { line, column }
             | Self::CommentTooDeep { line, column }

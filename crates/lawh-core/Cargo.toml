@@ -14,12 +14,13 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
-kdl.workspace = true
 kurbo.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 insta.workspace = true
+# The reader is lawh's own; tests check that it reads flat KDL as the kdl crate does.
+kdl.workspace = true
 proptest.workspace = true
 
 [lints]

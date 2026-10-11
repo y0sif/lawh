@@ -12,8 +12,8 @@ use insta::assert_snapshot;
 use lawh_core::board::{
     MAX_BOARD_TEXT_CHARS, MAX_ID_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES,
 };
-use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_FILE_BYTES};
-use lawh_core::{Board, FormatError, from_lawh};
+use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_ENTRIES, MAX_FILE_BYTES, MAX_STRING_BYTES};
+use lawh_core::{Board, FormatError, Shape, from_lawh};
 
 const HEADER: &str = "lawh version=1\n";
 
@@ -263,10 +263,11 @@ fn id_over_the_length_limit() {
     let e = body_err(&format!("circle id={longest}1 x=0 y=0 r=1\n"));
     assert_eq!(e, FormatError::IdTooLong { line: 2, column: 8 });
     assert_snapshot!(e.to_string());
-    // Too long whatever its characters; the id is not repeated in the message.
+    // Too long whatever its characters; the id is not repeated in the message. This one also
+    // passes the cap on text, so reading stops at it.
     let e = body_err(&format!(
         "rect x=0 id=\"{}\" y=0 w=1 h=1\n",
-        "é ".repeat(40_000)
+        "é ".repeat(10_000)
     ));
     assert_eq!(
         e,
@@ -592,25 +593,18 @@ fn too_many_objects() {
 
 #[test]
 fn objects_past_the_limit_are_not_parsed() {
-    // The scan stops at the first object over the limit, so kdl parses 501 nodes, not all
-    // 36,541. In debug on the maintainer's laptop (2026-10-11) this read takes 25 ms, and took
-    // 1.7 s when kdl parsed the whole file; the bound is generous for a busy machine.
-    let src = circles_filling(MAX_FILE_BYTES);
-    assert!(src.len() + 30 > MAX_FILE_BYTES);
-    let mut best = Duration::MAX;
-    for _ in 0..3 {
-        let started = Instant::now();
-        let e = err(&src);
-        best = best.min(started.elapsed());
-        assert_eq!(
-            e,
-            FormatError::TooManyObjects {
-                line: MAX_OBJECTS + 2,
-                column: 1
-            }
-        );
-    }
-    assert!(best < Duration::from_secs(1), "{best:?}");
+    // Reading stops where the 501st object starts: the syntax error inside it is never read.
+    let src = format!(
+        "{HEADER}{}circle id=over x=1.5.5 y=0 r=1\n",
+        circles(MAX_OBJECTS)
+    );
+    assert_eq!(
+        err(&src),
+        FormatError::TooManyObjects {
+            line: MAX_OBJECTS + 2,
+            column: 1
+        }
+    );
 }
 
 #[test]
@@ -726,8 +720,9 @@ fn forbidden_character_outside_a_string() {
 
 // --- Hostile files: deep nesting and error recovery ---
 //
-// kdl's parser recurses on these. Each runs on a thread with a 2 MiB stack, the default for test
-// threads, so a scan that let them through to kdl would overflow it.
+// The kdl crate's parser, which lawh used before it had its own, recursed on these and overflowed
+// its stack. lawh's parser never recurses. Each runs on a thread with a 2 MiB stack, the default
+// for test threads.
 
 /// Reads `src` on a thread with a 2 MiB stack.
 fn read_on_small_stack(src: String) -> Result<Board, FormatError> {
@@ -807,7 +802,7 @@ fn slashdashed_nested_children_blocks() {
 
 #[test]
 fn long_block_comment_is_read() {
-    // kdl reads each `*` and `/` inside a comment one level deeper; the scan blanks them.
+    // kdl read each `*` and `/` inside a comment one level deeper.
     let src = format!(
         "{HEADER}circle /* {}*/ id=c1 x=0 y=0 r=1\n",
         "** // ".repeat(150_000)
@@ -817,7 +812,7 @@ fn long_block_comment_is_read() {
 
 #[test]
 fn repeated_bad_tokens_end_at_the_first() {
-    // kdl recurses once per error it recovers from; each of these overflowed a 2 MiB stack.
+    // kdl recursed once per error it recovered from; each of these overflowed a 2 MiB stack.
     for (body, line, column) in [
         (format!("circle {}", ")".repeat(100_000)), 2, 8),
         (format!("circle {}", "=".repeat(100_000)), 2, 8),
@@ -846,9 +841,6 @@ fn repeated_bad_tokens_end_at_the_first() {
 }
 
 // --- Filler: comments, slashdashed text, spaces ---
-//
-// The scan blanks filler before kdl reads the file, which kdl reads at 0.4 to 4 us a byte, and
-// keeps every byte offset.
 
 /// Text that fills a file of `bytes` bytes after the header with copies of `unit`.
 fn filler(unit: &str, bytes: usize) -> String {
@@ -857,29 +849,6 @@ fn filler(unit: &str, bytes: usize) -> String {
         src.push_str(unit);
     }
     src
-}
-
-#[test]
-fn filler_up_to_the_size_limit_reads_quickly() {
-    // In debug on the maintainer's laptop (2026-10-11), each file read in 85 and 317 ms blanked,
-    // 1.5 and 3.5 s before. `read_time_at_the_size_limit` below has the release times.
-    // The bound is generous: with five busy threads a core, the second read in 1.6 s at best of
-    // three. That the scan blanks the filler is checked exactly by the tests in `scan.rs`; this
-    // catches a read that grows much slower.
-    for unit in [
-        "// lorem ipsum dolor sit amet consectetur adipiscing elit\n",
-        "/-r\n",
-    ] {
-        let src = filler(unit, MAX_FILE_BYTES);
-        assert!(src.len() + unit.len() > MAX_FILE_BYTES);
-        let mut best = Duration::MAX;
-        for _ in 0..3 {
-            let started = Instant::now();
-            assert_eq!(from_lawh(&src), Ok(Board::new()), "{unit:?}");
-            best = best.min(started.elapsed());
-        }
-        assert!(best < Duration::from_secs(5), "{unit:?}: {best:?}");
-    }
 }
 
 /// The error's line and column, the line counted from the body after the header, and its message
@@ -893,7 +862,7 @@ fn place(e: &FormatError, lines_before: usize) -> (usize, usize, String) {
 #[test]
 fn errors_after_filler_keep_their_position() {
     let bodies = [
-        // kdl words it, the scan words it, the reader finds it.
+        // A bad number, a bad escape, an object the reader rejects.
         "circle id=c1 x=1. y=0 r=3\n",
         "circle id=c1 x=1.5.5 y=0 r=3\n",
         "text id=t1 x=0 y=0 \"a\\xb\"\n",
@@ -938,6 +907,233 @@ fn errors_after_filler_keep_their_position() {
     );
 }
 
+// --- Caps that stop reading ---
+//
+// Every cap is checked while reading, and reading stops at the first one passed. The files below
+// hold a syntax error past the cap, which a reader that went on would report instead, so these
+// tests fail if a cap is removed.
+
+#[test]
+fn entries_past_the_limit() {
+    // Without its version among the entries read, the header can't be checked.
+    let e = err(&format!("lawh{} version=1\n", " a=1".repeat(MAX_ENTRIES)));
+    assert_eq!(
+        e,
+        FormatError::TooManyEntries {
+            line: 1,
+            column: 6 + 4 * MAX_ENTRIES,
+            kind: "lawh".to_owned()
+        }
+    );
+    assert_snapshot!(e.to_string());
+    // Otherwise the first entry the node doesn't take is reported, as with fewer entries.
+    let e = err(&format!("lawh version=1{} )\n", " 1".repeat(MAX_ENTRIES)));
+    assert_eq!(
+        e,
+        FormatError::ExtraArgument {
+            line: 1,
+            column: 16,
+            kind: "lawh".to_owned()
+        }
+    );
+    let e = body_err("circle id=c1 x=0 y=0 r=1 a b )\n");
+    assert!(
+        matches!(e, FormatError::ExtraArgument { column: 26, .. }),
+        "{e:?}"
+    );
+    // Slashdashed entries are not counted.
+    let src = format!("{HEADER}circle id=c1 x=0 y=0{} r=1\n", " /-r=2".repeat(100));
+    assert_eq!(from_lawh(&src).map(|b| b.len()), Ok(1));
+}
+
+#[test]
+fn string_over_the_byte_limit() {
+    // A string of `len` bytes, quotes included, that reads as `ab`.
+    let string = |len: usize| format!("\"a\\{}b\"", " ".repeat(len - "\"a\\b\"".len()));
+    let ok = format!("{HEADER}text id=t1 x=0 y=0 {}\n", string(MAX_STRING_BYTES));
+    let board = from_lawh(&ok).unwrap();
+    assert!(
+        matches!(&board.objects()[0].shape, Shape::Text { text, .. } if text == "ab"),
+        "{board:?}"
+    );
+    let e = body_err(&format!(
+        "text id=t1 x=0 y=0 {}\n",
+        string(MAX_STRING_BYTES + 1)
+    ));
+    assert_eq!(
+        e,
+        FormatError::StringTooLong {
+            line: 2,
+            column: 20
+        }
+    );
+    assert_snapshot!(e.to_string());
+}
+
+/// `src`, then copies of `unit` and `tail` up to [`MAX_FILE_BYTES`].
+fn fill(mut src: String, unit: &str, tail: &str) -> String {
+    while src.len() + unit.len() + tail.len() <= MAX_FILE_BYTES {
+        src.push_str(unit);
+    }
+    src + tail
+}
+
+/// 499 circles of 2 KB of ` 1` arguments, each line ending in a syntax error.
+fn circles_with_arguments() -> String {
+    let mut circles = HEADER.to_owned();
+    let per_circle = (MAX_FILE_BYTES - HEADER.len()) / 499;
+    for i in 0..499 {
+        let start = circles.len();
+        write!(circles, "circle id=c{i} x=0 y=0 r=1").unwrap();
+        while circles.len() - start + " 1 )\n".len() <= per_circle {
+            circles.push_str(" 1");
+        }
+        circles.push_str(" )\n");
+    }
+    circles
+}
+
+/// A text whose multi-line string is indented by 2,000 spaces: within the caps on text, so the
+/// board opened before. Its last line holds an invalid escape.
+fn indented_multi_line() -> String {
+    let indent = " ".repeat(2000);
+    let mut src = format!("{HEADER}text id=t1 x=0 y=0 \"\"\"\n");
+    let tail = 2 * indent.len() + "\\x\n\"\"\"\n".len();
+    while src.len() + indent.len() + "x\n".len() + tail <= MAX_FILE_BYTES {
+        writeln!(src, "{indent}x").unwrap();
+    }
+    write!(src, "{indent}\\x\n{indent}\"\"\"\n").unwrap();
+    src
+}
+
+/// Files that cost the most to read, each with the error reading them must stop at, which comes
+/// before a syntax error put past it, and the most time reading it may take in a release build:
+/// the files code review measured reading slowly through the kdl crate, at the size limit, and
+/// text past the caps on text.
+///
+/// Each bound is about 5 times the time measured on a busy laptop, and below the time the same
+/// file took with the cap that stops it removed (measured, release, 2026-10-11):
+///
+/// | file | stops at | read | without the cap | bound |
+/// |---|---|---|---|---|
+/// | header + 524K ` 1` arguments | 7th entry | 0.001 ms | 63.7 ms | 0.5 ms |
+/// | `a=1` repeated on the header | 7th entry | 0.002 ms | 58.6 ms | 0.5 ms |
+/// | multi-line text of 349K lines | 64 KiB of string | 0.51 ms | 9.7 ms | 2.5 ms |
+/// | one string of 1 MiB | 64 KiB of string | 0.10 ms | 2.9 ms | 0.5 ms |
+/// | multi-line string indented 2,000 spaces | 64 KiB of string | 0.03 ms | 2.1 ms | 0.5 ms |
+///
+/// The other files cost about the same with their cap removed, because the reader checks each
+/// node as it comes: the first circle's extra argument, the content past the caps on text, and
+/// the reader's own check of the object count stop them too. [`reading_stops_at_the_first_cap`]
+/// catches the removal of any cap.
+fn capped_files() -> Vec<(&'static str, String, FormatError, Duration)> {
+    let text = |kind: &str| kind.to_owned();
+    let ms = |ms: f64| Duration::from_secs_f64(ms / 1000.0);
+    let string_too_long = || FormatError::StringTooLong {
+        line: 2,
+        column: 20,
+    };
+    vec![
+        (
+            "header + 524K ` 1` arguments",
+            fill("lawh version=1".to_owned(), " 1", " )\n"),
+            FormatError::ExtraArgument {
+                line: 1,
+                column: 16,
+                kind: text("lawh"),
+            },
+            ms(0.5),
+        ),
+        (
+            "499 circles, 2 KB of arguments each",
+            circles_with_arguments(),
+            FormatError::ExtraArgument {
+                line: 2,
+                column: 26,
+                kind: text("circle"),
+            },
+            ms(0.5),
+        ),
+        (
+            "`a=1` repeated on the header",
+            fill("lawh version=1".to_owned(), " a=1", " )\n"),
+            FormatError::UnknownProperty {
+                line: 1,
+                column: 16,
+                kind: text("lawh"),
+                property: text("a"),
+            },
+            ms(0.5),
+        ),
+        (
+            "multi-line text of 349K lines",
+            fill(
+                format!("{HEADER}text id=t1 x=0 y=0 \"\"\"\n"),
+                "xy\n",
+                "\\x\n\"\"\"\n",
+            ),
+            string_too_long(),
+            ms(2.5),
+        ),
+        (
+            "one string of 1 MiB",
+            fill(format!("{HEADER}text id=t1 x=0 y=0 \""), "a", "\\x\"\n"),
+            string_too_long(),
+            ms(0.5),
+        ),
+        (
+            "multi-line string indented 2,000 spaces",
+            indented_multi_line(),
+            string_too_long(),
+            ms(0.5),
+        ),
+        (
+            "text of 5,001 characters",
+            format!(
+                "{HEADER}text id=t1 x=0 y=0 \"{}\" )\n",
+                "x".repeat(MAX_TEXT_CHARS + 1)
+            ),
+            FormatError::TextTooLong {
+                line: 2,
+                column: 20,
+                kind: text("text"),
+            },
+            ms(0.5),
+        ),
+        (
+            "text of 501 lines",
+            format!(
+                "{HEADER}text id=t1 x=0 y=0 \"\"\"\n{}\"\"\" )\n",
+                "x\n".repeat(MAX_TEXT_LINES + 1)
+            ),
+            FormatError::TooManyLines {
+                line: 2,
+                column: 20,
+                kind: text("text"),
+            },
+            ms(0.5),
+        ),
+        (
+            "500 circles, then more up to the size limit",
+            circles_filling(MAX_FILE_BYTES - 3) + ")\n",
+            FormatError::TooManyObjects {
+                line: MAX_OBJECTS + 2,
+                column: 1,
+            },
+            // It reads 500 objects first.
+            ms(5.0),
+        ),
+    ]
+}
+
+#[test]
+fn reading_stops_at_the_first_cap() {
+    for (name, src, want, _) in capped_files() {
+        assert!(src.len() <= MAX_FILE_BYTES, "{name}");
+        assert_eq!(err(&src), want, "{name}");
+    }
+}
+
 // --- Read time of filler ---
 
 /// The longest file a board within every cap writes: the most text, in characters the writer
@@ -966,47 +1162,48 @@ fn largest_board() -> String {
     to_lawh(&board)
 }
 
-/// Time to read files of `LAWH_READ_BYTES` bytes (default `MAX_FILE_BYTES`) of filler, the
-/// largest board the caps allow, and a file of objects past the cap.
+/// Time to read any file of up to `MAX_FILE_BYTES`, in a release build.
+const ANY_READ: Duration = Duration::from_millis(100);
+
+/// Time to read files of `MAX_FILE_BYTES`: filler, which is read to its end, the largest board the
+/// caps allow, and files that stop at a cap ([`capped_files`]). Release build, best of 5 reads:
 /// `nice -n 19 cargo test --release -p lawh-core --test format_errors -- --ignored --nocapture read_time`
 #[test]
 #[ignore = "timing only; run with --release -- --ignored --nocapture"]
 fn read_time_at_the_size_limit() {
-    let max: usize =
-        std::env::var("LAWH_READ_BYTES").map_or(MAX_FILE_BYTES, |v| v.trim().parse().unwrap());
     // Filler after the header's last entry, on its own line.
     let on_header = |unit: &str| {
-        let mut s = filler(unit, max - 1);
+        let mut s = filler(unit, MAX_FILE_BYTES - 1);
         s.replace_range(HEADER.len() - 1..HEADER.len(), " ");
         s.push('\n');
         s
     };
-    let cases = [
-        ("spaces", filler(" ", max)),
+    let filler_files = [
+        ("spaces", filler(" ", MAX_FILE_BYTES)),
         ("spaces in a node", on_header(" ")),
-        ("line breaks", filler("\n", max)),
+        ("line breaks", filler("\n", MAX_FILE_BYTES)),
         (
             "block comments",
-            filler("/* lorem ipsum dolor sit amet */\n", max),
+            filler("/* lorem ipsum dolor sit amet */\n", MAX_FILE_BYTES),
         ),
-        ("short line comments", filler("//\n", max)),
+        ("short line comments", filler("//\n", MAX_FILE_BYTES)),
         (
             "line comments",
             filler(
                 "// lorem ipsum dolor sit amet consectetur adipiscing elit\n",
-                max,
+                MAX_FILE_BYTES,
             ),
         ),
-        ("slashdashed nodes", filler("/-r\n", max)),
+        ("slashdashed nodes", filler("/-r\n", MAX_FILE_BYTES)),
         (
             "slashdashed rects",
-            filler("/-rect id=r1 x=0 y=0 w=1 h=1\n", max),
+            filler("/-rect id=r1 x=0 y=0 w=1 h=1\n", MAX_FILE_BYTES),
         ),
         (
             "slashdashed texts",
             filler(
                 &format!("/-text id=t1 x=0 y=0 \"{}\"\n", "a".repeat(1000)),
-                max,
+                MAX_FILE_BYTES,
             ),
         ),
         ("slashdashed props", on_header(" /-x=0")),
@@ -1015,25 +1212,39 @@ fn read_time_at_the_size_limit() {
             "mixed",
             filler(
                 "// note\n/* a block */\n/-rect id=r1 x=0 y=0 w=1 h=1 /-x=2\n  \n/-r\n/-\n  c\n",
-                max,
+                MAX_FILE_BYTES,
             ),
         ),
         ("largest board", largest_board()),
-        ("circles past the cap", circles_filling(max)),
     ];
-    for (name, src) in cases {
+    let files = (filler_files
+        .into_iter()
+        .map(|(name, src)| (name, src, ANY_READ)))
+    .chain(
+        capped_files()
+            .into_iter()
+            .map(|(name, src, _, bound)| (name, src, bound)),
+    );
+    let mut failed = Vec::new();
+    for (name, src, bound) in files {
         let mut best = Duration::MAX;
         let mut read = None;
-        for _ in 0..3 {
+        for _ in 0..5 {
             let started = Instant::now();
-            read = Some(from_lawh(&src).map(|b| b.len()));
+            read = Some(from_lawh(&src).map(|b| b.len()).map_err(|e| e.to_string()));
             best = best.min(started.elapsed());
         }
+        let read = format!("{:?}", read.unwrap());
         println!(
-            "{name:<22} {:>8} bytes: {:>8.1} ms ({:?})",
+            "{name:<44} {:>8} bytes: {:>8.3} ms (bound {:>5.1} ms) {:.70}",
             src.len(),
             best.as_secs_f64() * 1000.0,
-            read.unwrap()
+            bound.as_secs_f64() * 1000.0,
+            read
         );
+        if best > bound {
+            failed.push(name);
+        }
     }
+    assert!(failed.is_empty(), "over their bound: {failed:?}");
 }

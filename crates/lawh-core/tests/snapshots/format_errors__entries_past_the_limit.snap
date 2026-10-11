@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+1:30: too many entries on `lawh`; a lawh node has at most 6

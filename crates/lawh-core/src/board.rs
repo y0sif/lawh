@@ -168,27 +168,68 @@ pub(crate) enum TextProblem {
 /// The number of characters in `s` when it is within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`].
 /// Stops counting at the first cap passed.
 pub(crate) fn check_text(s: &str) -> Result<usize, TextProblem> {
-    let mut chars = 0;
-    let mut lines = 1;
-    let mut after_cr = false;
+    let mut count = TextCount::new();
     for c in s.chars() {
-        chars += 1;
-        if chars > MAX_TEXT_CHARS {
+        count.push(c)?;
+    }
+    Ok(count.chars())
+}
+
+/// Counts the characters and lines of a text one character at a time, against
+/// [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`], so a reader can stop at the first cap passed.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TextCount {
+    chars: usize,
+    lines: usize,
+    after_cr: bool,
+}
+
+impl TextCount {
+    pub(crate) fn new() -> Self {
+        Self {
+            chars: 0,
+            lines: 1,
+            after_cr: false,
+        }
+    }
+
+    /// Counts `c`, or fails if the text with `c` passes a cap.
+    pub(crate) fn push(&mut self, c: char) -> Result<(), TextProblem> {
+        self.chars += 1;
+        if self.chars > MAX_TEXT_CHARS {
             return Err(TextProblem::TooLong);
         }
         match c {
-            '\n' if after_cr => {}
+            '\n' if self.after_cr => {}
             '\n' | '\r' | '\u{B}' | '\u{C}' | '\u{85}' | '\u{2028}' | '\u{2029}' => {
-                lines += 1;
-                if lines > MAX_TEXT_LINES {
+                self.lines += 1;
+                if self.lines > MAX_TEXT_LINES {
                     return Err(TextProblem::TooManyLines);
                 }
             }
             _ => {}
         }
-        after_cr = c == '\r';
+        self.after_cr = c == '\r';
+        Ok(())
     }
-    Ok(chars)
+
+    /// Counts `n` characters none of which breaks a line, or fails, counting nothing, if the
+    /// text with them passes [`MAX_TEXT_CHARS`].
+    pub(crate) fn push_unbroken(&mut self, n: usize) -> Result<(), TextProblem> {
+        if n > MAX_TEXT_CHARS - self.chars.min(MAX_TEXT_CHARS) {
+            return Err(TextProblem::TooLong);
+        }
+        self.chars += n;
+        if n > 0 {
+            self.after_cr = false;
+        }
+        Ok(())
+    }
+
+    /// Characters counted so far.
+    pub(crate) fn chars(&self) -> usize {
+        self.chars
+    }
 }
 
 /// One object on the board.

@@ -135,7 +135,7 @@ fn is_bare_identifier(id: &str) -> bool {
 /// `\\`, `"`, newline, carriage return and tab use short escapes. Every other control character
 /// and the invisible or bidi formatting characters use `\u{X}`, so the file shows them plainly
 /// and KDL parsers accept it (KDL forbids several of them as literal characters).
-struct Quoted<'a>(&'a str);
+pub(super) struct Quoted<'a>(pub(super) &'a str);
 
 impl Display for Quoted<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -191,9 +191,16 @@ fn needs_unicode_escape(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::format::parse::{Parser, Value};
 
     fn quoted(s: &str) -> String {
         Quoted(s).to_string()
+    }
+
+    /// The first value of the first node of `src`, through lawh's own parser.
+    fn lawh_value(src: &str) -> Value {
+        let node = Parser::new(src).next_node().unwrap().unwrap();
+        node.entries.into_iter().next().unwrap().value
     }
 
     #[test]
@@ -222,7 +229,8 @@ mod tests {
         }
     }
 
-    /// Numbers in every form the writer uses read back as the same `f64` through kdl.
+    /// Numbers in every form the writer uses read back as the same `f64`, through lawh's parser
+    /// and kdl.
     #[test]
     fn numbers_parse_back_exactly() {
         let samples = [
@@ -248,6 +256,12 @@ mod tests {
                 other => panic!("{other:?}"),
             };
             assert_eq!(back.to_bits(), v.to_bits(), "{v:e} written as {}", Num(v));
+            let ours = match lawh_value(&format!("n {}", Num(v))) {
+                Value::Float(f) => f,
+                Value::Integer(i) => i as f64,
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(ours.to_bits(), v.to_bits(), "{v:e} written as {}", Num(v));
         }
     }
 
@@ -283,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn every_escape_parses_back_with_kdl() {
+    fn every_escape_reads_back() {
         let mut escaped: Vec<char> = (0..=0x10_FFFF)
             .filter_map(char::from_u32)
             .filter(|&c| needs_unicode_escape(c) || matches!(c, '\\' | '"' | '\n' | '\r' | '\t'))
@@ -297,6 +311,12 @@ mod tests {
                 .unwrap_or_else(|e| panic!("U+{:04X} escape does not parse: {e:?}", u32::from(c)));
             let value = parsed.nodes()[0].entries()[0].value().as_string();
             assert_eq!(value, Some(s.as_str()), "U+{:04X}", u32::from(c));
+            let ours = lawh_value(&doc);
+            assert!(
+                matches!(&ours, Value::String(t) if t.value == s),
+                "U+{:04X}: {ours:?}",
+                u32::from(c)
+            );
         }
     }
 

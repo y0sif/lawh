@@ -2,4 +2,4 @@
 source: crates/lawh-core/tests/format_errors.rs
 expression: e.to_string()
 ---
-1:14: Expected property value
+1:14: a number must start with a digit (write a 0 before the `.`, like `0.5`)

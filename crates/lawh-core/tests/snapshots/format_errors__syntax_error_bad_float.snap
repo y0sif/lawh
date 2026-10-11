@@ -2,4 +2,4 @@
 source: crates/lawh-core/tests/format_errors.rs
 expression: e.to_string()
 ---
-2:18: Non-digit character found after the '.' of a float
+2:18: expected a digit after the `.`, found a space

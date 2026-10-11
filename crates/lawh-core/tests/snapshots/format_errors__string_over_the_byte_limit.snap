@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/format_errors.rs
+expression: e.to_string()
+---
+2:20: this string or number takes more than 65536 bytes of the file

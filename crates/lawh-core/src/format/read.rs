@@ -1,15 +1,12 @@
-//! The `.lawh` reader, on top of the `kdl` crate's v2 parser.
+//! The `.lawh` reader: checks each node the parser reads and adds its object to the board.
 
-use std::collections::HashSet;
-
-use kdl::{KdlDocument, KdlEntry, KdlError, KdlNode, KdlValue};
 use kurbo::Point;
 
-use super::scan::{Scan, Stop, scan};
+use super::parse::{End, Entry, Node, Parser, Stop, Text, Value, is_bare_word};
+use super::write::Quoted;
 use super::{FormatError, MAX_FILE_BYTES};
 use crate::board::{
-    Board, BoardError, Object, ObjectId, Shape, TextProblem, check_text, is_valid_coordinate,
-    is_valid_size,
+    Board, BoardError, Object, ObjectId, Shape, TextProblem, is_valid_coordinate, is_valid_size,
 };
 
 /// The format version this build reads and writes.
@@ -17,104 +14,35 @@ const VERSION: i128 = 1;
 
 /// Reads a `.lawh` file. Accepts LF and CRLF line endings.
 ///
-/// Files longer than [`MAX_FILE_BYTES`] are rejected before anything is parsed, a file with
-/// more than [`MAX_OBJECTS`](crate::board::MAX_OBJECTS) objects at its first object over the
-/// limit (kdl never parses past it), and one with more than
-/// [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS) characters of text at the
-/// content that goes over it.
+/// Reading stops at the first problem, which the error points at. Files longer than
+/// [`MAX_FILE_BYTES`] are rejected before anything is read, a file with more than
+/// [`MAX_OBJECTS`](crate::board::MAX_OBJECTS) objects at its first object over the limit, and
+/// one with more than [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS) characters
+/// of text at the content that goes over it.
 pub fn from_lawh(src: &str) -> Result<Board, FormatError> {
     if src.len() > MAX_FILE_BYTES {
         return Err(FormatError::FileTooLarge { bytes: src.len() });
     }
-    let Scan { text, stop } = scan(src);
-    // A children block ends what kdl reads: the byte offset of its `{`, and the name of its
-    // owner when kdl drops that node (it is slashdashed). So does the first object past the
-    // limit: the byte offset where it starts.
-    let (end, children, too_many) = match stop {
-        None => (text.len(), None, None),
-        Some(Stop::Children {
-            brace,
-            cut,
-            dropped_owner,
-        }) => (cut, Some((brace, dropped_owner)), None),
-        Some(Stop::TooManyObjects { at }) => (at, None, Some(at)),
-        Some(Stop::Rejected { at, end, message }) => {
-            return Err(rejected(src, &text, at, end, message));
-        }
-        Some(Stop::Error(e)) => return Err(e),
-    };
-    let doc = KdlDocument::parse_v2(text.get(..end).unwrap_or(&text))
-        .map_err(|e| syntax_error(src, &e, 0))?;
     let reader = Reader { src };
-    let Some((header, objects)) = doc.nodes().split_first() else {
-        return Err(FormatError::MissingHeader { line: 1, column: 1 });
-    };
-    // The last node kdl kept owns the children block, unless kdl dropped the owner.
-    let owner_brace = |is_last: bool| match &children {
-        Some((brace, None)) if is_last => Some(*brace),
-        _ => None,
-    };
-    reader.header(header, owner_brace(objects.is_empty()))?;
-    let mut board = Board::new();
-    for (i, node) in objects.iter().enumerate() {
-        // The scan has stopped kdl before any object past the limit; this only guards against
-        // kdl reading a node the scan did not count.
-        if board.is_full() {
-            let (line, column) = line_column(src, node.span().offset());
-            return Err(FormatError::TooManyObjects { line, column });
+    let mut parser = Parser::new(src);
+    match parser.next_node() {
+        Ok(Some(header)) => reader.header(&header)?,
+        // A slashdashed node with children before any other node: no header either.
+        Ok(None) | Err(Stop::DroppedChildren { .. }) => {
+            return Err(FormatError::MissingHeader { line: 1, column: 1 });
         }
-        let object = reader.object(node, &board, owner_brace(i + 1 == objects.len()))?;
-        board.push_checked(object);
+        Err(stop) => return Err(reader.stopped(stop)),
     }
-    if let Some((brace, Some(kind))) = children {
-        let (line, column) = line_column(src, brace);
-        return Err(FormatError::Children { line, column, kind });
-    }
-    if let Some(at) = too_many {
-        let (line, column) = line_column(src, at);
-        return Err(FormatError::TooManyObjects { line, column });
-    }
-    Ok(board)
-}
-
-/// The error for text the scan rejected at byte `at`: kdl's own, from reading up to `end`
-/// (just past the bad token), or the scan's `message` if kdl accepts that much.
-fn rejected(src: &str, text: &str, at: usize, end: usize, message: &str) -> FormatError {
-    if let Err(e) = KdlDocument::parse_v2(text.get(..end).unwrap_or(text)) {
-        return syntax_error(src, &e, at);
-    }
-    let (line, column) = line_column(src, at);
-    FormatError::Syntax {
-        line,
-        column,
-        message: message.to_owned(),
-        help: None,
-    }
-}
-
-/// kdl's first diagnostic, placed no earlier than byte `min_offset`.
-///
-/// The scan has already checked everything before `min_offset`, so a diagnostic placed earlier
-/// is one of kdl's spans that run from the start of the document to the problem.
-fn syntax_error(src: &str, error: &KdlError, min_offset: usize) -> FormatError {
-    let first = error.diagnostics.first();
-    let offset = first.map_or(min_offset, |d| {
-        let (start, len) = (d.span.offset(), d.span.len());
-        // Some kdl errors carry a span from the start of the document to the problem.
-        let multi_line = src
-            .get(start..start + len)
-            .is_some_and(|s| s.contains('\n'));
-        let offset = if start == 0 && multi_line { len } else { start };
-        offset.max(min_offset)
-    });
-    let (line, column) = line_column(src, offset);
-    FormatError::Syntax {
-        line,
-        column,
-        message: first
-            .and_then(|d| d.message.clone())
-            .unwrap_or_else(|| "invalid KDL".to_owned()),
-        help: first.and_then(|d| d.help.clone()),
+    let mut board = Board::new();
+    loop {
+        match parser.next_node() {
+            Ok(Some(node)) => {
+                let object = reader.object(node, &board)?;
+                board.push_checked(object);
+            }
+            Ok(None) => return Ok(board),
+            Err(stop) => return Err(reader.stopped(stop)),
+        }
     }
 }
 
@@ -218,101 +146,129 @@ impl Reader<'_> {
         line_column(self.src, offset)
     }
 
-    /// Checks the `lawh version=1` header. `children` is the offset of a `{` after it.
-    fn header(&self, node: &KdlNode, children: Option<usize>) -> Result<(), FormatError> {
-        let start = node.span().offset();
-        if node.name().value() != "lawh" {
-            let (line, column) = self.at(start);
+    /// The error for why the parser stopped.
+    fn stopped(&self, stop: Stop) -> FormatError {
+        match stop {
+            Stop::Error(e) => e,
+            Stop::DroppedChildren { brace, owner } => {
+                let (line, column) = self.at(brace);
+                FormatError::Children {
+                    line,
+                    column,
+                    kind: owner,
+                }
+            }
+            Stop::TooManyObjects { at } => {
+                let (line, column) = self.at(at);
+                FormatError::TooManyObjects { line, column }
+            }
+        }
+    }
+
+    /// Checks the `lawh version=1` header.
+    fn header(&self, node: &Node) -> Result<(), FormatError> {
+        if node.name.over.is_some() || node.name.value != "lawh" {
+            let (line, column) = self.at(node.at);
             return Err(FormatError::MissingHeader { line, column });
         }
         // Check the version before anything else: a newer format may add properties or children.
-        let version = node
-            .entries()
-            .iter()
-            .find(|e| prop_name(e) == Some("version"));
-        let Some(version) = version else {
-            let (line, column) = self.at(start);
-            return Err(FormatError::MissingProperty {
-                line,
-                column,
-                kind: "lawh".to_owned(),
-                property: "version",
-            });
-        };
-        match version.value() {
-            KdlValue::Integer(VERSION) => {}
-            KdlValue::Integer(v) if *v > VERSION => {
-                let (line, column) = self.at(version.span().offset());
-                return Err(FormatError::NewerVersion {
+        let version = (node.entries.iter()).find(|e| key(e) == Some("version"));
+        match (version, node.end) {
+            (Some(version), _) => self.version(version)?,
+            // Past the entries the parser read, there may be a newer version.
+            (None, End::TooManyEntries { at }) => return Err(self.too_many_entries(at, "lawh")),
+            // Reported below, with the entry that passed the cap.
+            (None, End::OverCap) => {}
+            (None, End::Complete | End::Children { .. }) => {
+                let (line, column) = self.at(node.at);
+                return Err(FormatError::MissingProperty {
                     line,
                     column,
-                    version: *v,
-                });
-            }
-            other => {
-                let (line, column) = self.at(version.span().offset());
-                return Err(FormatError::InvalidVersion {
-                    line,
-                    column,
-                    found: other.to_string(),
+                    kind: "lawh".to_owned(),
+                    property: "version",
                 });
             }
         }
-        self.no_annotation_or_children(node, "lawh", children)?;
+        self.no_annotation_or_children(node, "lawh")?;
         let mut seen_version = false;
-        for entry in node.entries() {
+        for entry in &node.entries {
             self.no_annotation(entry)?;
-            let name = prop_name(entry);
+            let name = key(entry);
             if name == Some("version") && !seen_version {
                 seen_version = true;
                 continue;
             }
-            let (line, column) = self.at(entry.span().offset());
-            return Err(match name {
-                None => FormatError::ExtraArgument {
+            let (line, column) = self.at(entry.at);
+            return Err(match (&entry.key, name) {
+                (None, _) => FormatError::ExtraArgument {
                     line,
                     column,
                     kind: "lawh".to_owned(),
                 },
-                Some("version") => FormatError::DuplicateProperty {
+                (_, Some("version")) => FormatError::DuplicateProperty {
                     line,
                     column,
                     property: "version".to_owned(),
                 },
-                Some(name) => FormatError::UnknownProperty {
+                (Some(property), _) => FormatError::UnknownProperty {
                     line,
                     column,
                     kind: "lawh".to_owned(),
-                    property: name.to_owned(),
+                    property: shown_name(property),
                 },
             });
         }
-        Ok(())
+        self.cut(node, "lawh")
     }
 
-    /// Reads one object. `children` is the offset of a `{` after it.
-    fn object(
-        &self,
-        node: &KdlNode,
-        board: &Board,
-        children: Option<usize>,
-    ) -> Result<Object, FormatError> {
-        let start = node.span().offset();
-        let name = node.name().value();
-        if node.ty().is_some() {
+    /// Checks the header's `version` property.
+    fn version(&self, entry: &Entry) -> Result<(), FormatError> {
+        let (line, column) = self.at(entry.at);
+        match &entry.value {
+            Value::Integer(VERSION) => Ok(()),
+            Value::Integer(v) if *v > VERSION => Err(FormatError::NewerVersion {
+                line,
+                column,
+                version: *v,
+            }),
+            other => Err(FormatError::InvalidVersion {
+                line,
+                column,
+                found: shown_value(other),
+            }),
+        }
+    }
+
+    /// Reads one object.
+    fn object(&self, node: Node, board: &Board) -> Result<Object, FormatError> {
+        let start = node.at;
+        // The parser stops before any object past the limit; this only guards against a node it
+        // did not count.
+        if board.is_full() {
+            let (line, column) = self.at(start);
+            return Err(FormatError::TooManyObjects { line, column });
+        }
+        if node.annotated {
             let (line, column) = self.at(start);
             return Err(FormatError::TypeAnnotation { line, column });
         }
-        let Some(kind) = Kind::from_name(name) else {
+        let kind = (node.name.over.is_none())
+            .then(|| Kind::from_name(&node.name.value))
+            .flatten();
+        let Some(kind) = kind else {
             let (line, column) = self.at(start);
             return Err(FormatError::UnknownKind {
                 line,
                 column,
-                kind: name.to_owned(),
+                kind: shown_name(&node.name),
             });
         };
-        self.no_annotation_or_children(node, kind.name(), children)?;
-        let parts = self.parts(node, kind, board)?;
+        self.no_annotation_or_children(&node, kind.name())?;
+        let (end, cut) = (node.end, node.is_cut());
+        let parts = self.parts(node.entries, kind, board)?;
+        if cut {
+            return Err(self.cut_error(end, start, kind.name()));
+        }
 
         let missing = |property: &'static str| {
             let (line, column) = self.at(start);
@@ -345,13 +301,12 @@ impl Reader<'_> {
     }
 
     /// Collects a node's id, numbers and content, rejecting anything the kind does not take.
-    fn parts(&self, node: &KdlNode, kind: Kind, board: &Board) -> Result<Parts, FormatError> {
+    fn parts(&self, entries: Vec<Entry>, kind: Kind, board: &Board) -> Result<Parts, FormatError> {
         let mut parts = Parts::default();
-        let mut seen = HashSet::new();
-        for entry in node.entries() {
-            self.no_annotation(entry)?;
-            let here = || self.at(entry.span().offset());
-            let Some(prop) = prop_name(entry) else {
+        for entry in entries {
+            self.no_annotation(&entry)?;
+            let here = || self.at(entry.at);
+            let Some(property) = &entry.key else {
                 if !kind.has_content() || parts.content.is_some() {
                     let (line, column) = here();
                     return Err(FormatError::ExtraArgument {
@@ -360,7 +315,7 @@ impl Reader<'_> {
                         kind: kind.name().to_owned(),
                     });
                 }
-                let KdlValue::String(s) = entry.value() else {
+                let Value::String(text) = entry.value else {
                     let (line, column) = here();
                     return Err(FormatError::TextNotString {
                         line,
@@ -368,33 +323,23 @@ impl Reader<'_> {
                         kind: kind.name().to_owned(),
                     });
                 };
-                let chars = check_text(s).map_err(|problem| {
-                    let (line, column) = here();
-                    let kind = kind.name().to_owned();
-                    match problem {
-                        TextProblem::TooLong => FormatError::TextTooLong { line, column, kind },
-                        TextProblem::TooManyLines => {
-                            FormatError::TooManyLines { line, column, kind }
-                        }
-                    }
-                })?;
-                if !board.has_room_for_text(chars) {
-                    let (line, column) = here();
-                    return Err(FormatError::TooMuchText { line, column });
-                }
-                parts.content = Some(s.clone());
+                parts.content = Some(self.content(text, entry.at, kind, board)?);
                 continue;
             };
-            if !seen.insert(prop) {
+            let duplicate = || {
                 let (line, column) = here();
-                return Err(FormatError::DuplicateProperty {
+                FormatError::DuplicateProperty {
                     line,
                     column,
-                    property: prop.to_owned(),
-                });
-            }
-            if prop == "id" {
-                let id = self.id(entry)?;
+                    property: property.value.clone(),
+                }
+            };
+            let name = property.over.is_none().then_some(property.value.as_str());
+            if name == Some("id") {
+                if parts.id.is_some() {
+                    return Err(duplicate());
+                }
+                let id = self.id(entry.at, &entry.value)?;
                 if board.contains(&id) {
                     let (line, column) = here();
                     return Err(FormatError::DuplicateId {
@@ -404,27 +349,51 @@ impl Reader<'_> {
                     });
                 }
                 parts.id = Some(id);
-            } else if let Some(slot) = (kind.numbers().iter())
-                .position(|n| *n == prop)
-                .and_then(|i| parts.numbers.get_mut(i))
+            } else if let Some((name, slot)) =
+                (kind.numbers().iter().zip(&mut parts.numbers)).find(|(n, _)| Some(**n) == name)
             {
-                *slot = Some(self.number(entry, prop)?);
+                if slot.is_some() {
+                    return Err(duplicate());
+                }
+                *slot = Some(self.number(entry.at, &entry.value, name)?);
             } else {
                 let (line, column) = here();
                 return Err(FormatError::UnknownProperty {
                     line,
                     column,
                     kind: kind.name().to_owned(),
-                    property: prop.to_owned(),
+                    property: shown_name(property),
                 });
             }
         }
         Ok(parts)
     }
 
-    fn id(&self, entry: &KdlEntry) -> Result<ObjectId, FormatError> {
-        let KdlValue::String(s) = entry.value() else {
-            let (line, column) = self.at(entry.span().offset());
+    /// The content of a `text` or `math` node, the entry at byte `at`, within the caps on text.
+    fn content(
+        &self,
+        text: Text,
+        at: usize,
+        kind: Kind,
+        board: &Board,
+    ) -> Result<String, FormatError> {
+        let (line, column) = if text.over.is_some() || !board.has_room_for_text(text.chars) {
+            self.at(at)
+        } else {
+            return Ok(text.value);
+        };
+        let kind = kind.name().to_owned();
+        Err(match text.over {
+            Some(TextProblem::TooLong) => FormatError::TextTooLong { line, column, kind },
+            Some(TextProblem::TooManyLines) => FormatError::TooManyLines { line, column, kind },
+            None => FormatError::TooMuchText { line, column },
+        })
+    }
+
+    /// The `id` property, the entry at byte `at`.
+    fn id(&self, at: usize, value: &Value) -> Result<ObjectId, FormatError> {
+        let Value::String(text) = value else {
+            let (line, column) = self.at(at);
             return Err(FormatError::WrongType {
                 line,
                 column,
@@ -432,26 +401,26 @@ impl Reader<'_> {
                 expected: "a string such as `c1`",
             });
         };
-        ObjectId::new(s.as_str()).map_err(|e| {
-            let (line, column) = self.at(entry.span().offset());
+        ObjectId::new(text.value.as_str()).map_err(|e| {
+            let (line, column) = self.at(at);
             match e {
                 BoardError::IdTooLong(_) => FormatError::IdTooLong { line, column },
                 _ => FormatError::InvalidId {
                     line,
                     column,
-                    id: s.clone(),
+                    id: text.value.clone(),
                 },
             }
         })
     }
 
-    /// A finite number within the board's limits: a size for `r`, `rx`, `ry`, `w` and `h`, a
-    /// coordinate otherwise.
-    fn number(&self, entry: &KdlEntry, prop: &str) -> Result<f64, FormatError> {
-        let v = match entry.value() {
-            KdlValue::Integer(i) => *i as f64,
-            KdlValue::Float(f) => *f,
-            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => f64::NAN,
+    /// A finite number within the board's limits, the entry at byte `at`: a size for `r`, `rx`,
+    /// `ry`, `w` and `h`, a coordinate otherwise.
+    fn number(&self, at: usize, value: &Value, prop: &str) -> Result<f64, FormatError> {
+        let v = match value {
+            Value::Integer(i) => *i as f64,
+            Value::Float(f) => *f,
+            Value::String(_) | Value::Bool(_) | Value::Null => f64::NAN,
         };
         let is_size = matches!(prop, "r" | "rx" | "ry" | "w" | "h");
         let in_range = if is_size {
@@ -463,10 +432,10 @@ impl Reader<'_> {
             return Ok(v);
         }
         // Only now find the position: it scans from the file start.
-        let (line, column) = self.at(entry.span().offset());
+        let (line, column) = self.at(at);
         let property = prop.to_owned();
-        Err(match entry.value() {
-            KdlValue::Integer(_) | KdlValue::Float(_) if v.is_finite() => {
+        Err(match value {
+            Value::Integer(_) | Value::Float(_) if v.is_finite() => {
                 if is_size {
                     FormatError::InvalidSize {
                         line,
@@ -481,13 +450,13 @@ impl Reader<'_> {
                     }
                 }
             }
-            KdlValue::Integer(_) | KdlValue::Float(_) => FormatError::WrongType {
+            Value::Integer(_) | Value::Float(_) => FormatError::WrongType {
                 line,
                 column,
                 property,
                 expected: "a finite number",
             },
-            KdlValue::String(_) | KdlValue::Bool(_) | KdlValue::Null => FormatError::WrongType {
+            Value::String(_) | Value::Bool(_) | Value::Null => FormatError::WrongType {
                 line,
                 column,
                 property,
@@ -496,30 +465,21 @@ impl Reader<'_> {
         })
     }
 
-    fn no_annotation(&self, entry: &KdlEntry) -> Result<(), FormatError> {
-        if entry.ty().is_some() {
-            let (line, column) = self.at(entry.span().offset());
+    fn no_annotation(&self, entry: &Entry) -> Result<(), FormatError> {
+        if entry.annotated {
+            let (line, column) = self.at(entry.at);
             return Err(FormatError::TypeAnnotation { line, column });
         }
         Ok(())
     }
 
-    /// Rejects a type annotation on the node, then a children block: `children` is the offset
-    /// of the `{` the scan stopped at, when it belongs to this node.
-    fn no_annotation_or_children(
-        &self,
-        node: &KdlNode,
-        kind: &str,
-        children: Option<usize>,
-    ) -> Result<(), FormatError> {
-        let start = node.span().offset();
-        if node.ty().is_some() {
-            let (line, column) = self.at(start);
+    /// Rejects a type annotation on the node, then a children block.
+    fn no_annotation_or_children(&self, node: &Node, kind: &str) -> Result<(), FormatError> {
+        if node.annotated {
+            let (line, column) = self.at(node.at);
             return Err(FormatError::TypeAnnotation { line, column });
         }
-        // kdl never sees a `{` (the scan stops there), but stay safe if it reports children.
-        let brace = children.or_else(|| node.children().map(|_| start));
-        if let Some(brace) = brace {
+        if let End::Children { brace } = node.end {
             let (line, column) = self.at(brace);
             return Err(FormatError::Children {
                 line,
@@ -528,6 +488,73 @@ impl Reader<'_> {
             });
         }
         Ok(())
+    }
+
+    /// Fails if the parser stopped reading the node at a cap.
+    fn cut(&self, node: &Node, kind: &str) -> Result<(), FormatError> {
+        match node.end {
+            End::Complete | End::Children { .. } => Ok(()),
+            end => Err(self.cut_error(end, node.at, kind)),
+        }
+    }
+
+    /// The error for a node the parser stopped reading at a cap, `end`. The entry that passed a
+    /// cap on text has always been reported before this, as an unknown property, an extra
+    /// argument, a text too long or the like; this only guards against one that was not.
+    fn cut_error(&self, end: End, start: usize, kind: &str) -> FormatError {
+        if let End::TooManyEntries { at } = end {
+            return self.too_many_entries(at, kind);
+        }
+        let (line, column) = self.at(start);
+        FormatError::TextTooLong {
+            line,
+            column,
+            kind: kind.to_owned(),
+        }
+    }
+
+    fn too_many_entries(&self, at: usize, kind: &str) -> FormatError {
+        let (line, column) = self.at(at);
+        FormatError::TooManyEntries {
+            line,
+            column,
+            kind: kind.to_owned(),
+        }
+    }
+}
+
+/// The key of a property, unless it passed a cap.
+fn key(entry: &Entry) -> Option<&str> {
+    (entry.key.as_ref())
+        .filter(|k| k.over.is_none())
+        .map(|k| k.value.as_str())
+}
+
+/// A name for messages: as read, with `…` after one cut at a cap.
+fn shown_name(text: &Text) -> String {
+    match text.over {
+        None => text.value.clone(),
+        Some(_) => format!("{}…", text.value),
+    }
+}
+
+/// A value for messages, as KDL writes it: `#true`, `1.0`, `c1`, `"1"`.
+fn shown_value(value: &Value) -> String {
+    match value {
+        Value::String(text) if text.over.is_none() && is_bare_word(&text.value) => {
+            text.value.clone()
+        }
+        Value::String(text) => {
+            let cut = if text.over.is_some() { "…" } else { "" };
+            format!("{}{cut}", Quoted(&text.value))
+        }
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) if f.is_nan() => "#nan".to_owned(),
+        Value::Float(f) if *f == f64::INFINITY => "#inf".to_owned(),
+        Value::Float(f) if *f == f64::NEG_INFINITY => "#-inf".to_owned(),
+        Value::Float(f) => format!("{f:?}"),
+        Value::Bool(b) => format!("#{b}"),
+        Value::Null => "#null".to_owned(),
     }
 }
 
@@ -567,10 +594,6 @@ fn shape(kind: Kind, values: [f64; MAX_NUMBERS], content: String) -> Shape {
             b: Point::new(v2, v3),
         },
     }
-}
-
-fn prop_name(entry: &KdlEntry) -> Option<&str> {
-    entry.name().map(kdl::KdlIdentifier::value)
 }
 
 #[cfg(test)]
