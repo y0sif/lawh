@@ -55,7 +55,7 @@ const NS_PER_OUTLINE_PX: f64 = 14.0;
 const NS_PER_AREA_PX: f64 = 0.3;
 /// Each glyph drawn: finding and placing its outline. Glyphs have their own constants, fitted
 /// to every glyph size from 8 to 65,536 pixels for the plainest and the most complex glyphs of
-/// both bundled fonts (`calibrate_costs`).
+/// both bundled fonts (`calibrate_glyphs`).
 const NS_PER_GLYPH: f64 = 300.0;
 /// Each line a glyph's outline is flattened into.
 const GLYPH_NS_PER_LINE: f64 = 50.0;
