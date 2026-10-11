@@ -177,6 +177,11 @@ impl Pending {
         self.count.is_none() && self.keys.is_empty() && self.operator.is_none()
     }
 
+    /// An operator waits for its motion.
+    pub(super) fn has_operator(&self) -> bool {
+        self.operator.is_some()
+    }
+
     /// The pending keys in Vim notation, counts included: `2d3`.
     pub(super) fn display(&self) -> String {
         let count = |c: Option<u32>| c.map(|n| n.to_string()).unwrap_or_default();

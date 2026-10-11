@@ -1,0 +1,8 @@
+---
+source: crates/lawh-core/tests/keymap.rs
+assertion_line: 238
+expression: r.snapshot()
+---
+// mode=normal cursor=object(t1) keys=3
+lawh version=1
+text id=t1 x=0 y=0 "bcd"

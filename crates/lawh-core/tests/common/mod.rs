@@ -12,6 +12,9 @@
 //! script typed (one per key in Vim notation: `<CR>` is one), the Visual selection, if any
 //! (` selection=c1,t1`), the cursor's byte offset in the text block being edited, in Insert and
 //! block-Normal mode (` byte=3`), and the message, if any: ` message="..."`.
+//!
+//! In a key script, `<Timeout>` stands for the mapping timeout: the harness calls
+//! [`Engine::timeout`] there. It is not a key and counts as none.
 
 #![allow(
     dead_code,
@@ -38,6 +41,18 @@ pub fn run(board: Board, script: &str) -> Run {
     run_engine(Engine::new(board), script)
 }
 
+/// Where a key script calls [`Engine::timeout`].
+pub const TIMEOUT: &str = "<Timeout>";
+
+/// Reads `rc` as a lawhrc into an engine for `board`, then types `script` as [`run`] does. The
+/// rc must load without warnings.
+pub fn run_with_rc(rc: &str, board: Board, script: &str) -> Run {
+    let mut engine = Engine::new(board);
+    let warnings = engine.source(rc);
+    assert!(warnings.is_empty(), "lawhrc warnings: {warnings:#?}");
+    run_engine(engine, script)
+}
+
 /// Types `script` into `engine`, as [`run`] does.
 pub fn run_engine(engine: Engine, script: &str) -> Run {
     let mut run = Run {
@@ -60,22 +75,34 @@ pub fn board(objects: &str) -> Board {
 pub fn trace(board: Board, script: &str) -> String {
     let mut run = run(board, "");
     let mut lines = Vec::new();
-    for key in parse_keys(script).unwrap_or_else(|e| panic!("bad key script {script:?}: {e}")) {
-        let key = format_keys(&[key]);
-        run.feed(&key);
-        lines.push(format!("{key:>5} {}", run.header()));
+    for (i, part) in script.split(TIMEOUT).enumerate() {
+        if i > 0 {
+            run.feed(TIMEOUT);
+            lines.push(format!("{TIMEOUT} {}", run.header()));
+        }
+        for key in parse_keys(part).unwrap_or_else(|e| panic!("bad key script {part:?}: {e}")) {
+            let key = format_keys(&[key]);
+            run.feed(&key);
+            lines.push(format!("{key:>5} {}", run.header()));
+        }
     }
     lines.join("\n")
 }
 
 impl Run {
-    /// Types more keys into the same engine.
+    /// Types more keys into the same engine, calling [`Engine::timeout`] at each `<Timeout>`.
     pub fn feed(&mut self, script: &str) -> &mut Self {
-        let keys = parse_keys(script).unwrap_or_else(|e| panic!("bad key script {script:?}: {e}"));
-        self.keys += keys.len();
-        for key in keys {
-            let effects = self.engine.feed(key, &mut FixedMeasure);
-            self.effects.extend(effects);
+        for (i, part) in script.split(TIMEOUT).enumerate() {
+            if i > 0 {
+                let effects = self.engine.timeout(&mut FixedMeasure);
+                self.effects.extend(effects);
+            }
+            let keys = parse_keys(part).unwrap_or_else(|e| panic!("bad key script {part:?}: {e}"));
+            self.keys += keys.len();
+            for key in keys {
+                let effects = self.engine.feed(key, &mut FixedMeasure);
+                self.effects.extend(effects);
+            }
         }
         self
     }

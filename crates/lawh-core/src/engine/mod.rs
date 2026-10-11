@@ -15,6 +15,11 @@
 //! enters one in block-Normal mode, Vim's Normal mode inside the text (see
 //! [`Engine::text_cursor`]). While a block is edited, the board already shows its live text;
 //! the whole Insert session is one undo step.
+//!
+//! Keys go through key mappings before the grammar (see `keymap.rs`): `:map` and its family,
+//! per mode as in Vim, with `<Leader>` and a timeout for keys that start a longer mapping
+//! ([`Effect::ArmTimer`], [`Engine::timeout`]). `:set` changes the [`Settings`], and
+//! [`Engine::source`] reads both from a lawhrc.
 
 mod block;
 mod cmdline;
@@ -22,11 +27,13 @@ mod command;
 mod cursor;
 mod exec;
 mod insert;
+mod keymap;
 mod measure;
 mod motion;
 mod normal;
 mod ops;
 mod place;
+mod rc;
 mod register;
 mod repeat;
 mod settings;
@@ -40,16 +47,19 @@ use kurbo::{Point, Rect};
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, parse_command};
 pub use cursor::{Cursor, anchor, round3};
+pub use keymap::{MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MapKey, MapMode};
 pub use measure::{FixedMeasure, Measure, shape_bounds};
 pub use motion::ROW_TOLERANCE;
 pub use place::PLACE_GAP;
+pub use rc::{MAX_RC_BYTES, MAX_RC_WARNINGS, RcWarning};
 pub use repeat::MAX_REPEAT_KEYS;
-pub use settings::{Escape, Settings};
+pub use settings::{Escape, MAX_TIMEOUTLEN, OptionName, OptionValue, SetArg, Settings};
 pub use text::TextCursor;
 pub use undo::{MAX_UNDO_BYTES, MAX_UNDO_STEPS};
 
 use self::cmdline::CommandLine;
 use self::exec::PendingWrite;
+use self::keymap::Keymap;
 use self::normal::Pending;
 use self::register::Register;
 use self::repeat::Repeat;
@@ -91,7 +101,9 @@ pub enum Effect {
     Write { path: String, quit_after: bool },
     /// Quit the app. Only sent when quitting is allowed.
     Quit,
-    /// Call the engine's timeout after `ms` milliseconds, unless another key comes first.
+    /// Keys wait for a longer mapping: call [`Engine::timeout`] after `ms` milliseconds,
+    /// unless another key comes first. The app drops its armed timer on every key, before
+    /// [`Engine::feed`], and arms this one in its place.
     ArmTimer { ms: u64 },
 }
 
@@ -135,6 +147,8 @@ pub struct Engine {
     /// The Insert session under way.
     session: Option<Session>,
     settings: Settings,
+    /// Key mappings and the typeahead.
+    keymap: Keymap,
 }
 
 impl Engine {
@@ -160,6 +174,7 @@ impl Engine {
             block: None,
             session: None,
             settings: Settings::default(),
+            keymap: Keymap::default(),
         }
     }
 
@@ -183,17 +198,20 @@ impl Engine {
         &mut self.settings
     }
 
-    /// Takes one key. Keys are made canonical first (see [`Key::new`]).
+    /// Takes one typed key. Keys are made canonical first (see [`Key::new`]), then go through
+    /// the key mappings. When the keys typed so far start a longer mapping, they wait: the
+    /// effects end with [`Effect::ArmTimer`], and the keys run on the next key or on
+    /// [`Engine::timeout`].
     ///
     /// `measure` gives the bounds of text and math, for object motions, Visual mode and puts.
     pub fn feed(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         let key = key.canonical();
         self.message = None;
-        self.dispatch(key, measure)
+        self.type_key(key, measure)
     }
 
-    /// Runs one key in the current mode. `.` replays its keys through here, so mappings do not
-    /// apply to them again.
+    /// Runs one key in the current mode, after mappings. `.` replays its keys through here, so
+    /// mappings do not apply to them again.
     fn dispatch(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         match self.mode {
             Mode::Normal => self.normal_key(key, measure),
@@ -206,7 +224,7 @@ impl Engine {
 
     /// A mouse click at board point `at`, on object `hit` if any. It ends an Insert session
     /// (as one undo step), block-Normal mode, Visual mode and the command line, drops pending
-    /// keys, and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units).
+    /// keys (those waiting for a mapping too), and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units).
     /// A point that is not finite leaves the cursor where it is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
         if self.session.is_some() {
@@ -214,6 +232,7 @@ impl Engine {
         }
         self.block = None;
         self.pending = Pending::default();
+        self.keymap.flush();
         self.message = None;
         self.command_line.clear();
         self.leave_visual();
@@ -248,10 +267,11 @@ impl Engine {
             .then(|| (self.command_line.text(), self.command_line.cursor()))
     }
 
-    /// Keys typed but not yet run, in Vim notation (`3`, `2d3`), for the status line. A count
-    /// past [`MAX_COUNT`] shows as `MAX_COUNT`.
+    /// Keys typed but not yet run, in Vim notation (`3`, `2d3`), for the status line: a
+    /// command's keys so far, then keys waiting for a longer mapping (`2d<Space>`). A count past
+    /// [`MAX_COUNT`] shows as `MAX_COUNT`.
     pub fn pending(&self) -> String {
-        self.pending.display()
+        self.pending.display() + &self.keymap.waiting()
     }
 
     pub fn message(&self) -> Option<&Message> {

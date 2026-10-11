@@ -9,8 +9,19 @@
 //!
 //! `:text` and `:math` take everything after the first space as it is typed, with no escapes,
 //! comments or `|` between commands.
+//!
+//! The mapping commands take Vim's: `:map`, `:noremap`, `:unmap` and `:mapclear` with a mode
+//! letter in front (`:nnoremap`, `:iunmap`) or `!` after (`:map!` for Insert and command-line
+//! mode). The map arguments `<silent>` (no effect) and `<nowait>` may come first; then the keys
+//! to map, up to the first space, and what they map to, the rest of the line without spaces at
+//! its ends. Both are in Vim key notation, with `<Leader>` and `<Nop>` (no keys). As with
+//! `:text`, `|` is a key, not a new command, so `<Bar>` and `|` are the same. `:se[t]` takes
+//! options (see `settings.rs`).
 
+use super::keymap::{IC, MAX_MAP_KEYS, MapKey, MapMode, NVO};
+use super::settings::{SetArg, parse_set_arg};
 use crate::board::MAX_SIZE;
+use crate::key::{KeyParseError, parse_keys};
 
 /// A parsed `:` command. Shape coordinates the user left out are `None`: the engine fills them
 /// from the cursor.
@@ -56,6 +67,30 @@ pub enum Command {
     Undo,
     /// `:red[o]`.
     Redo,
+    /// `:map {lhs} {rhs}` and its family (`:nnoremap`, `:imap`, `:noremap!` ...): `lhs` typed in
+    /// one of `modes` runs `rhs` instead. `noremap`: `rhs` is not mapped again.
+    Map {
+        modes: &'static [MapMode],
+        noremap: bool,
+        nowait: bool,
+        lhs: Vec<MapKey>,
+        rhs: Vec<MapKey>,
+    },
+    /// A mapping command with keys alone (`:nmap j`) shows their mappings; with none (`:map`),
+    /// how many mappings there are.
+    ShowMaps {
+        modes: &'static [MapMode],
+        lhs: Vec<MapKey>,
+    },
+    /// `:unm[ap] {lhs}` and its family.
+    Unmap {
+        modes: &'static [MapMode],
+        lhs: Vec<MapKey>,
+    },
+    /// `:mapc[lear]` and its family.
+    MapClear { modes: &'static [MapMode] },
+    /// `:se[t]` and its arguments; none shows every option.
+    Set(Vec<SetArg>),
 }
 
 /// The ends of a line or an arrow. The start is (`x1`, `y1`), the cursor point where left out.
@@ -124,6 +159,33 @@ pub enum CommandError {
     /// `:w !cmd` or `:w >>file`, which Vim reads as a shell command or an append.
     #[error("writing to a command or appending to a file is not supported: `:w {0}`")]
     UnsupportedFile(String),
+    /// Keys of a mapping that are not Vim key notation.
+    #[error("in `{keys}`: {error}")]
+    BadKeys { keys: String, error: KeyParseError },
+    /// More than [`MAX_MAP_KEYS`] keys on one side of a mapping; the field says which side.
+    #[error("{0} may be at most {MAX_MAP_KEYS} keys long")]
+    TooManyKeys(&'static str),
+    /// A map argument or key name of Vim's that lawh does not have (`<expr>`, `<Cmd>`).
+    #[error("`{0}` is not supported in lawh mappings")]
+    NotSupported(String),
+    /// A mapping command that needs keys and has none.
+    #[error("missing the keys for `:{0}`")]
+    MissingKeys(&'static str),
+    /// `:unmap` with more than the keys to unmap.
+    #[error("`:{0}` takes only the keys to unmap")]
+    OnlyKeys(&'static str),
+    #[error("unknown option `{0}`")]
+    UnknownOption(String),
+    /// A `:set` word other than `option`, `option?`, `option&` or `option=value`.
+    #[error("`{0}`: use `option=value`, `option?` or `option&`")]
+    BadSetArgument(String),
+    /// A value the option does not take; `usage` says what it takes.
+    #[error("bad value `{value}` for `{option}`: it takes {usage}")]
+    BadValue {
+        option: &'static str,
+        value: String,
+        usage: String,
+    },
 }
 
 /// One command: its full name, the shortest abbreviation accepted, and how to read the rest.
@@ -148,9 +210,49 @@ const COMMANDS: &[Row] = &[
         parse: circle,
     },
     Row {
+        name: "cmap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "cmapclear",
+        min: 5,
+        parse: map_clear,
+    },
+    Row {
+        name: "cnoremap",
+        min: 3,
+        parse: map,
+    },
+    Row {
+        name: "cunmap",
+        min: 2,
+        parse: unmap,
+    },
+    Row {
         name: "ellipse",
         min: 2,
         parse: ellipse,
+    },
+    Row {
+        name: "imap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "imapclear",
+        min: 5,
+        parse: map_clear,
+    },
+    Row {
+        name: "inoremap",
+        min: 3,
+        parse: map,
+    },
+    Row {
+        name: "iunmap",
+        min: 2,
+        parse: unmap,
     },
     Row {
         name: "line",
@@ -158,9 +260,64 @@ const COMMANDS: &[Row] = &[
         parse: line,
     },
     Row {
+        name: "map",
+        min: 3,
+        parse: map,
+    },
+    Row {
+        name: "mapclear",
+        min: 4,
+        parse: map_clear,
+    },
+    Row {
         name: "math",
         min: 2,
         parse: math,
+    },
+    Row {
+        name: "nmap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "nmapclear",
+        min: 5,
+        parse: map_clear,
+    },
+    Row {
+        name: "nnoremap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "noremap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "nunmap",
+        min: 3,
+        parse: unmap,
+    },
+    Row {
+        name: "omap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "omapclear",
+        min: 5,
+        parse: map_clear,
+    },
+    Row {
+        name: "onoremap",
+        min: 3,
+        parse: map,
+    },
+    Row {
+        name: "ounmap",
+        min: 2,
+        parse: unmap,
     },
     Row {
         name: "quit",
@@ -178,6 +335,11 @@ const COMMANDS: &[Row] = &[
         parse: redo,
     },
     Row {
+        name: "set",
+        min: 2,
+        parse: set,
+    },
+    Row {
         name: "text",
         min: 2,
         parse: text,
@@ -186,6 +348,31 @@ const COMMANDS: &[Row] = &[
         name: "undo",
         min: 1,
         parse: undo,
+    },
+    Row {
+        name: "unmap",
+        min: 3,
+        parse: unmap,
+    },
+    Row {
+        name: "vmap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "vmapclear",
+        min: 5,
+        parse: map_clear,
+    },
+    Row {
+        name: "vnoremap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "vunmap",
+        min: 2,
+        parse: unmap,
     },
     Row {
         name: "wq",
@@ -201,6 +388,26 @@ const COMMANDS: &[Row] = &[
         name: "xit",
         min: 1,
         parse: exit,
+    },
+    Row {
+        name: "xmap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "xmapclear",
+        min: 5,
+        parse: map_clear,
+    },
+    Row {
+        name: "xnoremap",
+        min: 2,
+        parse: map,
+    },
+    Row {
+        name: "xunmap",
+        min: 2,
+        parse: unmap,
     },
 ];
 
@@ -420,6 +627,205 @@ fn undo(args: Args<'_>) -> Result<Command, CommandError> {
 fn redo(args: Args<'_>) -> Result<Command, CommandError> {
     args.nothing_else()?;
     Ok(Command::Redo)
+}
+
+/// `:map` and its family: keys and what they map to make a mapping; keys alone show theirs.
+fn map(args: Args<'_>) -> Result<Command, CommandError> {
+    let noremap = args.name.ends_with("noremap");
+    let modes = map_modes(&args, if noremap { "noremap" } else { "map" })?;
+    let (nowait, rest) = map_arguments(args.rest)?;
+    let (lhs, rhs) = split_keys(rest);
+    let lhs = map_keys(lhs, "the keys to map")?;
+    if rhs.is_empty() {
+        return Ok(Command::ShowMaps { modes, lhs });
+    }
+    if lhs.is_empty() {
+        return Err(CommandError::MissingKeys(args.name));
+    }
+    let rhs = map_keys(rhs, "what they map to")?;
+    Ok(Command::Map {
+        modes,
+        noremap,
+        nowait,
+        lhs,
+        rhs,
+    })
+}
+
+fn unmap(args: Args<'_>) -> Result<Command, CommandError> {
+    let modes = map_modes(&args, "unmap")?;
+    let (_, rest) = map_arguments(args.rest)?;
+    let (lhs, extra) = split_keys(rest);
+    if !extra.is_empty() {
+        return Err(CommandError::OnlyKeys(args.name));
+    }
+    let lhs = map_keys(lhs, "the keys to unmap")?;
+    if lhs.is_empty() {
+        return Err(CommandError::MissingKeys(args.name));
+    }
+    Ok(Command::Unmap { modes, lhs })
+}
+
+fn map_clear(args: Args<'_>) -> Result<Command, CommandError> {
+    let modes = map_modes(&args, "mapclear")?;
+    if args.rest.trim().is_empty() {
+        Ok(Command::MapClear { modes })
+    } else {
+        Err(CommandError::NoArguments(args.name))
+    }
+}
+
+/// The modes of a mapping command: from the letter before `base` in its name (`n` in
+/// `nnoremap`), or without one, Normal, Visual and operator-pending mode, or with `!`
+/// Insert and command-line mode.
+fn map_modes(args: &Args<'_>, base: &str) -> Result<&'static [MapMode], CommandError> {
+    let letter = args.name.strip_suffix(base).unwrap_or(args.name);
+    match (letter, args.bang) {
+        ("", false) => Ok(NVO),
+        ("", true) => Ok(IC),
+        (_, true) => Err(CommandError::NoBang(args.name)),
+        ("n", false) => Ok(&[MapMode::Normal]),
+        ("v" | "x", false) => Ok(&[MapMode::Visual]),
+        ("o", false) => Ok(&[MapMode::OperatorPending]),
+        ("i", false) => Ok(&[MapMode::Insert]),
+        ("c", false) => Ok(&[MapMode::CommandLine]),
+        _ => Err(CommandError::Unknown(args.name.to_owned())),
+    }
+}
+
+/// Vim's map arguments that lawh does not take. `<buffer>`, `<script>` and `<unique>` change
+/// which mappings apply; `<expr>` runs Vim script.
+const UNSUPPORTED_ARGUMENTS: &[&str] = &["<buffer>", "<expr>", "<script>", "<unique>"];
+
+/// Reads the map arguments at the start of `rest`, as Vim does (spelled exactly so): whether
+/// `<nowait>` was given, and the rest after them. `<silent>` and `<special>` have no effect:
+/// lawh shows nothing as a mapping runs and always reads `<>` notation.
+fn map_arguments(rest: &str) -> Result<(bool, &str), CommandError> {
+    let mut nowait = false;
+    let mut rest = rest.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("<nowait>") {
+            nowait = true;
+            rest = after.trim_start();
+        } else if let Some(after) = ["<silent>", "<special>"]
+            .iter()
+            .find_map(|arg| rest.strip_prefix(arg))
+        {
+            rest = after.trim_start();
+        } else if let Some(arg) = UNSUPPORTED_ARGUMENTS.iter().find(|a| rest.starts_with(**a)) {
+            return Err(CommandError::NotSupported((*arg).to_owned()));
+        } else {
+            return Ok((nowait, rest));
+        }
+    }
+}
+
+/// The keys to map, up to the first space, and the rest without spaces at its ends: Vim keeps
+/// trailing spaces in what keys map to, but an invisible space at the end of a line should not
+/// become keys (`<Space>` types one on purpose).
+fn split_keys(rest: &str) -> (&str, &str) {
+    let rest = rest.trim_start();
+    let (lhs, rhs) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+    (lhs, rhs.trim())
+}
+
+/// What a name in `<>` means in a mapping, besides a key.
+#[derive(Clone, Copy)]
+enum MapName {
+    /// `<Leader>`.
+    Leader,
+    /// `<Nop>`: no keys.
+    Nothing,
+    /// A name Vim has and lawh does not: refused, not read as plain characters.
+    Unsupported,
+}
+
+/// Names in `<>` with a meaning in mappings, lowercase (they are matched ignoring case).
+const MAP_NAMES: &[(&str, MapName)] = &[
+    ("<leader>", MapName::Leader),
+    ("<nop>", MapName::Nothing),
+    ("<cmd>", MapName::Unsupported),
+    ("<localleader>", MapName::Unsupported),
+    ("<plug>", MapName::Unsupported),
+    ("<scriptcmd>", MapName::Unsupported),
+    ("<sid>", MapName::Unsupported),
+    ("<snr>", MapName::Unsupported),
+];
+
+/// Reads one side of a mapping (`what` names it in errors): keys in Vim notation, `<Leader>`
+/// and `<Nop>`, at most [`MAX_MAP_KEYS`].
+fn map_keys(text: &str, what: &'static str) -> Result<Vec<MapKey>, CommandError> {
+    // ASCII lowercase keeps every byte offset.
+    let lower = text.to_ascii_lowercase();
+    let mut keys = Vec::new();
+    let mut from = 0;
+    for (at, _) in lower.match_indices('<') {
+        if keys.len() > MAX_MAP_KEYS {
+            return Err(CommandError::TooManyKeys(what));
+        }
+        if at < from {
+            continue;
+        }
+        let tail = lower.get(at..).unwrap_or_default();
+        let Some((name, meaning)) = MAP_NAMES.iter().find(|(name, _)| tail.starts_with(name))
+        else {
+            continue;
+        };
+        push_keys(&mut keys, text, from, at)?;
+        match meaning {
+            MapName::Leader => keys.push(MapKey::Leader),
+            MapName::Nothing => {}
+            MapName::Unsupported => {
+                let typed = text.get(at..at + name.len()).unwrap_or(name);
+                return Err(CommandError::NotSupported(typed.to_owned()));
+            }
+        }
+        from = at + name.len();
+    }
+    push_keys(&mut keys, text, from, text.len())?;
+    if keys.len() > MAX_MAP_KEYS {
+        return Err(CommandError::TooManyKeys(what));
+    }
+    Ok(keys)
+}
+
+/// Reads bytes `from..to` of `text` as keys onto `keys`.
+fn push_keys(
+    keys: &mut Vec<MapKey>,
+    text: &str,
+    from: usize,
+    to: usize,
+) -> Result<(), CommandError> {
+    let part = text.get(from..to).unwrap_or_default();
+    let parsed = parse_keys(part).map_err(|error| CommandError::BadKeys {
+        keys: text.to_owned(),
+        error: shifted(error, from),
+    })?;
+    keys.extend(parsed.into_iter().map(MapKey::Key));
+    Ok(())
+}
+
+/// `error` with its byte offset moved on by `by`, from a part of a text to the whole.
+fn shifted(error: KeyParseError, by: usize) -> KeyParseError {
+    match error {
+        KeyParseError::BadModifiedKey { at, text } => {
+            KeyParseError::BadModifiedKey { at: at + by, text }
+        }
+        KeyParseError::FunctionKey { at, text } => KeyParseError::FunctionKey { at: at + by, text },
+        KeyParseError::ControlChar { at, c } => KeyParseError::ControlChar { at: at + by, c },
+    }
+}
+
+/// `:se[t]`: options until the end of the line or a `"`, which starts a comment.
+fn set(args: Args<'_>) -> Result<Command, CommandError> {
+    args.no_bang()?;
+    let words = args
+        .rest
+        .split_whitespace()
+        .take_while(|word| !word.starts_with('"'));
+    Ok(Command::Set(
+        words.map(parse_set_arg).collect::<Result<_, _>>()?,
+    ))
 }
 
 /// The numbers of a shape command: positionals in the order typed, and `key=value` values in

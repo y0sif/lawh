@@ -1,5 +1,5 @@
 //! Running `:` commands: the command line's keys, shapes, text and math at the cursor, writing
-//! and quitting.
+//! and quitting. Mapping commands and `:set` run in `keymap.rs` and `settings.rs`.
 
 use kurbo::Point;
 
@@ -152,6 +152,15 @@ impl Engine {
             }
             Command::Undo => self.undo(1),
             Command::Redo => self.redo(1),
+            Command::Map { .. }
+            | Command::ShowMaps { .. }
+            | Command::Unmap { .. }
+            | Command::MapClear { .. }
+            | Command::Set(_) => match self.run_setup(command) {
+                Ok(Some(text)) => self.info(text),
+                Ok(None) => {}
+                Err(text) => self.error(text),
+            },
         }
         Vec::new()
     }

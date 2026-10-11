@@ -1,0 +1,23 @@
+" lawh reads this file at start. Same syntax as the : line; lines starting
+" with a double quote are comments.
+
+" <Leader> stands for this key in the mappings below.
+set leader=<Space>
+
+" Move with jkl; instead of hjkl, on the board, in Visual mode, after d or y,
+" and inside text blocks.
+noremap j h
+noremap k j
+noremap l k
+noremap ; l
+
+" Object jumps: Shift+; types :, so the jump right moves to H.
+noremap J H
+noremap K J
+noremap L K
+noremap H L
+
+nnoremap ' ;
+nnoremap U <C-r>
+inoremap jk <Esc>
+nnoremap <Leader>s :w<CR>

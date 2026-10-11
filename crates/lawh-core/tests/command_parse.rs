@@ -1,9 +1,14 @@
-//! The `:` command parser on its own: every command and short form, numbers, and the errors.
+//! The `:` command parser on its own: every command and short form, numbers, mapping commands,
+//! `:set`, and the errors.
 
 // Lets the helpers below unwrap and panic like test functions (see clippy.toml).
 #![cfg(test)]
 
-use lawh_core::engine::{Command, CommandError, End, Segment, parse_command};
+use lawh_core::engine::{
+    Command, CommandError, End, Escape, MAX_MAP_KEYS, MAX_TIMEOUTLEN, MapKey, MapMode, OptionName,
+    OptionValue, Segment, SetArg, parse_command,
+};
+use lawh_core::{Key, parse_keys};
 
 fn parsed(line: &str) -> Command {
     parse_command(line).unwrap_or_else(|e| panic!("{line:?}: {e}"))
@@ -37,6 +42,37 @@ fn every_short_form_names_its_command() {
         ("wq", 2, "wq"),
         ("write", 1, "w"),
         ("xit", 1, "x"),
+        // Mapping commands, with Vim's short forms. `:map` takes all three letters, since `:ma`
+        // is `:math`; `:un` is `:undo`.
+        ("map", 3, "map a b"),
+        ("noremap", 2, "no a b"),
+        ("unmap", 3, "unm a"),
+        ("mapclear", 4, "mapc"),
+        ("nmap", 2, "nm a b"),
+        ("nnoremap", 2, "nn a b"),
+        ("nunmap", 3, "nun a"),
+        ("nmapclear", 5, "nmapc"),
+        ("vmap", 2, "vm a b"),
+        ("vnoremap", 2, "vn a b"),
+        ("vunmap", 2, "vu a"),
+        ("vmapclear", 5, "vmapc"),
+        ("xmap", 2, "xm a b"),
+        ("xnoremap", 2, "xn a b"),
+        ("xunmap", 2, "xu a"),
+        ("xmapclear", 5, "xmapc"),
+        ("omap", 2, "om a b"),
+        ("onoremap", 3, "ono a b"),
+        ("ounmap", 2, "ou a"),
+        ("omapclear", 5, "omapc"),
+        ("imap", 2, "im a b"),
+        ("inoremap", 3, "ino a b"),
+        ("iunmap", 2, "iu a"),
+        ("imapclear", 5, "imapc"),
+        ("cmap", 2, "cm a b"),
+        ("cnoremap", 3, "cno a b"),
+        ("cunmap", 2, "cu a"),
+        ("cmapclear", 5, "cmapc"),
+        ("set", 2, "se tm=5"),
     ];
     for (name, min, example) in cases {
         let expected = parsed(example);
@@ -297,6 +333,324 @@ fn errors_say_what_is_wrong() {
         assert_eq!(
             parse_command(line).map_err(|e| e.to_string()),
             Err(message.to_owned()),
+            "{line:?}"
+        );
+    }
+}
+
+fn keys(script: &str) -> Vec<MapKey> {
+    parse_keys(script)
+        .unwrap()
+        .into_iter()
+        .map(MapKey::Key)
+        .collect()
+}
+
+#[test]
+fn mapping_commands_take_their_modes_from_the_name() {
+    use MapMode::{CommandLine, Insert, Normal, OperatorPending, Visual};
+    let modes = |line: &str| match parsed(line) {
+        Command::Map { modes, .. }
+        | Command::ShowMaps { modes, .. }
+        | Command::Unmap { modes, .. }
+        | Command::MapClear { modes } => modes.to_vec(),
+        other => panic!("{other:?}"),
+    };
+    let nvo = vec![Normal, Visual, OperatorPending];
+    let ic = vec![Insert, CommandLine];
+    for (prefix, expected) in [
+        ("", nvo.clone()),
+        ("n", vec![Normal]),
+        ("v", vec![Visual]),
+        ("x", vec![Visual]),
+        ("o", vec![OperatorPending]),
+        ("i", vec![Insert]),
+        ("c", vec![CommandLine]),
+    ] {
+        assert_eq!(modes(&format!("{prefix}map a b")), expected, "{prefix}map");
+        assert_eq!(modes(&format!("{prefix}noremap a b")), expected);
+        assert_eq!(modes(&format!("{prefix}unmap a")), expected);
+        assert_eq!(modes(&format!("{prefix}mapclear")), expected);
+    }
+    // `!` on the commands without a letter: Insert and command-line mode.
+    assert_eq!(modes("map! a b"), ic);
+    assert_eq!(modes("noremap! a b"), ic);
+    assert_eq!(modes("unmap! a"), ic);
+    assert_eq!(modes("mapclear!"), ic);
+    assert_eq!(modes("map a b"), nvo);
+    // `noremap` and `map` differ only in whether what keys map to is mapped again.
+    let noremap = |line: &str| match parsed(line) {
+        Command::Map { noremap, .. } => noremap,
+        other => panic!("{other:?}"),
+    };
+    assert!(noremap("nn a b") && noremap("no! a b") && noremap("ino a b"));
+    assert!(!noremap("nm a b") && !noremap("map! a b") && !noremap("im a b"));
+}
+
+#[test]
+fn mappings_read_keys_leader_and_nop() {
+    assert_eq!(
+        parsed("nnoremap <Leader>s :w<CR>"),
+        Command::Map {
+            modes: &[MapMode::Normal],
+            noremap: true,
+            nowait: false,
+            lhs: [vec![MapKey::Leader], keys("s")].concat(),
+            rhs: keys(":w<CR>"),
+        }
+    );
+    let sides = |line: &str| match parsed(line) {
+        Command::Map { lhs, rhs, .. } => (lhs, rhs),
+        other => panic!("{other:?}"),
+    };
+    // `<Leader>` ignores case and may come anywhere, more than once.
+    assert_eq!(
+        sides("map <leader>a<LEADER> x<Leader>"),
+        (
+            [vec![MapKey::Leader], keys("a"), vec![MapKey::Leader]].concat(),
+            [keys("x"), vec![MapKey::Leader]].concat()
+        )
+    );
+    // `<lt>Leader>` is the characters, not the leader.
+    assert_eq!(sides("map <lt>Leader> x").0, keys("<lt>Leader>"));
+    // What keys map to is the rest of the line: spaces inside are keys, spaces at the end are
+    // not, and `|` is a key as `<Bar>` is.
+    assert_eq!(sides("nn Q   :ci 3<CR>   ").1, keys(":ci 3<CR>"));
+    assert_eq!(sides("nn Q a|b<Bar>").1, keys("a<Bar>b<Bar>"));
+    assert_eq!(sides("nn Q \"x").1, keys("\"x"));
+    // `<Nop>` is no keys.
+    assert_eq!(sides("nn <Space> <Nop>").1, vec![]);
+    assert_eq!(sides("nn Q a<nop>b").1, keys("ab"));
+    // Ctrl chords and named keys.
+    assert_eq!(sides("cno <C-a> <Home>"), (keys("<C-a>"), keys("<Home>")));
+    // The longest keys allowed.
+    let long = "a".repeat(MAX_MAP_KEYS);
+    assert_eq!(sides(&format!("map {long} {long}")).1.len(), MAX_MAP_KEYS);
+}
+
+#[test]
+fn map_arguments_come_before_the_keys() {
+    let nowait = |line: &str| match parsed(line) {
+        Command::Map { nowait, lhs, .. } => (nowait, lhs),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(nowait("nn <nowait> , x"), (true, keys(",")));
+    assert_eq!(nowait("nn <silent><nowait> , x"), (true, keys(",")));
+    assert_eq!(nowait("nn <nowait> <silent> , x"), (true, keys(",")));
+    assert_eq!(nowait("nn <silent> , x"), (false, keys(",")));
+    assert_eq!(nowait("nn <special> , x"), (false, keys(",")));
+    // Spelled exactly, as in Vim: `<Silent>` is keys.
+    assert_eq!(nowait("nn <Silent> x"), (false, keys("<Silent>")));
+}
+
+#[test]
+fn keys_alone_show_mappings_and_unmap_takes_keys() {
+    assert_eq!(
+        parsed("nmap j"),
+        Command::ShowMaps {
+            modes: &[MapMode::Normal],
+            lhs: keys("j"),
+        }
+    );
+    assert_eq!(
+        parsed("map"),
+        Command::ShowMaps {
+            modes: &[MapMode::Normal, MapMode::Visual, MapMode::OperatorPending],
+            lhs: vec![],
+        }
+    );
+    assert_eq!(
+        parsed("iunmap <silent> jk  "),
+        Command::Unmap {
+            modes: &[MapMode::Insert],
+            lhs: keys("jk"),
+        }
+    );
+    assert_eq!(
+        parsed("unmap <Leader>"),
+        Command::Unmap {
+            modes: &[MapMode::Normal, MapMode::Visual, MapMode::OperatorPending],
+            lhs: vec![MapKey::Leader],
+        }
+    );
+}
+
+#[test]
+fn set_takes_options() {
+    use OptionName::{Escape as EscapeOption, Leader, TimeoutLen};
+    let set = |line: &str| match parsed(line) {
+        Command::Set(args) => args,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(set("set"), vec![]);
+    assert_eq!(
+        set("se escape=block leader=<Space> tm=500"),
+        vec![
+            SetArg::Assign(OptionValue::Escape(Escape::Block)),
+            SetArg::Assign(OptionValue::Leader(Key::char(' '))),
+            SetArg::Assign(OptionValue::TimeoutLen(500)),
+        ]
+    );
+    assert_eq!(
+        set("set escape:board leader=, timeoutlen=0"),
+        vec![
+            SetArg::Assign(OptionValue::Escape(Escape::Board)),
+            SetArg::Assign(OptionValue::Leader(Key::char(','))),
+            SetArg::Assign(OptionValue::TimeoutLen(0)),
+        ]
+    );
+    assert_eq!(
+        set("set leader=\\"),
+        vec![SetArg::Assign(OptionValue::Leader(Key::char('\\')))]
+    );
+    assert_eq!(
+        set(&format!("set tm={MAX_TIMEOUTLEN}")),
+        vec![SetArg::Assign(OptionValue::TimeoutLen(MAX_TIMEOUTLEN))]
+    );
+    assert_eq!(
+        set("set timeoutlen? leader escape& \" a comment"),
+        vec![
+            SetArg::Show(TimeoutLen),
+            SetArg::Show(Leader),
+            SetArg::Reset(EscapeOption),
+        ]
+    );
+}
+
+#[test]
+fn mapping_errors_say_what_is_wrong() {
+    let cases = [
+        (
+            "nn <C-Nope> x",
+            "in `<C-Nope>`: `<C-Nope>` at byte 0 is not a key: modifiers need a key name and `>`, as in `<C-r>`",
+        ),
+        (
+            "nn <Leader><F25> x",
+            "in `<Leader><F25>`: `<F25>` at byte 8 is not a key: function keys go from <F1> to <F24>",
+        ),
+        (
+            "nn x a<C-",
+            "in `a<C-`: `<C-` at byte 1 is not a key: modifiers need a key name and `>`, as in `<C-r>`",
+        ),
+        (
+            "nnoremap <expr> j gj",
+            "`<expr>` is not supported in lawh mappings",
+        ),
+        (
+            "nn <buffer> j gj",
+            "`<buffer>` is not supported in lawh mappings",
+        ),
+        (
+            "nn <unique> j gj",
+            "`<unique>` is not supported in lawh mappings",
+        ),
+        (
+            "nn x <Cmd>w<CR>",
+            "`<Cmd>` is not supported in lawh mappings",
+        ),
+        (
+            "nn x <plug>(foo)",
+            "`<plug>` is not supported in lawh mappings",
+        ),
+        (
+            "nn <LocalLeader>x y",
+            "`<LocalLeader>` is not supported in lawh mappings",
+        ),
+        ("nn <Nop> x", "missing the keys for `:nnoremap`"),
+        ("unmap", "missing the keys for `:unmap`"),
+        ("iu <Nop>", "missing the keys for `:iunmap`"),
+        ("unmap a b", "`:unmap` takes only the keys to unmap"),
+        ("mapclear x", "`:mapclear` takes no arguments"),
+        ("nmap! a b", "`:nmap` takes no `!`"),
+        ("inoremap! a b", "`:inoremap` takes no `!`"),
+        ("nunmap! a", "`:nunmap` takes no `!`"),
+        ("cmapclear!", "`:cmapclear` takes no `!`"),
+        ("set! tm=1", "`:set` takes no `!`"),
+        ("ma", "missing the formula: `:ma[th] <formula>`"),
+        ("nu a", "unknown command `:nu`"),
+        ("cn a b", "unknown command `:cn`"),
+        ("lmap a b", "unknown command `:lmap`"),
+        (
+            "nnoremap<silent> a b",
+            "unknown command `:nnoremap<silent>`",
+        ),
+    ];
+    assert_messages(&cases);
+    let too_long = "a".repeat(MAX_MAP_KEYS + 1);
+    assert_eq!(
+        parse_command(&format!("map {too_long} x")),
+        Err(CommandError::TooManyKeys("the keys to map"))
+    );
+    assert_eq!(
+        parse_command(&format!("map x {too_long}")),
+        Err(CommandError::TooManyKeys("what they map to"))
+    );
+    assert_eq!(
+        parse_command(&format!("unmap {too_long}")),
+        Err(CommandError::TooManyKeys("the keys to unmap"))
+    );
+    assert_eq!(
+        CommandError::TooManyKeys("what they map to").to_string(),
+        format!("what they map to may be at most {MAX_MAP_KEYS} keys long")
+    );
+}
+
+#[test]
+fn set_errors_say_what_is_wrong() {
+    let cases = [
+        ("set foo", "unknown option `foo`"),
+        ("set nowrap", "unknown option `nowrap`"),
+        ("set =3", "unknown option `=3`"),
+        (
+            "set tm+=100",
+            "`tm+=100`: use `option=value`, `option?` or `option&`",
+        ),
+        (
+            "set escape=blok",
+            "bad value `blok` for `escape`: it takes `board` or `block`",
+        ),
+        (
+            "set escape=",
+            "bad value `` for `escape`: it takes `board` or `block`",
+        ),
+        (
+            "set leader=ab",
+            "bad value `ab` for `leader`: it takes one key, such as `<Space>` or `,`",
+        ),
+        (
+            "set leader=",
+            "bad value `` for `leader`: it takes one key, such as `<Space>` or `,`",
+        ),
+        (
+            "set leader=<C-Nope>",
+            "bad value `<C-Nope>` for `leader`: it takes one key, such as `<Space>` or `,`",
+        ),
+        (
+            "set tm=-1",
+            "bad value `-1` for `timeoutlen`: it takes milliseconds from 0 to 10000",
+        ),
+        (
+            "set tm=1.5",
+            "bad value `1.5` for `timeoutlen`: it takes milliseconds from 0 to 10000",
+        ),
+        (
+            "set timeoutlen=10001",
+            "bad value `10001` for `timeoutlen`: it takes milliseconds from 0 to 10000",
+        ),
+        (
+            "set tm=99999999999999999999999",
+            "bad value `99999999999999999999999` for `timeoutlen`: it takes milliseconds from 0 to 10000",
+        ),
+    ];
+    assert_messages(&cases);
+}
+
+/// Each line fails to parse with its message.
+fn assert_messages(cases: &[(&str, &str)]) {
+    for (line, message) in cases {
+        assert_eq!(
+            parse_command(line).map_err(|e| e.to_string()),
+            Err((*message).to_owned()),
             "{line:?}"
         );
     }

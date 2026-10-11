@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/keymap.rs
+assertion_line: 617
+expression: r.snapshot()
+---
+// mode=normal cursor=object(c2) keys=9
+lawh version=1
+circle id=c1 x=0 y=0 r=1
+circle id=c2 x=1 y=0 r=1
