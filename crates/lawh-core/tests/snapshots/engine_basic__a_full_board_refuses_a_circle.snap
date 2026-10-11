@@ -2,4 +2,4 @@
 source: crates/lawh-core/tests/engine_basic.rs
 expression: r.header()
 ---
-// mode=normal cursor=grid(2,0) keys=8 message="object `c501` would be one too many: a board holds at most 500 objects"
+// mode=normal cursor=grid(2,0) keys=8 message="the board is full: it holds at most 500 objects"

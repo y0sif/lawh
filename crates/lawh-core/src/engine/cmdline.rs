@@ -7,7 +7,7 @@ use crate::key::{Key, KeyCode};
 /// Most characters on the `:` command line, the `:` not counted.
 ///
 /// The longest line worth typing is `:text` with a text of
-/// [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS) characters; 64 more leave room for the
+/// [`MAX_TEXT_CHARS`] characters; 64 more leave room for the
 /// command's name and spaces. A longer line could only make an object the board refuses.
 pub const MAX_COMMAND_LINE_CHARS: usize = MAX_TEXT_CHARS + 64;
 

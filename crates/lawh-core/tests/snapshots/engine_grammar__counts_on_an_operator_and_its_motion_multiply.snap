@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=grid(5,0.5) keys=6
+lawh version=1
+rect id=r1 x=0 y=0 w=2 h=1

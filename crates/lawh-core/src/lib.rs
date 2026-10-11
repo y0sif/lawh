@@ -1,10 +1,11 @@
 //! Core of lawh: the board model, the `.lawh` reader and writer, Vim key notation and the
 //! editing engine.
 //!
-//! The engine so far has Normal mode with grid motions (`hjkl` and counts), the `:` command
-//! line with `:circle`, `:undo` and `:redo`, and undo and redo (`u`, `<C-r>`). More of the Vim
-//! grammar comes during milestone 2. This crate has no rendering or windowing code, so the
-//! engine is tested as plain functions: keys in, board out.
+//! The engine so far has the board grammar: grid and object motions with counts, the operators
+//! `d` and `y` and the unnamed register, puts with the place rule, Visual mode, `.` and `@:`,
+//! undo and redo, and the `:` command line (shapes, text, math, write and quit). Text editing
+//! inside blocks and key mappings come next during milestone 2. This crate has no rendering or
+//! windowing code, so the engine is tested as plain functions: keys in, board out.
 //!
 //! Coordinates are grid units (`f64`) with y growing down.
 

@@ -29,6 +29,12 @@ pub fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
 }
 
+/// The grid point nearest `p`: whole units, within [`MAX_COORDINATE`], never `-0`.
+pub(crate) fn grid_point(p: Point) -> Point {
+    let whole = |v: f64| v.round().clamp(-MAX_COORDINATE, MAX_COORDINATE) + 0.0;
+    Point::new(whole(p.x), whole(p.y))
+}
+
 /// `p` moved by `(dx, dy)`, kept within [`MAX_COORDINATE`] and rounded with [`round3`].
 pub(crate) fn offset(p: Point, dx: f64, dy: f64) -> Point {
     let step = |v: f64, d: f64| round3((v + d).clamp(-MAX_COORDINATE, MAX_COORDINATE));
@@ -78,6 +84,15 @@ mod tests {
         assert_eq!(round3(1.0006), 1.001);
         assert_eq!(round3(MAX_COORDINATE), MAX_COORDINATE);
         assert_eq!(round3(-MAX_COORDINATE), -MAX_COORDINATE);
+    }
+
+    #[test]
+    fn grid_points_are_whole_units_within_the_limit() {
+        let p = grid_point(Point::new(2.5, -0.4));
+        assert_eq!(p, Point::new(3.0, 0.0));
+        assert!(p.y.is_sign_positive());
+        let far = grid_point(Point::new(-1e12, 1e12));
+        assert_eq!(far, Point::new(-MAX_COORDINATE, MAX_COORDINATE));
     }
 
     #[test]

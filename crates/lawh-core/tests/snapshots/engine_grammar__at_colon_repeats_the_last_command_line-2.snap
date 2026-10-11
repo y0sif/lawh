@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(Board::new(), \"@:\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=2 message="no command line to repeat yet"
+lawh version=1

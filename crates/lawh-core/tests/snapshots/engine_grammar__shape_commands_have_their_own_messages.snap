@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(Board::new(), \":el 1 -1<CR>\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=9 message="each radius must be above 0"
+lawh version=1

@@ -1,0 +1,10 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(rows(), \"wdJ\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=3
+lawh version=1
+text id=t1 x=8 y=0.2 "abc"
+math id=m1 x=1 y=5 "x^2"
+rect id=r2 x=4 y=2.5 w=2 h=1
+circle id=c1 x=5 y=0.5 r=0.5

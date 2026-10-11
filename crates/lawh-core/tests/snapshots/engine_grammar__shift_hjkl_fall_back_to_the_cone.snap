@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "trace(compass(), \"wJ\")"
+---
+    w // mode=normal cursor=object(o) keys=1
+    J // mode=normal cursor=object(diag) keys=2

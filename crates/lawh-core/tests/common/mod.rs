@@ -9,8 +9,8 @@
 //! ```
 //!
 //! The header gives the mode, the cursor (`grid(x,y)` or `object(id)`), how many keys the
-//! script typed (one per key in Vim notation: `<CR>` is one) and the message, if any:
-//! ` message="..."`.
+//! script typed (one per key in Vim notation: `<CR>` is one), the Visual selection, if any
+//! (` selection=c1,t1`), and the message, if any: ` message="..."`.
 
 #![allow(
     dead_code,
@@ -20,7 +20,8 @@
 use std::fmt::Write as _;
 
 use lawh_core::engine::{Cursor, Effect, Engine, FixedMeasure, Mode};
-use lawh_core::{Board, parse_keys, to_lawh};
+use lawh_core::key::format_keys;
+use lawh_core::{Board, ObjectId, Point, from_lawh, parse_keys, to_lawh};
 
 /// An engine after a key script.
 pub struct Run {
@@ -33,13 +34,37 @@ pub struct Run {
 
 /// Types `script` (Vim notation) into an engine for `board`, measuring with [`FixedMeasure`].
 pub fn run(board: Board, script: &str) -> Run {
+    run_engine(Engine::new(board), script)
+}
+
+/// Types `script` into `engine`, as [`run`] does.
+pub fn run_engine(engine: Engine, script: &str) -> Run {
     let mut run = Run {
-        engine: Engine::new(board),
+        engine,
         effects: Vec::new(),
         keys: 0,
     };
     run.feed(script);
     run
+}
+
+/// A board from the lines of a `.lawh` file after its header.
+pub fn board(objects: &str) -> Board {
+    let src = format!("lawh version=1\n{objects}");
+    from_lawh(&src).unwrap_or_else(|e| panic!("bad board {objects:?}: {e}"))
+}
+
+/// Types `script` one key at a time into an engine for `board`: one line per key, the key
+/// and the header after it. The board is not shown.
+pub fn trace(board: Board, script: &str) -> String {
+    let mut run = run(board, "");
+    let mut lines = Vec::new();
+    for key in parse_keys(script).unwrap_or_else(|e| panic!("bad key script {script:?}: {e}")) {
+        let key = format_keys(&[key]);
+        run.feed(&key);
+        lines.push(format!("{key:>5} {}", run.header()));
+    }
+    lines.join("\n")
 }
 
 impl Run {
@@ -54,7 +79,21 @@ impl Run {
         self
     }
 
-    /// The header line alone: mode, cursor, keys and message.
+    /// Tells the engine the app wrote `path` (or failed to), keeping the effects it returns.
+    pub fn write_done(&mut self, path: &str, result: Result<(), &str>) -> &mut Self {
+        let effects = self.engine.write_done(path, result.map_err(str::to_owned));
+        self.effects.extend(effects);
+        self
+    }
+
+    /// Clicks at `(x, y)`, on object `hit` if any.
+    pub fn click(&mut self, x: f64, y: f64, hit: Option<&str>) -> &mut Self {
+        let hit = hit.map(|id| ObjectId::new(id).unwrap());
+        self.engine.click(Point::new(x, y), hit, &mut FixedMeasure);
+        self
+    }
+
+    /// The header line alone: mode, cursor, keys, selection and message.
     pub fn header(&self) -> String {
         let engine = &self.engine;
         let cursor = match engine.cursor() {
@@ -66,6 +105,10 @@ impl Run {
             mode_name(engine.mode()),
             self.keys
         );
+        if !engine.selection().is_empty() {
+            let ids: Vec<&str> = engine.selection().iter().map(ObjectId::as_str).collect();
+            let _ = write!(header, " selection={}", ids.join(","));
+        }
         if let Some(message) = engine.message() {
             let _ = write!(header, " message={:?}", message.text);
         }

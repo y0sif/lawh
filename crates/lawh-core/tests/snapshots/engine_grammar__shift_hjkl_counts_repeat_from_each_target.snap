@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "trace(b, \"w2L5H\")"
+---
+    w // mode=normal cursor=object(a) keys=1
+    2 // mode=normal cursor=object(a) keys=2
+    L // mode=normal cursor=object(c) keys=3
+    5 // mode=normal cursor=object(c) keys=4
+    H // mode=normal cursor=object(a) keys=5

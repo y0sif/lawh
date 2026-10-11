@@ -29,13 +29,6 @@ pub(crate) enum Edit {
     /// `object` was put at position `index` in z-order.
     Insert { index: usize, object: Object },
     /// `object` was taken from position `index`.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "made by the board operators (`d`, `x`), which come next"
-        )
-    )]
     Remove { index: usize, object: Object },
     /// Object `id` changed shape from `before` to `after`.
     #[cfg_attr(
@@ -60,7 +53,7 @@ impl Edit {
     }
 
     /// Takes the edit back on `board`.
-    fn revert(&self, board: &mut Board) -> Result<(), BoardError> {
+    pub(crate) fn revert(&self, board: &mut Board) -> Result<(), BoardError> {
         match self {
             Self::Insert { object, .. } => remove(board, &object.id),
             Self::Remove { index, object } => board.insert_at(*index, object.clone()),
@@ -223,13 +216,6 @@ impl History {
     }
 
     /// The board is saved as it is now.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called when `:w` has written the file, which comes next"
-        )
-    )]
     pub(crate) fn mark_saved(&mut self) {
         self.saved = Some(self.done);
     }

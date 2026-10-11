@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: r.header()
+---
+// mode=normal cursor=object(c2) keys=26 message="cannot write \"a.lawh\": permission denied"

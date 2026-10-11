@@ -1,44 +1,64 @@
 //! The editing engine: a state machine that takes keys, changes the board and asks the app for
 //! what it cannot do itself (writing files, quitting) through [`Effect`]s.
 //!
-//! [`Engine::feed`] takes one key at a time. Each mode has its own dispatcher. In Normal mode,
-//! keys gather in a pending buffer (a count, then the command's keys) until they make a whole
-//! command from the `NORMAL` table, or none can. Every command that changes the board makes
-//! one undo step.
+//! [`Engine::feed`] takes one key at a time. Each mode has its own dispatcher. In Normal and
+//! Visual mode, keys gather in a pending buffer (a count, an operator and its count, then the
+//! command's keys) until they make a whole command from the key tables, or none can. Every
+//! command that changes the board makes one undo step.
 //!
-//! The cursor is a grid point or an object (see [`Cursor`]). Normal mode so far has `h j k l`
-//! (one grid unit a step), `u` and `<C-r>`, all with counts, and `:` for the command line.
+//! The cursor is a grid point or an object (see [`Cursor`]). Normal mode has grid motions
+//! (`h j k l`), object motions (`w b`, `H J K L`), the operators `d` and `y` with `dd`, `yy` and
+//! `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`, `<C-r>`), all with
+//! counts, and `:` for the command line (shapes, text, math, write and quit).
 
 mod cmdline;
 mod command;
 mod cursor;
+mod exec;
 mod measure;
+mod motion;
+mod normal;
+mod ops;
+mod place;
+mod register;
+mod repeat;
 mod undo;
+mod visual;
 
-use kurbo::Point;
+use kurbo::{Point, Rect};
 
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
-pub use command::{Command, CommandError, parse_command};
+pub use command::{Command, CommandError, End, Segment, parse_command};
 pub use cursor::{Cursor, anchor, round3};
 pub use measure::{FixedMeasure, Measure, shape_bounds};
+pub use motion::ROW_TOLERANCE;
+pub use place::PLACE_GAP;
 pub use undo::{MAX_UNDO_BYTES, MAX_UNDO_STEPS};
 
-use self::cmdline::{CommandLine, Outcome};
+use self::cmdline::CommandLine;
+use self::exec::PendingWrite;
+use self::normal::Pending;
+use self::register::Register;
+use self::repeat::Repeat;
 use self::undo::{Edit, History, Step};
-use crate::board::{Board, Object, Shape};
-use crate::key::{Key, KeyCode, format_keys};
+use crate::board::{Board, Object, ObjectId};
+use crate::key::Key;
 
-/// Largest count before a command; typing more digits keeps it here.
+/// Largest count before a command; typing more digits keeps it here. Both counts of `2d3w`
+/// together (6) stop here too.
 ///
-/// No motion, undo or put needs more: 10,000 grid units is far past any board on screen, and
-/// [`MAX_UNDO_STEPS`] is lower still. Saturating keeps a count such as `999999999` cheap to act
-/// on, or to refuse.
+/// No motion, undo or put needs more: 10,000 grid units is far past any board on screen,
+/// [`MAX_UNDO_STEPS`] is lower still, and a board holds at most
+/// [`MAX_OBJECTS`](crate::board::MAX_OBJECTS) objects to walk, delete or put. Saturating keeps a
+/// count such as `999999999` cheap to act on, or to refuse.
 pub const MAX_COUNT: u32 = 10_000;
 
 /// The engine's mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Normal,
+    /// Selecting objects with a rectangle (see [`Engine::selection`]).
+    Visual,
     /// Typing a `:` command (see [`Engine::command_line`]).
     CommandLine,
 }
@@ -47,7 +67,9 @@ pub enum Mode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     /// Write the board ([`to_lawh`](crate::to_lawh) of [`Engine::board`]) to `path`
-    /// atomically, then report back to the engine; quit after a good write if `quit_after`.
+    /// atomically, then report back with [`Engine::write_done`]. When `quit_after` is set and
+    /// the write went well, `write_done` returns [`Effect::Quit`]; the app does not quit by
+    /// itself.
     Write { path: String, quit_after: bool },
     /// Quit the app. Only sent when quitting is allowed.
     Quit,
@@ -63,62 +85,6 @@ pub struct Message {
     pub error: bool,
 }
 
-/// A Normal-mode command, run with a count.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Normal {
-    Left,
-    Down,
-    Up,
-    Right,
-    Undo,
-    Redo,
-    CommandLine,
-}
-
-/// Normal-mode commands by the keys that run them, after any count.
-const NORMAL: &[(&[Key], Normal)] = &[
-    (&[Key::char('h')], Normal::Left),
-    (&[Key::char('j')], Normal::Down),
-    (&[Key::char('k')], Normal::Up),
-    (&[Key::char('l')], Normal::Right),
-    (&[Key::char('u')], Normal::Undo),
-    (&[Key::ctrl('r')], Normal::Redo),
-    (&[Key::char(':')], Normal::CommandLine),
-];
-
-/// What the pending keys make in [`NORMAL`].
-enum Lookup {
-    Command(Normal),
-    /// The start of a longer command: wait for more keys.
-    Prefix,
-    /// Nothing: drop the keys.
-    Nothing,
-}
-
-fn lookup(keys: &[Key]) -> Lookup {
-    let mut prefix = false;
-    for (command_keys, command) in NORMAL {
-        if *command_keys == keys {
-            return Lookup::Command(*command);
-        }
-        prefix |= command_keys.len() > keys.len() && command_keys.starts_with(keys);
-    }
-    if prefix {
-        Lookup::Prefix
-    } else {
-        Lookup::Nothing
-    }
-}
-
-/// Normal-mode keys typed so far that do not make a whole command yet.
-#[derive(Debug, Clone, Default)]
-struct Pending {
-    /// The count typed before the command, at most [`MAX_COUNT`].
-    count: Option<u32>,
-    /// The command's keys so far, after the count.
-    keys: Vec<Key>,
-}
-
 /// The Vim engine for one board.
 #[derive(Debug, Clone)]
 pub struct Engine {
@@ -130,6 +96,21 @@ pub struct Engine {
     history: History,
     message: Option<Message>,
     file_name: Option<String>,
+    /// The unnamed register.
+    register: Option<Register>,
+    /// The last change, for `.`.
+    repeat: Repeat,
+    /// The last `:` line run, for `@:`.
+    last_command_line: Option<String>,
+    /// In Visual mode, where `v` was pressed: a point or an object's bounds.
+    visual: Option<Rect>,
+    /// In Visual mode, the objects inside the rectangle, in z-order.
+    selection: Vec<ObjectId>,
+    /// Counts every change to the board, undo and redo included, so a write can tell whether
+    /// the board is still the one it wrote.
+    version: u64,
+    /// The write asked for with [`Effect::Write`], until [`Engine::write_done`].
+    pending_write: Option<PendingWrite>,
 }
 
 impl Engine {
@@ -145,6 +126,13 @@ impl Engine {
             history: History::default(),
             message: None,
             file_name: None,
+            register: None,
+            repeat: Repeat::default(),
+            last_command_line: None,
+            visual: None,
+            selection: Vec::new(),
+            version: 0,
+            pending_write: None,
         }
     }
 
@@ -161,14 +149,38 @@ impl Engine {
 
     /// Takes one key. Keys are made canonical first (see [`Key::new`]).
     ///
-    /// `_measure` gives the bounds of text and math, for the object motions and placing that
-    /// come next; nothing needs it yet.
-    pub fn feed(&mut self, key: Key, _measure: &mut dyn Measure) -> Vec<Effect> {
+    /// `measure` gives the bounds of text and math, for object motions, Visual mode and puts.
+    pub fn feed(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         let key = key.canonical();
         self.message = None;
+        self.dispatch(key, measure)
+    }
+
+    /// Runs one key in the current mode. `.` replays its keys through here, so mappings do not
+    /// apply to them again.
+    fn dispatch(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         match self.mode {
-            Mode::Normal => self.normal_key(key),
+            Mode::Normal => self.normal_key(key, measure),
+            Mode::Visual => self.visual_key(key, measure),
             Mode::CommandLine => self.command_line_key(key),
+        }
+    }
+
+    /// A mouse click at board point `at`, on object `hit` if any. It ends Visual mode and the
+    /// command line, drops pending keys, and puts the cursor on `hit`, or else on the grid point
+    /// nearest `at` (whole units). A point that is not finite leaves the cursor where it is.
+    pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
+        // Measuring is for Insert mode, which comes next: a click there ends the session.
+        let _ = measure;
+        self.pending = Pending::default();
+        self.message = None;
+        self.command_line.clear();
+        self.leave_visual();
+        self.mode = Mode::Normal;
+        match hit.filter(|id| self.board.contains(id)) {
+            Some(id) => self.cursor = Cursor::Object(id),
+            None if at.is_finite() => self.cursor = Cursor::Grid(cursor::grid_point(at)),
+            None => {}
         }
     }
 
@@ -195,15 +207,10 @@ impl Engine {
             .then(|| (self.command_line.text(), self.command_line.cursor()))
     }
 
-    /// Keys typed but not yet run, in Vim notation (`3`, later `3d`), for the status line. A
-    /// count past [`MAX_COUNT`] shows as `MAX_COUNT`.
+    /// Keys typed but not yet run, in Vim notation (`3`, `2d3`), for the status line. A count
+    /// past [`MAX_COUNT`] shows as `MAX_COUNT`.
     pub fn pending(&self) -> String {
-        let count = self
-            .pending
-            .count
-            .map(|n| n.to_string())
-            .unwrap_or_default();
-        count + &format_keys(&self.pending.keys)
+        self.pending.display()
     }
 
     pub fn message(&self) -> Option<&Message> {
@@ -227,56 +234,25 @@ impl Engine {
         });
     }
 
-    fn normal_key(&mut self, key: Key) -> Vec<Effect> {
-        if let Some(digit) = self.count_digit(key) {
-            let count = self.pending.count.unwrap_or(0);
-            let count = count.saturating_mul(10).saturating_add(digit);
-            self.pending.count = Some(count.min(MAX_COUNT));
-            return Vec::new();
-        }
-        self.pending.keys.push(key);
-        match lookup(&self.pending.keys) {
-            Lookup::Prefix => Vec::new(),
-            Lookup::Nothing => {
-                self.pending = Pending::default();
-                Vec::new()
-            }
-            Lookup::Command(command) => {
-                let count = self.pending.count.unwrap_or(1);
-                self.pending = Pending::default();
-                self.run_normal(command, count)
-            }
-        }
+    fn info(&mut self, text: impl Into<String>) {
+        self.message = Some(Message {
+            text: text.into(),
+            error: false,
+        });
     }
 
-    /// The digit `key` adds to the count, if it is part of one: `1` to `9` start a count, `0`
-    /// only goes on one.
-    fn count_digit(&self, key: Key) -> Option<u32> {
-        if !self.pending.keys.is_empty() || !key.mods.is_empty() {
-            return None;
-        }
-        let KeyCode::Char(c) = key.code else {
-            return None;
-        };
-        let digit = c.to_digit(10)?;
-        (digit != 0 || self.pending.count.is_some()).then_some(digit)
+    /// The position of object `id` in z-order.
+    fn index_of(&self, id: &ObjectId) -> Option<usize> {
+        self.board.objects().iter().position(|o| &o.id == id)
     }
 
-    fn run_normal(&mut self, command: Normal, count: u32) -> Vec<Effect> {
-        let steps = f64::from(count);
-        match command {
-            Normal::Left => self.move_by(-steps, 0.0),
-            Normal::Down => self.move_by(0.0, steps),
-            Normal::Up => self.move_by(0.0, -steps),
-            Normal::Right => self.move_by(steps, 0.0),
-            Normal::Undo => self.undo(count),
-            Normal::Redo => self.redo(count),
-            Normal::CommandLine => {
-                self.command_line.clear();
-                self.mode = Mode::CommandLine;
-            }
-        }
-        Vec::new()
+    /// The bounds of every object, in z-order.
+    fn layout(&self, measure: &mut dyn Measure) -> Vec<Rect> {
+        self.board
+            .objects()
+            .iter()
+            .map(|o| bounds(o, measure))
+            .collect()
     }
 
     /// Moves the cursor point by whole grid units; an object cursor becomes a grid point.
@@ -284,79 +260,25 @@ impl Engine {
         self.cursor = Cursor::Grid(cursor::offset(self.cursor_point(), dx, dy));
     }
 
-    fn command_line_key(&mut self, key: Key) -> Vec<Effect> {
-        match self.command_line.key(key) {
-            Outcome::Editing => Vec::new(),
-            Outcome::Full => {
-                self.error(format!(
-                    "the command line holds at most {MAX_COMMAND_LINE_CHARS} characters"
-                ));
-                Vec::new()
-            }
-            Outcome::Cancel => {
-                self.mode = Mode::Normal;
-                Vec::new()
-            }
-            Outcome::Run(line) => {
-                self.mode = Mode::Normal;
-                match parse_command(&line) {
-                    Ok(command) => self.run_command(&command),
-                    // `:` then `<CR>` does nothing, as in Vim.
-                    Err(CommandError::Empty) => Vec::new(),
-                    Err(error) => {
-                        self.error(error.to_string());
-                        Vec::new()
-                    }
-                }
-            }
-        }
-    }
-
-    fn run_command(&mut self, command: &Command) -> Vec<Effect> {
-        match *command {
-            Command::Circle { x, y, r } => {
-                let at = self.cursor_point();
-                let center = Point::new(x.unwrap_or(at.x), y.unwrap_or(at.y));
-                self.add_object(
-                    "c",
-                    Shape::Ellipse {
-                        center,
-                        rx: r,
-                        ry: r,
-                    },
-                );
-            }
-            Command::Undo => self.undo(1),
-            Command::Redo => self.redo(1),
-        }
-        Vec::new()
-    }
-
-    /// Puts a new object on top of the board, with a fresh id from `prefix` (`c1`), as one undo
-    /// step, and makes it the current object. A refusal becomes the message.
-    fn add_object(&mut self, prefix: &str, shape: Shape) {
-        let id = self.board.fresh_id(prefix);
-        let edit = Edit::Insert {
-            index: self.board.len(),
-            object: Object::new(id.clone(), shape),
-        };
-        if let Err(error) = edit.apply(&mut self.board) {
-            self.error(error.to_string());
-            return;
-        }
-        let cursor_before = std::mem::replace(&mut self.cursor, Cursor::Object(id));
+    /// Records edits already made on the board as one undo step, from `cursor_before` to the
+    /// cursor now.
+    fn commit(&mut self, edits: Vec<Edit>, cursor_before: Cursor) {
         self.history.push(Step {
-            edits: vec![edit],
+            edits,
             cursor_before,
             cursor_after: self.cursor.clone(),
         });
+        self.version = self.version.wrapping_add(1);
     }
 
     /// Takes back up to `count` steps, putting the cursor where it was before the last one.
     fn undo(&mut self, count: u32) {
         for done in 0..count {
             match self.history.undo(&mut self.board) {
-                Some(Ok(cursor)) => self.cursor = cursor,
+                Some(Ok(cursor)) => {
+                    self.cursor = cursor;
+                    self.version = self.version.wrapping_add(1);
+                }
                 Some(Err(error)) => return self.error(format!("cannot undo: {error}")),
                 None if done == 0 => return self.error("already at the oldest change"),
                 None => return,
@@ -368,11 +290,22 @@ impl Engine {
     fn redo(&mut self, count: u32) {
         for done in 0..count {
             match self.history.redo(&mut self.board) {
-                Some(Ok(cursor)) => self.cursor = cursor,
+                Some(Ok(cursor)) => {
+                    self.cursor = cursor;
+                    self.version = self.version.wrapping_add(1);
+                }
                 Some(Err(error)) => return self.error(format!("cannot redo: {error}")),
                 None if done == 0 => return self.error("already at the newest change"),
                 None => return,
             }
         }
     }
+}
+
+/// The bounds of `object`, or a box of zero size at its anchor when it cannot be measured.
+fn bounds(object: &Object, measure: &mut dyn Measure) -> Rect {
+    measure.bounds(object).unwrap_or_else(|| {
+        let p = anchor(&object.shape);
+        Rect::from_points(p, p)
+    })
 }

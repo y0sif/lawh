@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(b, \"wyy5l2p\").snapshot()"
+---
+// mode=normal cursor=object(r2) keys=7
+lawh version=1
+rect id=r1 x=0 y=0 w=1 h=1
+rect id=r2 x=5 y=0 w=1 h=1
+rect id=r3 x=5 y=1.5 w=1 h=1

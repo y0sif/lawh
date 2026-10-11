@@ -1,0 +1,13 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "trace(compass(), \"wKH9k9kKJ\")"
+---
+    w // mode=normal cursor=object(o) keys=1
+    K // mode=normal cursor=object(o) keys=2
+    H // mode=normal cursor=object(o) keys=3
+    9 // mode=normal cursor=object(o) keys=4
+    k // mode=normal cursor=grid(0,-9) keys=5
+    9 // mode=normal cursor=grid(0,-9) keys=6
+    k // mode=normal cursor=grid(0,-18) keys=7
+    K // mode=normal cursor=grid(0,-18) keys=8
+    J // mode=normal cursor=object(o) keys=9

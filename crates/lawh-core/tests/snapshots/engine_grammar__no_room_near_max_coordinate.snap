@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=object(r1) keys=4 message="no room for the put"
+lawh version=1
+rect id=r1 x=0 y=999998.5 w=2 h=1

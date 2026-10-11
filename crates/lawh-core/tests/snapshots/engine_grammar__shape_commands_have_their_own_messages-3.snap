@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(Board::new(), &far).header()"
+---
+// mode=normal cursor=object(r1) keys=616 message="coordinates must be within -1000000..=1000000"

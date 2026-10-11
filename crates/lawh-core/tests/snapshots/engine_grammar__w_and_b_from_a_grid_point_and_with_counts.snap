@@ -1,0 +1,11 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "trace(rows(), \"4w2b99w\")"
+---
+    4 // mode=normal cursor=grid(0,0) keys=1
+    w // mode=normal cursor=object(l1) keys=2
+    2 // mode=normal cursor=object(l1) keys=3
+    b // mode=normal cursor=object(c1) keys=4
+    9 // mode=normal cursor=object(c1) keys=5
+    9 // mode=normal cursor=object(c1) keys=6
+    w // mode=normal cursor=object(m1) keys=7

@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(Board::new(), \":li 1<CR>\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=6 message="a line needs two numbers, or `x2=` and `y2=`"
+lawh version=1

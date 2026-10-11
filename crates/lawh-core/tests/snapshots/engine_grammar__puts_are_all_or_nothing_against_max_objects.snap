@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: r.header()
+---
+// mode=normal cursor=object(c1) keys=5 message="no room for 2 more objects: a board holds at most 500"

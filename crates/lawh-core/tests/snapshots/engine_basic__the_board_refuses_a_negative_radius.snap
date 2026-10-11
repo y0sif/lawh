@@ -2,5 +2,5 @@
 source: crates/lawh-core/tests/engine_basic.rs
 expression: "run(Board::new(), \"l:ci -2<CR>\").snapshot()"
 ---
-// mode=normal cursor=grid(1,0) keys=8 message="object `c1` has a size that is not above 0 and at most 1000000"
+// mode=normal cursor=grid(1,0) keys=8 message="radius must be above 0"
 lawh version=1

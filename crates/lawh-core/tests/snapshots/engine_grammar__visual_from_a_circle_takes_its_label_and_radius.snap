@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: r.header()
+---
+// mode=visual cursor=object(c1) keys=2 selection=c1,t1,l1

@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(b, \"wyypbP\").snapshot()"
+---
+// mode=normal cursor=object(t3) keys=6
+lawh version=1
+text id=t1 x=0.1234 y=0.25 "hello"
+text id=t2 x=0.123 y=1.4 "hello"
+text id=t3 x=0.123 y=-0.9 "hello"

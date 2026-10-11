@@ -1,0 +1,12 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(rows(), \"wp\").snapshot()"
+---
+// mode=normal cursor=object(r1) keys=2 message="nothing to put: the register is empty"
+lawh version=1
+text id=t1 x=8 y=0.2 "abc"
+math id=m1 x=1 y=5 "x^2"
+rect id=r1 x=0 y=0 w=2 h=1
+rect id=r2 x=4 y=2.5 w=2 h=1
+circle id=c1 x=5 y=0.5 r=0.5
+line id=l1 x1=0 y1=3 x2=2 y2=3

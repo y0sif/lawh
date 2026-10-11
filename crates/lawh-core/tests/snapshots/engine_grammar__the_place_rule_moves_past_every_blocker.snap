@@ -1,0 +1,10 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(blocked(), \"wyyp\").snapshot()"
+---
+// mode=normal cursor=object(r1) keys=4
+lawh version=1
+rect id=a x=0 y=0 w=4 h=1
+circle id=b x=3 y=2 r=0.6
+text id=c x=-1 y=2.9 "note"
+rect id=r1 x=0 y=4 w=4 h=1
