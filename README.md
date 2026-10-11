@@ -22,8 +22,12 @@ you drag. lawh drives the whole canvas with a Vim grammar (modes, counts, operat
 
 ## Status
 
-**Pre-alpha. Nothing usable yet.** The workspace builds and prints its version. The feature list
-below is the plan for v1, not what exists today.
+**Pre-alpha.** Milestone 1, "see a board", is done: `lawh file.lawh` opens a window and draws the
+board's text, math (rendered with Typst), circles, ellipses, rectangles, lines and arrows. You can
+pan and zoom with the mouse.
+
+Not there yet: the keyboard, editing, selection and saving. They start with milestone 2, the Vim
+engine. The feature list below is the plan for v1.
 
 ## Planned for v1
 
@@ -55,24 +59,44 @@ text   id=t2 x=1.5 y=-0.6 "r"
 math   id=m1 x=5 y=0 "A = pi r^2"
 ```
 
-The `:` commands use the same names, so `:circle r=3` reads like the line it creates.
+Each kind of object, one per line, as lawh writes it (coordinates in grid units, y down):
+
+```kdl
+lawh version=1
+text id=t1 x=0 y=-5 "Area of a circle"
+math id=m1 x=5 y=0 "A = pi r^2"
+circle id=c1 x=0 y=0 r=3
+ellipse id=e1 x=0 y=0 rx=3 ry=2
+rect id=r1 x=0 y=0 w=4 h=2
+line id=l1 x1=0 y1=0 x2=3 y2=0
+arrow id=a1 x1=0 y1=0 x2=3 y2=0
+```
+
+Text and math sit at the top-left of their box, circles and ellipses at their centre, rectangles
+at their top-left corner, and arrows point from `x1,y1` to `x2,y2`. Hand-written files may use
+comments, any property order and other KDL string forms; lawh writes this fixed shape. A board
+holds at most 500 objects and the file at most 1 MiB.
+
+The `:` commands will use the same names, so `:circle r=3` reads like the line it creates.
 
 ## How it works
 
 ```text
- keys ──► lawh (window, input)
-            │
-            ▼
-       lawh-core ── Vim engine: modes, counts, operators, motions, : commands
-            │       board model, undo, .lawh file format
-            ▼
-       lawh-render ── draws the board (vello_cpu) and exports SVG / PNG / PDF
-            │
-            └──► lawh-math ── Typst math → vector paths, symbol search
+ file, mouse ──► lawh (window, input)
+                   │
+                   ▼
+              lawh-core ── board model, .lawh reader and writer
+                   │       (next: Vim engine, : commands, undo)
+                   ▼
+              lawh-render ── draws the board (vello_cpu) with a per-frame work budget
+                   │         (later: export SVG / PNG / PDF)
+                   │
+                   └──► lawh-math ── Typst math → vector paths, compiled in a
+                                     sandboxed worker process
 ```
 
-`lawh-core` has no rendering or windowing code, so the Vim engine is tested as plain functions:
-keys in, board changes out. See [docs/architecture.md](docs/architecture.md).
+`lawh-core` has no rendering or windowing code, so the Vim engine will be tested as plain
+functions: keys in, board changes out. See [docs/architecture.md](docs/architecture.md).
 
 ## Platforms
 
@@ -84,20 +108,32 @@ macOS Gatekeeper and Windows SmartScreen will warn the first time you open lawh.
 ```bash
 git clone https://github.com/y0sif/lawh
 cd lawh
-cargo run -p lawh
+cargo run -p lawh -- examples/area.lawh
 ```
 
-Needs Rust 1.95 or newer.
+Needs Rust 1.95 or newer. No system packages are needed to build on Linux: the X11 and Wayland
+libraries are loaded when lawh starts.
+
+## Controls
+
+| Action | How |
+|---|---|
+| Pan | Drag with the left or middle mouse button |
+| Zoom | Mouse wheel or touchpad scroll, at the cursor |
+| Quit | Close the window |
+
+There are no keyboard controls yet: they come with the Vim engine. `RUST_LOG=info` prints how long
+the first frame took.
 
 ## Project structure
 
 ```text
 lawh/
 ├── crates/
-│   ├── lawh-core/     # board model, Vim engine, : commands, file format
-│   ├── lawh-math/     # Typst math rendering, symbol search
-│   ├── lawh-render/   # drawing and export
-│   └── lawh/          # the app: window, input, status and command line
+│   ├── lawh-core/     # board model and file format (Vim engine next)
+│   ├── lawh-math/     # Typst math in a sandboxed worker process
+│   ├── lawh-render/   # drawing (export later)
+│   └── lawh/          # the app: window and input
 ├── examples/          # sample boards
 ├── assets/fonts/      # bundled fonts
 ├── contrib/           # desktop entry, packaging

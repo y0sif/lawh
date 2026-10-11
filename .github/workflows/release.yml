@@ -54,6 +54,8 @@ jobs:
             cp "target/${{ matrix.target }}/release/lawh" "dist/$name/"
           fi
           cp README.md LICENSE "dist/$name/"
+          # The binary embeds the bundled fonts; OFL-1.1 requires their licences alongside.
+          cp assets/fonts/Inter-OFL.txt assets/fonts/Libertinus-OFL.txt "dist/$name/"
           cd dist
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             7z a -tzip "$name.zip" "$name" > /dev/null

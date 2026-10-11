@@ -25,13 +25,17 @@ All three must pass. CI runs the same commands.
 
 ## Where code goes
 
-- `lawh-core`: the Vim engine, board model, `:` commands and file format. It must not depend on
-  rendering, windowing or Typst. Most engine changes should come with a test that feeds keys and
-  checks the resulting board.
-- `lawh-math`: Typst math and symbol search. Keep the Typst world sandboxed: no file system,
-  no network, bundled fonts only.
-- `lawh-render`: drawing and export.
+- `lawh-core`: the board model and the `.lawh` reader and writer, then the Vim engine and `:`
+  commands. It must not depend on rendering, windowing or Typst. Engine changes should come with a
+  test that feeds keys and checks the resulting board.
+- `lawh-math`: Typst math, compiled in a worker process. Keep the Typst world sandboxed: no file
+  system, no network, no clock, bundled fonts only (see [SECURITY.md](SECURITY.md)).
+- `lawh-render`: drawing, the frame budget and export.
 - `lawh`: the app shell.
+
+Limits on what a board, a formula or a frame may cost are named constants whose doc comments give
+the reason and the measurements. If you change one, or a cost in the frame budget, rerun the
+calibrations and benches in [docs/testing.md](docs/testing.md#calibrations-and-benches).
 
 See [docs/architecture.md](docs/architecture.md) for the design and
 [docs/tech-stack.md](docs/tech-stack.md) before adding a dependency.
@@ -43,7 +47,8 @@ See [docs/architecture.md](docs/architecture.md) for the design and
 - To silence a lint, use `#[expect(lint, reason = "...")]`, not a bare `#[allow]`.
 - Tests: see [docs/testing.md](docs/testing.md). Engine changes come with a key-script snapshot test.
 - New dependencies must pass `cargo deny check` (licences and advisories) and be listed in
-  [docs/tech-stack.md](docs/tech-stack.md).
+  [docs/tech-stack.md](docs/tech-stack.md). Third-party licence notices for the release archives
+  are still a to-do before the first public release (see the same page).
 
 ## Commits
 

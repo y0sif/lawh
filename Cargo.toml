@@ -5,7 +5,8 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-# Highest MSRV among planned dependencies (kdl 6.7 needs 1.95).
+# kdl 6.7, a dev-dependency (the test oracle for lawh-core's parser), needs 1.95. The highest
+# among the dependencies the app builds is Typst 0.15 at 1.92.
 rust-version = "1.95"
 license = "MIT"
 authors = ["y0sif <yosifsoli981@gmail.com>"]

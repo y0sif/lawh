@@ -15,7 +15,7 @@ Spot-checked by hand: tldraw LICENSE.md production clause, Obsidian Excalidraw A
 | Doc + board | No | No | Via Obsidian markdown (I) | Native page + edgeless (V) | Our choice |
 | Format | JSON (V) | JSON snapshot (I) | `.excalidraw.md`, compressed JSON (V) | Yjs CRDT binary (I) | Plain text possible |
 | Churn | Slow releases, master 432 commits ahead, API renames (V) | Yearly majors, breaking (V) | Very active (V) | npm frozen at 0.22.4 since 2025-07 (V) | None |
-| Vim attempts | Issue #6925 open, nothing built | `biliboss/canvas` hjkl + `o` only, 0 stars | 1 tiny non-modal script | AFFiNE #3236 closed "not planned" | — |
+| Vim attempts | Issue #6925 open, nothing built | `biliboss/canvas` hjkl + `o` only, 0 stars | 1 tiny non-modal script | AFFiNE #3236 closed "not planned" | n/a |
 
 ## Blockers
 

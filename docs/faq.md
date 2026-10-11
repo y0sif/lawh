@@ -74,8 +74,11 @@ math   id=m1 x=5 y=0 "A = pi r^2"
 
 ### Is opening someone else's board safe?
 
-That's the intent. Math is compiled with Typst in a sandbox with no file access, no network and
-only bundled fonts. See [../SECURITY.md](../SECURITY.md).
+That's the intent, and milestone 1 builds it in. Files are read by a parser that checks every limit
+as it goes. Math is compiled with Typst in a separate process, with no file access, no network, no
+clock and only bundled fonts, and it is killed if a formula takes more than 2 seconds. On Linux that
+process also has a memory cap; on macOS and Windows it doesn't yet. See
+[../SECURITY.md](../SECURITY.md).
 
 ### Can several people edit the same board?
 

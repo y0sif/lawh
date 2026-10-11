@@ -1,5 +1,12 @@
 # KDL file format spike (2026-10-10)
 
+> **Update, 2026-10-11:** `.lawh` files are still flat KDL v2, but lawh no longer reads them with
+> the `kdl` crate. Hostile 1 MiB files took kdl up to 2 s and 459 MB, so lawh-core now has its own
+> one-pass parser and its own writer, and kdl is a dev-dependency used as the oracle for
+> differential tests. The `clear_format()` gotcha below no longer applies. See
+> [../architecture.md](../architecture.md#the-lawh-format) and
+> [m1-measurements.md](m1-measurements.md#reading-lawh-files).
+
 Question: can `.lawh` files use KDL (`kdl` crate 6.7.1, Apache-2.0, MSRV 1.95) without
 problems, or do we need our own format? Measured with a throwaway release build
 (`~/.cache/lawh-kdl-spike`), on y0sif's laptop.
