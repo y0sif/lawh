@@ -74,7 +74,7 @@ Release. Before: the reader lawh had on top of the `kdl` crate. All measured.
 | File | Before (kdl) | Peak memory before |
 |---|---|---|
 | `lawh version=1` then 524K arguments | 2.04 s | 459 MB |
-| 499 circles with about 1 KB of arguments each | 1.8 s | 369 MB |
+| 499 circles with about 2 KB of arguments each | 1.8 s | 369 MB |
 | `a=1` repeated on the header | 1.3 s | |
 | A string of 349K lines | 1.04 s | |
 | One string of 1 MiB | 0.41 s | |
@@ -127,7 +127,7 @@ documents the parser's property tests generate.
 
 | What | Figure | Kind | Conditions |
 |---|---|---|---|
-| Worker's peak address space, everyday formulas | 177 MiB of the 768 MiB cap | measured | during M1 |
+| App worker's peak address space, 48 everyday formulas | 177 MiB of the 768 MiB cap | measured | release `lawh --math-worker`, `measure_everyday_footprint` in `crates/lawh/tests/worker_process.rs`, during M1 |
 | Compiling one formula, cold | about 7 ms | measured | release |
 | The same formula from the engine's cache | about 1 µs | measured | release |
 | Recompiles, 40 formulas that don't fit in the cache together | 82 in 60 s | measured | |
@@ -140,7 +140,10 @@ From code comments, all measured:
 
 - `WORKER_MEMORY_LIMIT_BYTES` (`crates/lawh-math/src/worker.rs`): 173 MiB peak address space and
   21 MiB peak resident over 40 everyday formulas, debug test worker, Linux `x86_64`, 2026-10-10.
-  The cap is about four times that peak.
+  The cap is about four times that peak. This is not the 177 MiB in the table above: 173 MiB is
+  the debug `lawh-math-worker` test binary over 40 formulas (`measure_everyday_footprint` in
+  `crates/lawh-math/tests/worker_process.rs`), 177 MiB the release app binary over 48. They differ
+  in binary, build and formula count.
 - `MAX_RECOMPILE_BURST` (`crates/lawh-math/src/engine.rs`): before the recompile limit, 40
   formulas at the complexity caps, all on screen, made 2,099 compiles in 55 s and never settled.
 - `MAX_LAYOUT_GLYPHS` (`crates/lawh-math/src/lib.rs`, release, 2026-10-10, before the frame
@@ -170,15 +173,17 @@ After `calt`, `frac`, `numr` and `dnom` were turned off, every printable ASCII c
 `opt-level = 2` for every dependency and for the `lawh` crate in debug builds (root
 `Cargo.toml`).
 
-| What | Before | After | Kind |
-|---|---|---|---|
-| A debug frame (`area.lawh`, 1920x1080) | 116 ms | about 1.2 ms | measured |
-| A cold `cargo build` | 151 s | 479 s | measured |
+| What | Before | After | Kind | Source |
+|---|---|---|---|---|
+| A debug frame (`area.lawh`, 1920x1080) | 116 ms | about 1.2 ms | measured | message of commit `64c6bf4` |
+| A cold `cargo build` | 151 s | 479 s | measured | same |
 
 From the comment above the profile in the root `Cargo.toml` (debug, 1920x1080, `area.lawh`), all
 measured:
 
-- All dependencies at opt-level 2: lawh-render's bench went from 116 ms to 1.3 ms a frame.
+- All dependencies at opt-level 2: lawh-render's bench went from 116 ms to 1.3 ms a frame. The
+  table's 1.2 ms comes from the message of commit `64c6bf4`, this 1.3 ms from the `Cargo.toml`
+  comment.
 - lawh-render at opt-level 1 on top: no measurable gain, so it stays at 0.
 - `lawh` at opt-level 2: copying a frame to the window went from 35 ms (opt 0) and 3.2 ms
   (opt 1) to 1 ms, for about a second more per build.

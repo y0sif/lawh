@@ -66,15 +66,29 @@ can recurse deeply. So:
   `read` and the data loaders (`json`, `yaml`, `toml`, `cbor`, `csv`, `xml`), `raw`, `cite` and
   `bibliography` are removed from the library.
 - **Memory cap, Linux only:** on Linux the worker caps its own address space at 768 MiB
-  (`RLIMIT_AS`), so an allocation past it ends the worker. Core dumps are off, so a crash doesn't
-  write the worker's memory to disk.
+  (`RLIMIT_AS`), so an allocation past it ends the worker.
+- **No core dumps, on Unix:** on Linux and macOS the worker turns core dumps off (`RLIMIT_CORE`),
+  so a crash doesn't write the worker's memory to disk.
 
 **The memory cap is not in place on macOS or Windows yet.** macOS accepts the same limit but
-doesn't enforce it, and Windows needs a Job Object, which lawh doesn't create yet. On both, a
-hostile formula can allocate as much memory as it can in the 2 s before the worker is killed.
+doesn't enforce it, and Windows needs a Job Object (the Windows feature that sets limits on a
+group of processes), which lawh doesn't create yet. On both, a hostile formula can allocate as
+much memory as it can in the 2 s before the worker is killed.
 
 The worker runs with one Typst thread, so a runaway compile keeps at most one core busy until it is
 killed.
+
+**CPU per board (derived, not measured):** the worker compiles one formula at a time, and each
+compile ends at the 2 s timeout. A board holds at most 500 formulas, and every outcome is cached,
+failures and timeouts included, so a hostile board costs at most about 17 minutes of one core
+(500 x 2 s) of first compiles. Formulas whose layouts don't fit in the cache together are compiled
+again, but only while they are on screen (or were in the last 30 s), and at most 8 + 2t times in
+t seconds. lawh stays responsive meanwhile:
+
+- Math is async: the window never waits for a compile. `MathEngine::request` answers at once,
+  and the engine's own thread talks to the worker.
+- Only formulas on screen are asked for, nearest the centre of the view first.
+- A formula that failed or timed out isn't compiled again: its failure is cached.
 
 **What the sandbox is not:** it is not an operating-system sandbox. The worker runs as your user
 with the same permissions as lawh; what keeps Typst from your files and the network is the Typst

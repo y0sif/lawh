@@ -25,7 +25,7 @@ use crate::glyphs::GlyphStats;
 /// What a window frame may spend drawing objects and the grid. With the outline budget and a
 /// frame's fixed cost (the paper and the final render: 1 ms at 1920x1080, 3 ms at 2880x1800)
 /// it keeps a frame under about 33 ms, two refreshes at 60 Hz: the worst boards measured,
-/// text at lawh-core's caps included, take 25 ms at most (`frame_budget_worst_cases` in
+/// text at lawh-core's caps included, take 23 to 27 ms (`frame_budget_worst_cases` in
 /// `tests/bench.rs`, 2026-10-11).
 pub(crate) const FRAME_BUDGET_NS: f64 = 18e6;
 
@@ -77,7 +77,7 @@ const NS_PER_WALKED_RUN: f64 = 100.0;
 /// Each chunk of a text's plan looked at to estimate it (`crate::text::Plan`).
 const NS_PER_EXAMINED_CHUNK: f64 = 10.0;
 /// Laying out one text with parley and planning it (`calibrate_text_layout`): per text, per
-/// ASCII character (0.25 to 0.75 us, about 0.6 us for words and for digits and punctuation,
+/// ASCII character (0.24 to 0.75 us, about 0.6 us for words and for digits and punctuation,
 /// with the font's contextual alternates off: `crate::text`), per other character (0.4 to
 /// 0.6 us), per place where parley starts another run because the script or the bidi level
 /// changes, or may (`crate::text::Facts::changes` and `brackets`: about 1.2 to 1.4 us more;

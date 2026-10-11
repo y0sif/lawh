@@ -38,11 +38,12 @@ nice -n 19 cargo clippy --all-targets -- -D warnings
 
 ## CI and releases
 
-- `ci.yml`: fmt, clippy `-D warnings` and tests on Linux for every push and PR, `cargo deny`, plus
-  a check on Rust 1.95. macOS and Windows only run when triggered by hand
-  (`gh workflow run ci.yml -f all_platforms=true`) or from a release, because a private repo has
-  2,000 Actions minutes a month. Usage is blocked, not billed, once they run out. **When the repo goes
-  public, make all three platforms the default and set `publish = true`.**
+- `ci.yml`: fmt, clippy `-D warnings` and tests on Linux for pushes to `main` and for pull
+  requests, `cargo deny`, plus a check of all targets on Rust 1.95. macOS and Windows only run
+  when triggered by hand (`gh workflow run ci.yml -f all_platforms=true`) or from a release,
+  because a private repo has 2,000 Actions minutes a month. Usage is blocked, not billed, once they
+  run out. **When the repo goes public, make all three platforms the default and set
+  `publish = true`.**
 - `bench.yml`: calibrations and benches in release, by hand only (`gh workflow run bench.yml`).
 - `release.yml`: push a `v*` tag to run CI on all three platforms and build unsigned archives for
   Linux x86_64/arm64, macOS arm64/x86_64 and Windows x86_64, with `SHA256SUMS`. Each archive holds
@@ -71,14 +72,21 @@ nice -n 19 cargo clippy --all-targets -- -D warnings
 
 ## Limits
 
-Every cap on what a board, a formula or a frame may cost is a named constant with its reason and
-measurements in its doc comment. Change the constant, not a copy:
+Every cap on what a board, a formula or a frame may cost is a named constant with its reason, and
+measurements where a cost was measured, in its doc comment. Change the constant, not a copy:
 
 - File and parser: `crates/lawh-core/src/format/mod.rs` (`MAX_FILE_BYTES`, `MAX_ENTRIES`, ...).
 - Board: `crates/lawh-core/src/board.rs` (`MAX_OBJECTS`, `MAX_TEXT_CHARS`, ...).
 - Math: `crates/lawh-math/src/lib.rs` (layout caps), `engine.rs` (timeout, caches, recompile
   limits), `worker.rs` (memory cap).
+- Worker protocol: `crates/lawh-math/src/protocol.rs` (`MAX_FRAME_BYTES`).
+- Worker starts: `crates/lawh-math/src/process.rs` (`HANDSHAKE_TIMEOUT`, `MAX_SPAWN_FAILURES`).
 - Frame budget: `crates/lawh-render/src/budget.rs`; text cache: `text.rs`.
+- Huge glyphs and strokes: `crates/lawh-render/src/renderer.rs` (`MAX_GLYPH_EM_PX`,
+  `MAX_STROKE_PX`).
+- Drawable views: `crates/lawh-render/src/viewport.rs` (`MAX_PX_PER_UNIT`, `MAX_SCALE_FACTOR`,
+  `FIT_MAX_ZOOM`).
+- Wheel zoom: `crates/lawh/src/view.rs` (`MIN_ZOOM`, `MAX_ZOOM`).
 
 Overview table: `docs/architecture.md#limits`. Measured numbers: `docs/research/m1-measurements.md`.
 
@@ -96,6 +104,17 @@ Overview table: `docs/architecture.md#limits`. Measured numbers: `docs/research/
 - Math from a board always compiles in the worker process (`MathEngine::with_worker`). The
   in-process engine and `Renderer::new_trusted` are for tests and goldens only.
 - Commit identity: y0sif <yosifsoli981@gmail.com>.
+
+## Gotchas
+
+- **The math worker's logs are dropped (known limitation).** `main` hands over to
+  `lawh_math::worker_main` before it sets up logging, so the worker's panic hook and its `warn!`
+  lines go nowhere, even though its stderr is the app's (`process.rs` inherits it). Planned fix:
+  set up logging in worker mode, on stderr only, since stdout carries the protocol.
+- **Link error:** if linking `lawh` fails with
+  `rust-lld: error: undefined hidden symbol ... .llvm.<number>`, run `cargo clean -p lawh`. It is
+  a stale incremental cache with the crate's `opt-level = 2`. Seen on 2026-10-11; the rebuild took
+  10 s.
 
 ## Docs
 

@@ -1,5 +1,5 @@
 //! Math for lawh: compiles Typst math snippets to vector paths the renderer
-//! can draw, and finds symbols by name for `:sym`.
+//! can draw. Symbol search for `:sym` is planned.
 //!
 //! Typst runs in a sandbox (see `SECURITY.md`): the only file it can see is
 //! the formula itself, fonts come from [`fonts`], there is no clock and no

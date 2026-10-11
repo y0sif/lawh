@@ -98,7 +98,8 @@ pub const MAX_FORMULA_RECORDS: usize = 4096;
 
 /// Longest compile error message the engine keeps, in bytes; longer ones are
 /// cut at a character boundary and end in `…`. Typst can report thousands of
-/// errors for one long formula; a status line shows the first few.
+/// errors for one long formula; the planned status line will show the first
+/// few.
 pub const MAX_ERROR_MESSAGE_BYTES: usize = 1024;
 
 /// Called by the engine whenever a queued compile finishes, from the

@@ -1,4 +1,5 @@
-//! The lawh app: window, input, status line and command line.
+//! The lawh app: opens a `.lawh` board in a window and draws it, with mouse pan and zoom. With
+//! `--math-worker` it runs as the math worker instead.
 
 mod app;
 mod cli;

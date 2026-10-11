@@ -1,7 +1,7 @@
 [package]
 name = "lawh-core"
-description = "Board model, Vim-style modal engine, ex-commands and plain-text file format for the lawh keyboard-driven whiteboard"
-keywords = ["whiteboard", "vim", "modal-editing", "diagram", "canvas"]
+description = "Board model and plain-text .lawh file format for the lawh keyboard-driven whiteboard"
+keywords = ["whiteboard", "kdl", "file-format", "diagram", "canvas"]
 categories = ["text-editors", "graphics"]
 readme = "../../README.md"
 version.workspace = true

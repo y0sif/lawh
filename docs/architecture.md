@@ -81,7 +81,8 @@ A frame that ran out of budget for laying out text asks for the next frame itsel
 ## The `.lawh` format
 
 A board is a flat [KDL v2](https://kdl.dev) document: a `lawh version=1` header, then one object
-per line.
+per line. Files must be UTF-8: the app refuses one that isn't, when it reads it (`main.rs`). A
+leading byte order mark (BOM, U+FEFF) is skipped (`format/parse.rs`).
 
 ```kdl
 lawh version=1
@@ -135,10 +136,11 @@ or U+0000 unescaped, which its own parser then rejects.
 
 - Text and math content is **always** written as a double-quoted string, never bare, raw or
   multi-line. `\\`, `"`, newline, carriage return and tab use short escapes.
-- Control characters (C0, DEL, C1) and invisible or bidi formatting characters (soft hyphen,
-  zero-width space and joiners, LRM and RLM, bidi embeddings, overrides and isolates, the byte
-  order mark and a few others) are written as `\u{X}`, so the file shows them plainly and KDL
-  parsers accept it.
+- Control characters (C0, DEL, C1), invisible formatting characters, and bidi (bidirectional)
+  ones, which set the direction of text that mixes left-to-right and right-to-left writing, are
+  written as `\u{X}`, so the file shows them plainly and KDL parsers accept it. These are the soft
+  hyphen, zero-width space and joiners, LRM and RLM, bidi embeddings, overrides and isolates, the
+  byte order mark and a few others.
 - Ids are bare when KDL reads them back as the same string (`c1`), quoted otherwise (`"1"`,
   `"true"`).
 - Numbers are written as Rust prints them (`3`, `-0.5`), `-0` as `0`, and in exponent form at
@@ -164,7 +166,7 @@ The largest board the caps allow writes 415,551 bytes, well under the 1 MiB read
 | Characters of text and math on a board | 40,000 | `MAX_BOARD_TEXT_CHARS` | same |
 | Characters in an id | 64 | `MAX_ID_CHARS` | same |
 
-Each constant's doc comment says why it has its value, with measurements.
+Each constant's doc comment gives its reason, and measurements where a cost was measured.
 
 ## Math
 
@@ -197,11 +199,14 @@ carries only its protocol, so nothing may be printed first). Tests start the `la
 binary instead.
 
 - The worker starts with the first formula, with one Typst thread (`RAYON_NUM_THREADS=1`), 64 MiB
-  stacks and one malloc arena, so its address space tracks the memory it uses.
-- On start it caps its address space at **768 MiB** (`RLIMIT_AS`) and turns off core dumps,
-  lowering both soft and hard limits so nothing in it can raise them again. This holds on Linux.
-  macOS accepts `RLIMIT_AS` but doesn't enforce it, and Windows has no cap yet (it needs a Job
-  Object); there only the timeout bounds a runaway compile.
+  stacks and one malloc arena (`MALLOC_ARENA_MAX=1`; glibc's allocator otherwise reserves a
+  64 MiB region of address space, an arena, per thread), so its address space tracks the memory
+  it uses.
+- On start, on Unix, it caps its address space at **768 MiB** (`RLIMIT_AS`) and turns off core
+  dumps, lowering both soft and hard limits so nothing in it can raise them again. The memory cap
+  holds on Linux. macOS accepts `RLIMIT_AS` but doesn't enforce it, and Windows has no cap yet (it
+  needs a Job Object, the Windows feature that sets limits on a group of processes); there only
+  the timeout bounds a runaway compile.
 - A compile that takes more than **2 s** (`DEFAULT_TIMEOUT`) gets the worker killed and the
   formula marked `Timeout`. A worker that crashes (stack overflow, memory cap) or sends anything
   malformed is killed too, and the formula is marked `Crashed`.
@@ -209,6 +214,10 @@ binary instead.
   once on a new one. A new worker must announce itself within 5 s; after 3 failed starts in a row
   a formula gets `Unavailable`, and each later formula tries once more.
 - If the app goes away mid-compile, the worker exits on its own 1 s past the timeout.
+- **Known limitation:** the worker's logs are dropped. `main` hands over to the worker before it
+  sets up logging, so the worker's panic hook and its `warn!` lines go nowhere, even though the
+  worker's stderr is the app's. Planned fix: set up logging in worker mode (on stderr; stdout
+  stays the protocol's).
 
 The engine also has an in-process mode (`MathEngine::new`, `Renderer::new_trusted`) for trusted
 input only: tests, goldens and formulas lawh writes itself.
@@ -256,8 +265,8 @@ another: 40 formulas at the complexity caps made 2,099 compiles in 55 s and neve
 
 Now `request` doesn't queue a formula whose layout was pushed out. It answers `Evicted` with a
 summary of the layout (size, ink bounds, glyph and path counts), so the formula can still be
-placed, culled and drawn as an outline, and marks it **wanted**. The engine's queue thread
-compiles a wanted formula again only when all of these hold:
+placed, skipped when off screen and drawn as an outline, and marks it **wanted**. The engine's
+queue thread compiles a wanted formula again only when all of these hold:
 
 - **Cooldown:** at least 5 s (`RECOMPILE_COOLDOWN`) have passed since it was pushed out, so
   formulas pushing each other out don't make the window redraw continuously.
@@ -316,12 +325,11 @@ lays out at least one, so this ends.
 
 Laying out costs per character (ASCII and other characters priced apart), per line, and per
 **run change**. parley shapes text in runs and starts a new one where the script changes (Latin to
-Arabic, say) or the bidi level does. Bidi (bidirectional) text mixes left-to-right and
-right-to-left writing, and the Unicode bidi algorithm gives each character a level that sets its
-direction. The renderer counts run changes without laying the text out, from each character's
-script and bidi class in parley's own tables (`parley_data`) and a short model of the bidi
-algorithm. A test checks the count against the runs parley lays out. Two cases the model doesn't
-follow are charged at their worst:
+Arabic, say) or the bidi level does: the Unicode bidi algorithm gives each character of mixed
+left-to-right and right-to-left text a level that sets its direction. The renderer counts run
+changes without laying the text out, from each character's script and bidi class in parley's own
+tables (`parley_data`) and a short model of the bidi algorithm. A test checks the count against
+the runs parley lays out. Two cases the model doesn't follow are charged at their worst:
 
 - **After an explicit bidi code** (embeddings, overrides and isolates, U+202A to U+202E and
   U+2066 to U+2069), every character counts as a run change, the most a character can cost. Real

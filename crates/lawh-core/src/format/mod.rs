@@ -63,6 +63,9 @@ mod write;
 pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 
 /// Deepest nesting of block comments `/* /* */ */` in a `.lawh` file.
+///
+/// lawh's parser counts levels instead of recursing, so depth costs it nothing; the cap keeps
+/// files readable by KDL parsers that recurse on nested comments, as the `kdl` crate does.
 pub const MAX_COMMENT_DEPTH: usize = 16;
 
 /// Most entries (properties and arguments) a node in a `.lawh` file has; reading stops at the

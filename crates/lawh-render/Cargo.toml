@@ -1,7 +1,7 @@
 [package]
 name = "lawh-render"
-description = "Renders lawh whiteboards to pixels and exports them to SVG, PNG and PDF"
-keywords = ["whiteboard", "rendering", "svg", "pdf", "vector"]
+description = "Renders lawh whiteboards to pixels on the CPU, with a per-frame work budget"
+keywords = ["whiteboard", "rendering", "vector"]
 categories = ["graphics", "rendering"]
 readme = "../../README.md"
 version.workspace = true

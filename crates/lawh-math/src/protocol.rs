@@ -55,7 +55,9 @@ use crate::{
 /// other.
 pub(crate) const PROTOCOL_VERSION: u32 = 1;
 
-/// Largest frame either side accepts, payload only.
+/// Largest frame either side accepts, payload only. It bounds what a broken peer can make the
+/// other side allocate. A reply at the layout caps is about 1 MB (derived: 25,000 glyphs at 20
+/// bytes plus 10,000 path elements at up to 49), so real replies stay far below it.
 pub(crate) const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Longest handshake line the parent reads, newline included.

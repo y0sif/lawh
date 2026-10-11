@@ -79,7 +79,7 @@ Other measurements, also `#[ignore]`:
 | `measure_heavy_formulas` | Size of heavy and hostile formulas | `cargo test --release -p lawh-math --test layout -- --ignored --nocapture measure` |
 | `measure_churn_of_formulas_that_do_not_fit_the_cache` | Recompiles over a minute against the 8 + 2t bound | `cargo test --release -p lawh-math --test worker -- --ignored --nocapture churn` |
 | `measure_everyday_footprint` | The worker's peak address space and resident memory | `cargo test --release -p lawh --test worker_process -- --ignored --nocapture` |
-| `run_repro_directory` | Every `*.typ` formula in `LAWH_MATH_REPROS` through a worker | `LAWH_MATH_REPROS=dir cargo test -p lawh-math --test worker -- --ignored --nocapture` |
+| `run_repro_directory` | Every `*.typ` formula in `LAWH_MATH_REPROS` through a worker | `LAWH_MATH_REPROS=dir cargo test -p lawh-math --test worker -- --ignored --nocapture run_repro` |
 | `copy_1080p_frame_time` | Copying a frame to the window's pixel format | `cargo test -p lawh --bin lawh -- --ignored --nocapture` |
 
 Put `nice -n 19` in front of each on the laptop.
@@ -134,7 +134,7 @@ mappings from config.
 | Engine (`lawh-core`) | Modes, counts, operators, motions, undo, `.` repeat | Key script → `insta` snapshot of the board, mode and cursor | Milestone 2 |
 | `:` commands (`lawh-core`) | Parsing and errors | Table tests: input → command or error message | Milestone 2 |
 | Acceptance (`lawh-core/tests/`) | The "area of a circle" benchmark built from keys only | One key script must produce `examples/area.lawh`. Its key count is recorded, since "fewer actions than a mouse" is the product's promise. | Milestone 2 |
-| Window | Input, presenting frames | No automated GUI tests in v1. A manual checklist on Linux (Wayland and X11) before any release. | Manual |
+| Window | Input, presenting frames | No automated GUI tests in v1. A manual checklist on Linux (Wayland and X11) before any release, to be written. | Manual |
 
 ## Later
 

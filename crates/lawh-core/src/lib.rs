@@ -1,8 +1,8 @@
-//! Core of lawh: the board model, the Vim-style modal engine, ex-commands
-//! and the plain-text `.lawh` file format.
+//! Core of lawh: the board model and the `.lawh` reader and writer.
 //!
-//! This crate has no rendering or windowing dependencies, so the engine can be
-//! tested as plain functions: keys in, board changes out.
+//! The Vim engine and `:` commands come in milestone 2. This crate has no
+//! rendering or windowing code, so they can be tested as plain functions:
+//! keys in, board changes out.
 //!
 //! Coordinates are grid units (`f64`) with y growing down.
 

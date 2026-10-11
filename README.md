@@ -10,15 +10,15 @@
 
 </div>
 
-lawh (لوح, "board" or "slate") is a native, open-source whiteboard and text editor where you draw
-shapes, write math and arrange text with Vim motions and commands instead of a mouse or a pen.
-Type `:circle r=3` and the circle appears at your cursor. Write `A = pi r^2` and it renders as
-math. Move the label under the circle with a motion. No drawing tablet, no hunting for toolbar
-buttons, no dragging to get the size right.
+lawh (لوح, "board" or "slate") is a native, open-source whiteboard and text editor for the
+keyboard. In v1 you will draw shapes, write math and arrange text with Vim motions and commands
+instead of a mouse or a pen. Type `:circle r=3` and the circle will appear at your cursor. Write
+`A = pi r^2` and it will render as math. Move the label under the circle with a motion. No drawing
+tablet, no hunting for toolbar buttons, no dragging to get the size right.
 
 Whiteboards like Excalidraw and tldraw are built for the mouse: keyboard shortcuts pick a tool, then
-you drag. lawh drives the whole canvas with a Vim grammar (modes, counts, operators, motions and
-`:` commands), and it works on plain-text files you keep in git.
+you drag. lawh will drive the whole canvas with a Vim grammar (modes, counts, operators, motions and
+`:` commands). Its boards are plain-text files you keep in git.
 
 ## Status
 
@@ -75,7 +75,8 @@ arrow id=a1 x1=0 y1=0 x2=3 y2=0
 Text and math sit at the top-left of their box, circles and ellipses at their centre, rectangles
 at their top-left corner, and arrows point from `x1,y1` to `x2,y2`. Hand-written files may use
 comments, any property order and other KDL string forms; lawh writes this fixed shape. A board
-holds at most 500 objects and the file at most 1 MiB.
+holds at most 500 objects and the file at most 1 MiB. Files must be UTF-8; a leading byte order
+mark (BOM) is skipped.
 
 The `:` commands will use the same names, so `:circle r=3` reads like the line it creates.
 
@@ -136,7 +137,7 @@ lawh/
 │   └── lawh/          # the app: window and input
 ├── examples/          # sample boards
 ├── assets/fonts/      # bundled fonts
-├── contrib/           # desktop entry, packaging
+├── contrib/           # (empty for now)
 └── docs/              # architecture, tech stack, comparison, FAQ
 ```
 
@@ -156,7 +157,7 @@ More in [docs/comparison.md](docs/comparison.md) and [docs/faq.md](docs/faq.md).
 ## Development
 
 ```bash
-cargo test -p lawh-core                        # fast loop for the engine
+cargo test -p lawh-core                        # fast loop: board model and file format
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```

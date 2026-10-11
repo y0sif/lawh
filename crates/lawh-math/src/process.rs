@@ -45,11 +45,13 @@ impl WorkerCommand {
     }
 }
 
-/// How long a new worker has to announce itself.
+/// How long a new worker has to announce itself. A normal start takes far less; the limit only
+/// ends a start that hangs, so math doesn't wait on it forever.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Failed starts in a row after which a formula gets
-/// [`MathError::Unavailable`]. Each later formula tries once more.
+/// [`MathError::Unavailable`]. Each later formula tries once more. A few retries ride out a
+/// passing failure without starting a process per formula when the worker can't start at all.
 const MAX_SPAWN_FAILURES: u32 = 3;
 
 /// What the reader thread passes on: a handshake line or frame, or why the
