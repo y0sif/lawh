@@ -79,6 +79,13 @@ impl Engine {
     ///
     /// Several writes may wait at once (`:w<CR>:w copy.lawh<CR>` in a mapping): each report is
     /// matched to the oldest write asked for with the same path.
+    ///
+    /// The report becomes the message as the key's own messages do (see [`Message`]): a failure
+    /// is an error and replaces any message, while `"a.lawh" written` does not replace an error
+    /// the key left, so it hides neither a failed copy reported before it nor a key refused for
+    /// asking too many writes.
+    ///
+    /// [`Message`]: super::Message
     pub fn write_done(&mut self, path: &str, result: Result<(), String>) -> Vec<Effect> {
         let asked = self
             .pending_writes

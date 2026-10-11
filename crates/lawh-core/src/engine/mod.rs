@@ -125,7 +125,17 @@ pub enum Effect {
     ArmTimer { ms: u64 },
 }
 
-/// A message for the status line. It lasts until the next key.
+/// A message for the status line. It lasts until the next typed key or click; a timeout
+/// ([`Engine::timeout`]) runs keys typed before it and keeps the message they left.
+///
+/// One key may leave several messages: each command it sets off may (through mappings, `.` and
+/// counts), and so may the reports of its writes ([`Engine::write_done`]), which come after all
+/// its commands. Information never replaces an error, so a mapping such as
+/// `:w copy.lawh<CR>:w<CR>` whose copy fails ends on the failure, not on `"a.lawh" written`, and
+/// one refused for asking too many writes ends on the refusal, not on its writes' reports. An
+/// error replaces any message, an earlier error too: the last error is the one that stopped the
+/// key (a recursive mapping, too much work, a refused write), or a write that failed after the
+/// key's commands, the news the status line must not lose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub text: String,
@@ -316,6 +326,7 @@ impl Engine {
         self.history.is_modified() || self.session_changed()
     }
 
+    /// Makes `text` the message, as an error, in place of any message (see [`Message`]).
     fn error(&mut self, text: impl Into<String>) {
         self.message = Some(Message {
             text: text.into(),
@@ -323,7 +334,12 @@ impl Engine {
         });
     }
 
+    /// Makes `text` the message, as information, unless the message is an error: an error
+    /// stays until the next typed key or click, or a later error (see [`Message`]).
     fn info(&mut self, text: impl Into<String>) {
+        if self.message.as_ref().is_some_and(|m| m.error) {
+            return;
+        }
         self.message = Some(Message {
             text: text.into(),
             error: false,

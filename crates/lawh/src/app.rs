@@ -726,6 +726,7 @@ fn ms(d: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use lawh_core::engine::MAX_WRITES_PER_KEY;
     use lawh_core::{FixedMeasure, from_lawh, parse_keys};
 
     use super::*;
@@ -838,6 +839,47 @@ mod tests {
         let message = engine.message().unwrap();
         assert!(message.error);
         assert_eq!(message.text, "cannot write \"a.lawh\": disk full");
+    }
+
+    #[test]
+    fn the_status_line_keeps_a_keys_error_over_its_later_write_reports() {
+        // A copy that fails, then the board's own write that goes well: the failure stays.
+        let copy = "/no/such/dir/b.lawh";
+        let mut engine = named_with_q(&format!(":w {copy}<CR>:w<CR>"));
+        type_keys(&mut engine, ":ci 2<CR>");
+        let effects = type_keys(&mut engine, "Q");
+        let after = do_writes(&mut engine, effects, as_given, |target, _| {
+            if target == Path::new(copy) {
+                Err(io::Error::other("no such directory"))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(after, AfterWrites::default());
+        assert!(!engine.is_modified());
+        let shown = status::status(&engine, None);
+        assert!(shown.error, "{shown:?}");
+        assert_eq!(
+            shown.left,
+            format!("cannot write \"{copy}\": no such directory")
+        );
+
+        // Four good writes, then a `:wq` refused as one too many: lawh stays open and says why.
+        let mut engine = named_with_q(":w<CR>:w<CR>:w<CR>:w<CR>:wq<CR>");
+        type_keys(&mut engine, ":ci 2<CR>");
+        let effects = type_keys(&mut engine, "Q");
+        let after = do_writes(&mut engine, effects, as_given, |_, _| Ok(()));
+        assert_eq!(after, AfterWrites::default());
+        assert!(!engine.is_modified());
+        let shown = status::status(&engine, None);
+        assert!(shown.error, "{shown:?}");
+        assert_eq!(
+            shown.left,
+            format!(
+                "that key asked for more than {MAX_WRITES_PER_KEY} writes; the rest of it was \
+                 dropped"
+            )
+        );
     }
 
     #[test]

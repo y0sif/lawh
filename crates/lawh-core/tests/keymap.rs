@@ -783,6 +783,91 @@ fn a_wq_or_x_past_max_writes_per_key_does_not_quit() {
     assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 1));
 }
 
+// The message after a key's writes are reported: information never replaces an error.
+
+#[test]
+fn a_lone_write_reports_written() {
+    let mut r = named("", ":ci 1<CR>:w<CR>");
+    assert_eq!(message(&r), None);
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(message(&r), Some("\"a.lawh\" written"));
+    assert!(!r.engine.message().unwrap().error);
+    assert!(!r.engine.is_modified());
+    // The same from a mapping.
+    let mut r = named("nnoremap Q :w<CR>\n", ":ci 1<CR>Q");
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(message(&r), Some("\"a.lawh\" written"));
+    assert!(!r.engine.message().unwrap().error);
+}
+
+#[test]
+fn a_wq_refused_past_max_writes_per_key_still_says_so_after_the_reports() {
+    // Before, the last write's report took the message: `"a.lawh" written`, while lawh stayed
+    // open with no word of why.
+    let mut r = named("nnoremap Q :w<CR>:w<CR>:w<CR>:w<CR>:wq<CR>\n", ":ci 1<CR>Q");
+    report_writes(&mut r);
+    assert_eq!(writes_and_quits(&r), (MAX_WRITES_PER_KEY, 0));
+    assert_eq!(error(&r), too_many_writes());
+    // The writes themselves went well.
+    assert!(!r.engine.is_modified());
+    // The next key starts with no message.
+    r.feed("l");
+    assert_eq!(message(&r), None);
+}
+
+#[test]
+fn a_failed_copy_is_not_hidden_by_a_later_write() {
+    // Before, the board's own write, reported last, took the message: `"a.lawh" written`.
+    let copy = "/no/such/dir/b.lawh";
+    let mut r = named(&format!("nnoremap Q :w {copy}<CR>:w<CR>\n"), ":ci 1<CR>Q");
+    r.write_done(copy, Err("No such file or directory (os error 2)"));
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(
+        error(&r),
+        format!("cannot write \"{copy}\": No such file or directory (os error 2)")
+    );
+    // The board's own file has its changes.
+    assert!(!r.engine.is_modified());
+    // A click starts with no message too.
+    r.click(0.0, 0.0, None);
+    assert_eq!(message(&r), None);
+}
+
+#[test]
+fn a_good_write_reported_after_a_failed_one_keeps_the_failure() {
+    let mut r = named("nnoremap Q :w<CR>:w b.lawh<CR>\n", ":ci 1<CR>Q");
+    r.write_done("a.lawh", Err("disk full"));
+    r.write_done("b.lawh", Ok(()));
+    assert_eq!(error(&r), "cannot write \"a.lawh\": disk full");
+    assert!(r.engine.is_modified());
+}
+
+#[test]
+fn an_error_replaces_any_message_and_information_replaces_none() {
+    // Information from a command, then a failed write: the failure.
+    let mut r = named("nnoremap Q :map<CR>:w<CR>\n", ":ci 1<CR>Q");
+    let shown = r.engine.message().unwrap();
+    assert!(!shown.error, "{shown:?}");
+    r.write_done("a.lawh", Err("disk full"));
+    assert_eq!(error(&r), "cannot write \"a.lawh\": disk full");
+    // An error from a command, then information from another: the error.
+    let r = named("nnoremap Q x:map<CR>\n", "Q");
+    assert_eq!(error(&r), "no object under the cursor");
+    // Two errors: the later one, here a write that failed after the key was refused for asking
+    // too many writes.
+    let mut r = named("nnoremap Q :w<CR>:w<CR>:w<CR>:w<CR>:wq<CR>\n", ":ci 1<CR>Q");
+    assert_eq!(error(&r), too_many_writes());
+    for _ in 0..MAX_WRITES_PER_KEY {
+        r.write_done("a.lawh", Err("disk full"));
+    }
+    assert_eq!(error(&r), "cannot write \"a.lawh\": disk full");
+    // And of two failed writes, the one reported last.
+    let mut r = named("nnoremap Q :w b.lawh<CR>:w c.lawh<CR>\n", ":ci 1<CR>Q");
+    r.write_done("b.lawh", Err("disk full"));
+    r.write_done("c.lawh", Err("permission denied"));
+    assert_eq!(error(&r), "cannot write \"c.lawh\": permission denied");
+}
+
 // Reading a lawhrc.
 
 #[test]
