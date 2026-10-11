@@ -360,6 +360,15 @@ pub enum BoardError {
     TooMuchText(ObjectId),
     #[error("object `{0}` would be one too many: a board holds at most {max} objects", max = MAX_OBJECTS)]
     TooManyObjects(ObjectId),
+    #[error("there is no object `{0}` on the board")]
+    NoSuchObject(ObjectId),
+    /// [`Board::insert_at`] was given a position past the end of the board.
+    #[error("object `{id}` cannot go at position {index}: the board holds {len} objects")]
+    BadPosition {
+        id: ObjectId,
+        index: usize,
+        len: usize,
+    },
 }
 
 /// The whiteboard: objects in z-order, back to front.
@@ -405,30 +414,120 @@ impl Board {
     /// [`MAX_TEXT_LINES`], it would take the board's text past [`MAX_BOARD_TEXT_CHARS`], or the
     /// board already holds [`MAX_OBJECTS`] objects.
     pub fn insert(&mut self, object: Object) -> Result<(), BoardError> {
-        let shape = &object.shape;
-        let problem: Option<fn(ObjectId) -> BoardError> = if self.is_full() {
-            Some(BoardError::TooManyObjects)
-        } else if self.contains(&object.id) {
-            Some(BoardError::DuplicateId)
-        } else if !shape.is_finite() {
-            Some(BoardError::NonFinite)
-        } else if !shape.coordinates_in_range() {
-            Some(BoardError::CoordinateOutOfRange)
-        } else if !shape.sizes_in_range() {
-            Some(BoardError::InvalidSize)
-        } else {
-            match shape.content().map(check_text) {
-                Some(Err(TextProblem::TooLong)) => Some(BoardError::TextTooLong),
-                Some(Err(TextProblem::TooManyLines)) => Some(BoardError::TooManyLines),
-                Some(Ok(chars)) if !self.has_room_for_text(chars) => Some(BoardError::TooMuchText),
-                Some(Ok(_)) | None => None,
-            }
-        };
-        if let Some(error) = problem {
+        if let Err(error) = self.check_new(&object) {
             return Err(error(object.id));
         }
         self.push_checked(object);
         Ok(())
+    }
+
+    /// Puts `object` at position `index` in z-order (0 is the back), moving the objects from
+    /// `index` on one step to the front. `index` may be [`Board::len`], the top.
+    ///
+    /// Checks `object` as [`Board::insert`] does. An `index` past the end fails with
+    /// [`BoardError::BadPosition`] rather than being clamped: the caller's idea of the board is
+    /// wrong (an undo history out of step with it, say), and clamping would quietly put the
+    /// object at another depth. The position [`Board::remove`] returns is always good.
+    pub fn insert_at(&mut self, index: usize, object: Object) -> Result<(), BoardError> {
+        if let Err(error) = self.check_new(&object) {
+            return Err(error(object.id));
+        }
+        let len = self.objects.len();
+        if index > len {
+            return Err(BoardError::BadPosition {
+                id: object.id,
+                index,
+                len,
+            });
+        }
+        self.text_chars = self.text_chars.saturating_add(object.shape.content_chars());
+        self.index.insert(object.id.clone(), index);
+        self.objects.insert(index, object);
+        self.reindex_from(index + 1);
+        Ok(())
+    }
+
+    /// Takes the object `id` off the board: its position in z-order and the object, or `None`
+    /// when there is no such object.
+    pub fn remove(&mut self, id: &ObjectId) -> Option<(usize, Object)> {
+        let index = self.index.remove(id)?;
+        let object = self.objects.remove(index);
+        self.text_chars = self.text_chars.saturating_sub(object.shape.content_chars());
+        self.reindex_from(index);
+        Some((index, object))
+    }
+
+    /// Gives the object `id` a new shape, of any kind, keeping its id and position. Returns the
+    /// old shape.
+    ///
+    /// Checks `shape` as [`Board::insert`] does, counting the board's text without the old
+    /// shape's. Fails with [`BoardError::NoSuchObject`] when there is no object `id`.
+    pub fn replace(&mut self, id: &ObjectId, shape: Shape) -> Result<Shape, BoardError> {
+        let missing = || BoardError::NoSuchObject(id.clone());
+        let &i = self.index.get(id).ok_or_else(missing)?;
+        let freed = self
+            .objects
+            .get(i)
+            .ok_or_else(missing)?
+            .shape
+            .content_chars();
+        let chars = self
+            .check_shape(&shape, freed)
+            .map_err(|error| error(id.clone()))?;
+        let object = self.objects.get_mut(i).ok_or_else(missing)?;
+        let old = std::mem::replace(&mut object.shape, shape);
+        self.text_chars = self.text_chars.saturating_sub(freed).saturating_add(chars);
+        Ok(old)
+    }
+
+    /// What [`Board::insert`] would refuse about `object`, if anything.
+    fn check_new(&self, object: &Object) -> Result<(), fn(ObjectId) -> BoardError> {
+        if self.is_full() {
+            Err(BoardError::TooManyObjects)
+        } else if self.contains(&object.id) {
+            Err(BoardError::DuplicateId)
+        } else {
+            self.check_shape(&object.shape, 0).map(|_| ())
+        }
+    }
+
+    /// The characters of text in `shape` when the board can hold it once `freed` characters of
+    /// text have left it (a replaced shape's), or what is wrong with it.
+    fn check_shape(
+        &self,
+        shape: &Shape,
+        freed: usize,
+    ) -> Result<usize, fn(ObjectId) -> BoardError> {
+        if !shape.is_finite() {
+            Err(BoardError::NonFinite)
+        } else if !shape.coordinates_in_range() {
+            Err(BoardError::CoordinateOutOfRange)
+        } else if !shape.sizes_in_range() {
+            Err(BoardError::InvalidSize)
+        } else {
+            match shape.content().map(check_text) {
+                Some(Err(TextProblem::TooLong)) => Err(BoardError::TextTooLong),
+                Some(Err(TextProblem::TooManyLines)) => Err(BoardError::TooManyLines),
+                Some(Ok(chars))
+                    if chars
+                        > MAX_BOARD_TEXT_CHARS
+                            .saturating_sub(self.text_chars.saturating_sub(freed)) =>
+                {
+                    Err(BoardError::TooMuchText)
+                }
+                Some(Ok(chars)) => Ok(chars),
+                None => Ok(0),
+            }
+        }
+    }
+
+    /// Points the index at the positions of the objects from `start` on, after they moved.
+    fn reindex_from(&mut self, start: usize) {
+        for (i, object) in self.objects.iter().enumerate().skip(start) {
+            if let Some(slot) = self.index.get_mut(&object.id) {
+                *slot = i;
+            }
+        }
     }
 
     /// True when the board holds [`MAX_OBJECTS`] objects, so [`Board::insert`] refuses another.
@@ -865,6 +964,289 @@ mod tests {
         assert_eq!(board.fresh_id("a b.c"), id("abc1"));
         assert_eq!(board.fresh_id(""), id("1"));
         assert_eq!(board.fresh_id("é"), id("1"));
+    }
+
+    /// The index points at every object's position and nothing else, and `text_chars` is the
+    /// sum of the objects' text.
+    fn assert_consistent(board: &Board) {
+        assert_eq!(board.index.len(), board.objects.len());
+        for (i, object) in board.objects.iter().enumerate() {
+            assert_eq!(board.index.get(&object.id), Some(&i), "{}", object.id);
+        }
+        let sum: usize = board.objects.iter().map(|o| o.shape.content_chars()).sum();
+        assert_eq!(board.text_chars, sum);
+    }
+
+    fn ids(board: &Board) -> Vec<&str> {
+        board.objects().iter().map(|o| o.id.as_str()).collect()
+    }
+
+    #[test]
+    fn insert_at_puts_objects_at_any_depth() {
+        let mut board = Board::new();
+        board.insert_at(0, circle("c1", 1.0)).unwrap();
+        board.insert_at(0, circle("c0", 1.0)).unwrap();
+        board.insert_at(2, circle("c3", 1.0)).unwrap();
+        board.insert_at(2, text("t2", "ab".to_owned())).unwrap();
+        assert_eq!(ids(&board), ["c0", "c1", "t2", "c3"]);
+        assert_eq!(board.text_chars(), 2);
+        assert_consistent(&board);
+    }
+
+    #[test]
+    fn insert_at_refuses_a_position_past_the_end() {
+        let mut board = Board::new();
+        board.insert(circle("c1", 1.0)).unwrap();
+        assert_eq!(
+            board.insert_at(2, circle("c2", 1.0)),
+            Err(BoardError::BadPosition {
+                id: id("c2"),
+                index: 2,
+                len: 1
+            })
+        );
+        assert_eq!(
+            BoardError::BadPosition {
+                id: id("c2"),
+                index: 2,
+                len: 1
+            }
+            .to_string(),
+            "object `c2` cannot go at position 2: the board holds 1 objects"
+        );
+        assert_eq!(ids(&board), ["c1"]);
+        assert_consistent(&board);
+    }
+
+    #[test]
+    fn insert_at_checks_the_object_as_insert_does() {
+        let mut board = Board::new();
+        board.insert(circle("c1", 1.0)).unwrap();
+        assert_eq!(
+            board.insert_at(0, circle("c1", 2.0)),
+            Err(BoardError::DuplicateId(id("c1")))
+        );
+        assert_eq!(
+            board.insert_at(0, circle("c2", -1.0)),
+            Err(BoardError::InvalidSize(id("c2")))
+        );
+        assert_eq!(
+            board.insert_at(0, text("t1", "x".repeat(MAX_TEXT_CHARS + 1))),
+            Err(BoardError::TextTooLong(id("t1")))
+        );
+        for i in 1..MAX_OBJECTS {
+            board.insert(circle(&format!("f{i}"), 1.0)).unwrap();
+        }
+        // The object checks come before the position: a full board refuses even a bad one.
+        assert_eq!(
+            board.insert_at(MAX_OBJECTS + 7, circle("c2", 1.0)),
+            Err(BoardError::TooManyObjects(id("c2")))
+        );
+        assert_eq!(board.len(), MAX_OBJECTS);
+        assert_consistent(&board);
+    }
+
+    #[test]
+    fn remove_returns_the_position_and_frees_the_text() {
+        let mut board = Board::new();
+        board.insert(circle("c1", 1.0)).unwrap();
+        board.insert(text("t1", "héllo".to_owned())).unwrap();
+        board.insert(circle("c2", 2.0)).unwrap();
+        assert_eq!(board.text_chars(), 5);
+        assert_eq!(
+            board.remove(&id("t1")),
+            Some((1, text("t1", "héllo".to_owned())))
+        );
+        assert_eq!(board.text_chars(), 0);
+        assert_eq!(ids(&board), ["c1", "c2"]);
+        assert_eq!(board.get(&id("c2")), Some(&circle("c2", 2.0)));
+        assert_eq!(board.remove(&id("t1")), None);
+        assert_consistent(&board);
+        // The id is free again, and the removed object goes back where it was.
+        board.insert_at(1, text("t1", "héllo".to_owned())).unwrap();
+        assert_eq!(ids(&board), ["c1", "t1", "c2"]);
+        assert_consistent(&board);
+    }
+
+    #[test]
+    fn replace_keeps_the_id_and_depth_and_returns_the_old_shape() {
+        let mut board = Board::new();
+        board.insert(circle("c1", 1.0)).unwrap();
+        board.insert(circle("o1", 2.0)).unwrap();
+        board.insert(circle("c2", 3.0)).unwrap();
+        let rect = Shape::Rect {
+            origin: Point::new(1.0, 2.0),
+            w: 3.0,
+            h: 4.0,
+        };
+        assert_eq!(
+            board.replace(&id("o1"), rect.clone()),
+            Ok(circle("o1", 2.0).shape)
+        );
+        assert_eq!(ids(&board), ["c1", "o1", "c2"]);
+        assert_eq!(board.get(&id("o1")).map(|o| &o.shape), Some(&rect));
+        assert_eq!(
+            board.replace(&id("nope"), rect),
+            Err(BoardError::NoSuchObject(id("nope")))
+        );
+        assert_eq!(
+            BoardError::NoSuchObject(id("nope")).to_string(),
+            "there is no object `nope` on the board"
+        );
+        assert_consistent(&board);
+    }
+
+    #[test]
+    fn replace_checks_the_new_shape_and_leaves_a_refused_one_out() {
+        let mut board = Board::new();
+        board.insert(circle("c1", 1.0)).unwrap();
+        let bad = [
+            (
+                circle("c1", f64::NAN).shape,
+                BoardError::NonFinite(id("c1")),
+            ),
+            (circle("c1", 0.0).shape, BoardError::InvalidSize(id("c1"))),
+            (
+                rect("c1", Point::new(0.0, -2e6), 1.0, 1.0).shape,
+                BoardError::CoordinateOutOfRange(id("c1")),
+            ),
+            (
+                text("c1", "x".repeat(MAX_TEXT_CHARS + 1)).shape,
+                BoardError::TextTooLong(id("c1")),
+            ),
+            (
+                text("c1", "\n".repeat(MAX_TEXT_LINES)).shape,
+                BoardError::TooManyLines(id("c1")),
+            ),
+        ];
+        for (shape, error) in bad {
+            assert_eq!(board.replace(&id("c1"), shape), Err(error));
+        }
+        assert_eq!(board.get(&id("c1")), Some(&circle("c1", 1.0)));
+        assert_consistent(&board);
+    }
+
+    #[test]
+    fn replace_counts_the_board_text_without_the_old_shape() {
+        let mut board = Board::new();
+        let full = MAX_BOARD_TEXT_CHARS / MAX_TEXT_CHARS;
+        for i in 0..full {
+            board
+                .insert(text(&format!("t{i}"), "x".repeat(MAX_TEXT_CHARS)))
+                .unwrap();
+        }
+        assert_eq!(board.text_chars(), MAX_BOARD_TEXT_CHARS);
+        // A full text can change to another full text, or shrink.
+        let other = text("t0", "y".repeat(MAX_TEXT_CHARS)).shape;
+        board.replace(&id("t0"), other).unwrap();
+        board
+            .replace(&id("t1"), text("t1", "z".to_owned()).shape)
+            .unwrap();
+        assert_eq!(
+            board.text_chars(),
+            MAX_BOARD_TEXT_CHARS - MAX_TEXT_CHARS + 1
+        );
+        // A circle cannot become text past the board's limit.
+        board.insert(circle("c1", 1.0)).unwrap();
+        assert_eq!(
+            board.replace(&id("c1"), text("c1", "x".repeat(MAX_TEXT_CHARS)).shape),
+            Err(BoardError::TooMuchText(id("c1")))
+        );
+        board
+            .replace(&id("c1"), text("c1", "x".repeat(MAX_TEXT_CHARS - 1)).shape)
+            .unwrap();
+        assert_eq!(board.text_chars(), MAX_BOARD_TEXT_CHARS);
+        assert_consistent(&board);
+    }
+
+    /// Cases for the property tests: `LAWH_PROPTEST_CASES` if set, otherwise `default`.
+    fn cases(default: u32) -> u32 {
+        std::env::var("LAWH_PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default)
+    }
+
+    /// One edit, on a small pool of ids so edits meet the same objects. A text length of 0
+    /// means a circle.
+    #[derive(Debug, Clone)]
+    enum Edit {
+        Insert(u8, usize),
+        InsertAt(usize, u8, usize),
+        Remove(u8),
+        Replace(u8, usize),
+    }
+
+    fn pool_object(name: u8, chars: usize) -> Object {
+        let name = format!("o{name}");
+        if chars == 0 {
+            circle(&name, 1.0)
+        } else {
+            text(&name, "é".repeat(chars))
+        }
+    }
+
+    fn edit() -> impl proptest::strategy::Strategy<Value = Edit> {
+        use proptest::prelude::*;
+        // Up to 12 texts of up to MAX_TEXT_CHARS pass MAX_BOARD_TEXT_CHARS now and then.
+        let chars = prop_oneof![Just(0), 1..=MAX_TEXT_CHARS, Just(MAX_TEXT_CHARS)];
+        prop_oneof![
+            (0..12_u8, chars.clone()).prop_map(|(n, c)| Edit::Insert(n, c)),
+            (0..16_usize, 0..12_u8, chars.clone()).prop_map(|(i, n, c)| Edit::InsertAt(i, n, c)),
+            (0..12_u8).prop_map(Edit::Remove),
+            (0..12_u8, chars).prop_map(|(n, c)| Edit::Replace(n, c)),
+        ]
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::test_runner::Config::with_cases(cases(256)))]
+
+        /// After any edits the index and the text count stay right, an edit that succeeds does
+        /// what a plain list of objects would do, and one that fails changes nothing.
+        #[test]
+        fn edits_keep_the_index_and_text_count(edits in proptest::collection::vec(edit(), 0..40)) {
+            let mut board = Board::new();
+            let mut model: Vec<Object> = Vec::new();
+            for edit in edits {
+                let before = board.clone();
+                match edit {
+                    Edit::Insert(n, chars) => {
+                        let object = pool_object(n, chars);
+                        if board.insert(object.clone()).is_ok() {
+                            model.push(object);
+                        }
+                    }
+                    Edit::InsertAt(i, n, chars) => {
+                        let object = pool_object(n, chars);
+                        if board.insert_at(i, object.clone()).is_ok() {
+                            model.insert(i, object);
+                        }
+                    }
+                    Edit::Remove(n) => {
+                        let target = id(&format!("o{n}"));
+                        let at = model.iter().position(|o| o.id == target);
+                        let removed = board.remove(&target);
+                        proptest::prop_assert_eq!(removed.as_ref().map(|r| r.0), at);
+                        if let Some((i, object)) = removed {
+                            proptest::prop_assert_eq!(&model.remove(i), &object);
+                        }
+                    }
+                    Edit::Replace(n, chars) => {
+                        let shape = pool_object(n, chars).shape;
+                        let target = id(&format!("o{n}"));
+                        if let Ok(old) = board.replace(&target, shape.clone()) {
+                            let slot = model.iter_mut().find(|o| o.id == target).unwrap();
+                            let model_old = std::mem::replace(&mut slot.shape, shape);
+                            proptest::prop_assert_eq!(&model_old, &old);
+                        } else {
+                            proptest::prop_assert_eq!(&board, &before);
+                        }
+                    }
+                }
+                proptest::prop_assert_eq!(board.objects(), model.as_slice());
+                assert_consistent(&board);
+            }
+        }
     }
 
     #[test]

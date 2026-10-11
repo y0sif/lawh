@@ -1,0 +1,8 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \":ci 1<CR>l:ci 2<CR>l:ci 3<CR>3u2<C-r>\").snapshot()"
+---
+// mode=normal cursor=object(c2) keys=24
+lawh version=1
+circle id=c1 x=0 y=0 r=1
+circle id=c2 x=1 y=0 r=2

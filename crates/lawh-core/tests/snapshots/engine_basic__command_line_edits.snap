@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=object(c1) keys=10
+lawh version=1
+circle id=c1 x=0 y=0 r=12

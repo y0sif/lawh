@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \":ci x=1<CR>\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=8 message="missing a number: `:ci[rcle] R`, with `x=`, `y=` or `r=`"
+lawh version=1

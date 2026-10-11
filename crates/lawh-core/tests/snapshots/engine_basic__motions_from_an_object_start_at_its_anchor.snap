@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \":ci 2 x=5 y=-1.5<CR>2l\").snapshot()"
+---
+// mode=normal cursor=grid(7,-1.5) keys=19
+lawh version=1
+circle id=c1 x=5 y=-1.5 r=2

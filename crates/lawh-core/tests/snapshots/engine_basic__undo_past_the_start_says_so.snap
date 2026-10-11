@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \"u\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=1 message="already at the oldest change"
+lawh version=1

@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \":ci 1<CR><C-r>\").snapshot()"
+---
+// mode=normal cursor=object(c1) keys=7 message="already at the newest change"
+lawh version=1
+circle id=c1 x=0 y=0 r=1

@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \":ci 1e3<CR>\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=8 message="`1e3` is not a number"
+lawh version=1

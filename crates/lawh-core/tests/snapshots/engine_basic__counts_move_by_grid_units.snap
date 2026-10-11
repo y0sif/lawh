@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \"12l3k0l10j2h\").snapshot()"
+---
+// mode=normal cursor=grid(11,7) keys=12
+lawh version=1

@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: "run(Board::new(), \":foo 3<CR>\").snapshot()"
+---
+// mode=normal cursor=grid(0,0) keys=7 message="unknown command `:foo`"
+lawh version=1

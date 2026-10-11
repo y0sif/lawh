@@ -1,0 +1,5 @@
+---
+source: crates/lawh-core/tests/engine_basic.rs
+expression: r.header()
+---
+// mode=command-line cursor=grid(0,0) keys=5067 message="the command line holds at most 5064 characters"
