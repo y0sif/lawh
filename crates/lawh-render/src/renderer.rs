@@ -104,10 +104,11 @@ pub struct FrameStats {
     pub too_small: usize,
     /// Math blocks drawn as placeholders because they were still compiling.
     pub math_pending: usize,
-    /// Formulas on screen whose layout the math engine pushed out of its cache and isn't
-    /// compiling again for now ([`MathStatus::Evicted`]): drawn as faint outlines of their
-    /// bounds, like downgraded objects, and counted in neither [`Self::drawn`] nor
-    /// [`Self::downgraded`]. Nothing is asked of the engine for them.
+    /// Formulas on screen whose layout the math engine pushed out of its cache and hasn't
+    /// compiled again yet ([`MathStatus::Evicted`]): drawn as faint outlines of their bounds,
+    /// like downgraded objects, and counted in neither [`Self::drawn`] nor
+    /// [`Self::downgraded`]. The engine compiles them again on its own, within its limits, and
+    /// its waker asks for the frame that draws them.
     pub math_evicted: usize,
     /// Texts (and sources of math drawn as text) the frame laid out, charged to its budget.
     pub laid_out: usize,
@@ -801,8 +802,8 @@ impl Renderer {
                 (Some(MathStatus::Ready(layout)), _) => {
                     fits(self.draw_math(*at, layout, vp, clip, budget))
                 }
-                // Laid out before, but pushed out of the math cache and not compiled again for
-                // now: drawn as the faint outline of its bounds, and nothing is asked for.
+                // Laid out before, but pushed out of the math cache and not compiled again yet:
+                // drawn as the faint outline of its bounds.
                 (Some(MathStatus::Evicted(_)), _) => Outcome::Evicted,
                 (Some(MathStatus::Failed(err)), Some(key)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");

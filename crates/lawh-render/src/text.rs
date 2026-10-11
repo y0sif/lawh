@@ -14,14 +14,17 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
+use icu_properties::props::{BidiClass, Script};
 use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::{
     Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, Layout, LayoutContext,
     PositionedLayoutItem, StyleProperty,
 };
+
+use parley_data::Properties;
 
 use crate::budget::GlyphSums;
 use crate::glyphs::GlyphTable;
@@ -104,9 +107,8 @@ pub(crate) struct Facts {
     pub(crate) chars: usize,
     /// Characters outside ASCII, which cost more to lay out.
     pub(crate) non_ascii: usize,
-    /// Places where the text moves from one Unicode block to another, Latin and combining
-    /// marks counted as one block ([`block`]): a cheap stand-in for where its script or
-    /// direction changes, which is what makes laying text out costly.
+    /// Places where parley starts another run to shape within a line, because the script or
+    /// the bidi level changes there ([`Splits`]): what makes laying text out costly.
     pub(crate) changes: usize,
     /// Lines, as lawh-core counts them (`lawh_core::board::MAX_TEXT_LINES`).
     pub(crate) lines: usize,
@@ -125,17 +127,13 @@ impl Facts {
         };
         let mut line = 0;
         let mut after_cr = false;
-        let mut last_block = 0;
+        let mut splits = Splits::new(text);
         for c in text.chars() {
             facts.chars += 1;
             if !c.is_ascii() {
                 facts.non_ascii += 1;
             }
-            let block = block(c);
-            if block != last_block {
-                facts.changes += 1;
-                last_block = block;
-            }
+            splits.push(c);
             match c {
                 // CRLF breaks a line once.
                 '\n' if after_cr => {}
@@ -149,6 +147,7 @@ impl Facts {
             after_cr = c == '\r';
         }
         facts.longest_line = facts.longest_line.max(line);
+        facts.changes = splits.finish();
         facts
     }
 
@@ -162,11 +161,210 @@ impl Facts {
     }
 }
 
-/// The Unicode block of 128 code points `c` is in, with Latin (and ASCII), combining marks and
-/// the other code points below Greek as block 0.
-fn block(c: char) -> u32 {
-    let c = u32::from(c);
-    if c < 0x370 { 0 } else { c >> 7 }
+/// Counts where parley starts another run to shape, character by character, without laying the
+/// text out: where the script changes or the bidi level does. Each character's script and bidi
+/// class come from parley's own tables.
+///
+/// As in parley, characters of no particular script (spaces, digits, punctuation, combining
+/// marks) take the script before them. Bidi levels follow the bidi algorithm for a text without
+/// explicit embeddings, in short: the text's direction is that of its first strong character;
+/// left-to-right letters are at level 0 in a left-to-right text and 2 in a right-to-left one,
+/// right-to-left letters at 1, Arabic digits at 2, and European digits go with left-to-right
+/// letters before them, else are at 2. Neutral characters between two of the same direction
+/// (digits at 2 count as right-to-left) take that direction, the others the text's; line and
+/// segment breaks are at the text's level; marks go with the character before them. Explicit
+/// embeddings, overrides and isolates count as a split each. A test checks this against the
+/// runs parley lays out (`changes_are_where_parley_starts_a_run`).
+struct Splits {
+    ascii: &'static [Class; 128],
+    /// The text's direction is right-to-left.
+    rtl: bool,
+    /// The level of the text's direction.
+    base_level: u8,
+    /// The level of left-to-right letters.
+    ltr_level: u8,
+    count: usize,
+    /// The script of the run so far, once a character has one.
+    script: Option<Script>,
+    /// The level and direction (right-to-left) of the last character that isn't neutral.
+    before: Option<(u8, bool)>,
+    /// Neutral characters came after it.
+    neutrals: bool,
+    /// The last strong character was left-to-right (or the text is, before one).
+    strong_ltr: bool,
+    /// The class of the last character, once there is one: another of the same class splits
+    /// nothing.
+    last: Option<Class>,
+}
+
+/// What [`Splits`] needs to know of a character.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Class {
+    /// Its script, unless it takes the script of the text around it.
+    script: Option<Script>,
+    bidi: Bidi,
+}
+
+/// Bidi classes, as far as [`Splits`] tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bidi {
+    /// Strong left-to-right.
+    Ltr,
+    /// Strong right-to-left, Arabic letters included.
+    Rtl,
+    /// A European digit.
+    European,
+    /// An Arabic digit.
+    Arabic,
+    /// A line or segment break.
+    Break,
+    /// A nonspacing mark, or a character the bidi algorithm drops (such as a zero-width
+    /// joiner): it goes with the character before it.
+    Attached,
+    /// An explicit embedding, override or isolate.
+    Explicit,
+    Neutral,
+}
+
+impl Class {
+    fn of(c: char) -> Self {
+        let properties = Properties::get(c);
+        let script = properties.script();
+        let bidi = match properties.bidi_class() {
+            BidiClass::LeftToRight => Bidi::Ltr,
+            BidiClass::RightToLeft | BidiClass::ArabicLetter => Bidi::Rtl,
+            BidiClass::EuropeanNumber => Bidi::European,
+            BidiClass::ArabicNumber => Bidi::Arabic,
+            BidiClass::ParagraphSeparator | BidiClass::SegmentSeparator => Bidi::Break,
+            BidiClass::NonspacingMark | BidiClass::BoundaryNeutral => Bidi::Attached,
+            BidiClass::LeftToRightEmbedding
+            | BidiClass::RightToLeftEmbedding
+            | BidiClass::LeftToRightOverride
+            | BidiClass::RightToLeftOverride
+            | BidiClass::PopDirectionalFormat
+            | BidiClass::LeftToRightIsolate
+            | BidiClass::RightToLeftIsolate
+            | BidiClass::FirstStrongIsolate
+            | BidiClass::PopDirectionalIsolate => Bidi::Explicit,
+            _ => Bidi::Neutral,
+        };
+        Self {
+            script: (!matches!(script, Script::Common | Script::Inherited | Script::Unknown))
+                .then_some(script),
+            bidi,
+        }
+    }
+}
+
+/// The [`Class`] of each ASCII character, looked up once.
+static ASCII: LazyLock<[Class; 128]> =
+    LazyLock::new(|| std::array::from_fn(|i| Class::of(u8::try_from(i).map_or('\0', char::from))));
+
+/// The [`Class`] of `c`, from `ascii` for an ASCII character.
+fn class(ascii: &[Class; 128], c: char) -> Class {
+    ascii
+        .get(u32::from(c) as usize)
+        .copied()
+        .unwrap_or_else(|| Class::of(c))
+}
+
+impl Splits {
+    fn new(text: &str) -> Self {
+        let ascii = &*ASCII;
+        let rtl = text
+            .chars()
+            .find_map(|c| match class(ascii, c).bidi {
+                Bidi::Ltr => Some(false),
+                Bidi::Rtl => Some(true),
+                _ => None,
+            })
+            .unwrap_or(false);
+        Self {
+            ascii,
+            rtl,
+            base_level: u8::from(rtl),
+            ltr_level: if rtl { 2 } else { 0 },
+            count: 0,
+            script: None,
+            before: None,
+            neutrals: false,
+            strong_ltr: !rtl,
+            last: None,
+        }
+    }
+
+    /// Takes the next character of the text.
+    fn push(&mut self, c: char) {
+        let class = class(self.ascii, c);
+        if self.last.replace(class) == Some(class) && class.bidi != Bidi::Explicit {
+            return;
+        }
+        let new_script = class
+            .script
+            .is_some_and(|script| self.script.replace(script).is_some_and(|old| old != script));
+        let (level, rtl) = match class.bidi {
+            Bidi::Ltr => {
+                self.strong_ltr = true;
+                (self.ltr_level, false)
+            }
+            Bidi::Rtl => {
+                self.strong_ltr = false;
+                (1, true)
+            }
+            Bidi::European if self.strong_ltr => (self.ltr_level, false),
+            Bidi::European | Bidi::Arabic => (2, true),
+            Bidi::Break => (self.base_level, self.rtl),
+            Bidi::Attached if !self.neutrals && self.before.is_some() => {
+                self.count += usize::from(new_script);
+                return;
+            }
+            Bidi::Explicit => {
+                self.count += 1;
+                self.neutrals = true;
+                return;
+            }
+            Bidi::Attached | Bidi::Neutral => {
+                self.count += usize::from(new_script);
+                self.neutrals = true;
+                return;
+            }
+        };
+        let last = if self.neutrals {
+            Some(self.neutrals_before(rtl))
+        } else {
+            self.before.map(|(level, _)| level)
+        };
+        if new_script || last.is_some_and(|last| last != level) {
+            self.count += 1;
+        }
+        self.before = Some((level, rtl));
+        self.neutrals = false;
+    }
+
+    /// Settles the neutral characters before one resolved to `next_rtl` (or the end of the
+    /// text): counts the split at the first of them, and returns their level.
+    fn neutrals_before(&mut self, next_rtl: bool) -> u8 {
+        let before_rtl = self.before.map_or(self.rtl, |(_, rtl)| rtl);
+        let level = if before_rtl != next_rtl {
+            self.base_level
+        } else if next_rtl {
+            1
+        } else {
+            self.ltr_level
+        };
+        if self.before.is_some_and(|(before, _)| before != level) {
+            self.count += 1;
+        }
+        level
+    }
+
+    /// The splits in the whole text.
+    fn finish(mut self) -> usize {
+        if self.neutrals {
+            self.neutrals_before(self.rtl);
+        }
+        self.count
+    }
 }
 
 /// What the cache knows about a text, from [`TextShaper::known`].
@@ -300,6 +498,12 @@ impl Plan {
             glyphs,
             runs,
         }
+    }
+
+    /// Glyph runs in all.
+    #[cfg(test)]
+    pub(crate) fn glyph_runs(&self) -> u32 {
+        self.runs
     }
 
     /// The lines whose baseline `y` maps into `y0..=y1`, for a `y` that grows with the baseline.
@@ -655,10 +859,49 @@ mod tests {
             (16, 5, 4, 1)
         );
         assert_eq!(Facts::of("").lines, 1);
-        // Latin with combining marks is one block; Hebrew and CJK are others.
+        // Combining marks and digits take the script before them; Han is one script however
+        // far apart its characters are. Hebrew after Latin changes script and direction,
+        // Hebrew after Armenian too (in the same 128 code points), an Arabic-Indic digit after
+        // an Arabic letter only the bidi level.
         assert_eq!(Facts::of("e\u{301}te\u{301}").changes, 0);
+        assert_eq!(Facts::of("a1b2c3").changes, 0);
+        assert_eq!(Facts::of("\u{6F22}\u{5B57}\u{6587}").changes, 0);
         assert_eq!(Facts::of("a\u{5D0}a\u{5D0}").changes, 3);
-        assert_eq!(Facts::of("\u{6F22}\u{5B57}").changes, 2);
+        assert_eq!(Facts::of("\u{580}\u{5D0}\u{580}").changes, 2);
+        assert_eq!(Facts::of("\u{627}\u{661}\u{627}").changes, 2);
+    }
+
+    #[test]
+    fn changes_are_where_parley_starts_a_run() {
+        let mut glyphs = GlyphTable::new();
+        let mut shaper = TextShaper::new();
+        for text in [
+            "lorem ipsum, dolor 12.5% sit",
+            "\u{6F22}\u{5B57}\u{4EEE}\u{540D}\u{3058}\u{308A}\u{6587}",
+            "\u{3B1}\u{3B2}\u{3B3} \u{3B4}\u{3B5}",
+            "\u{43F}\u{440}\u{438} \u{43C}\u{438}\u{440}",
+            "ab \u{5D0}\u{5D1} cd",
+            "a\u{5D0}a\u{5D0}",
+            "\u{580}\u{5D0}\u{580}\u{5D0}",
+            "\u{627}\u{661}\u{627}\u{661}",
+            "\u{5D0}1\u{5D0}1",
+            "\u{500}\u{531}\u{500}\u{531}",
+            "\u{633}\u{644}\u{627}\u{645} \u{661}\u{662}\u{663} 45",
+            "a\u{3B1}\u{430}\u{6F22}\u{627}",
+            "e\u{301}te\u{301} (x)",
+            "area \u{5D0}\u{5D1} is 12 or \u{661}\u{662}",
+            "\u{5D0}\u{5D1} area 12 \u{5D2}",
+            "\u{5E9}\u{5B8}\u{5C1}\u{5DC}\u{5D5}\u{5B9}\u{5DD}world",
+            "a (\u{5D0}\u{5D1}) b",
+            "\u{5D0} (cd) \u{5D1}",
+            "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{FE0F} family",
+        ] {
+            let facts = Facts::of(text);
+            lay_out(&mut shaper, &mut glyphs, text);
+            let key = shaper.key(text);
+            let runs = shaper.shaped(key, text).unwrap().plan.glyph_runs();
+            assert_eq!(facts.changes + 1, runs as usize, "{text:?}");
+        }
     }
 
     #[test]

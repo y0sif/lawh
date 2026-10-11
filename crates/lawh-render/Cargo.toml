@@ -15,10 +15,12 @@ publish.workspace = true
 
 [dependencies]
 bytemuck.workspace = true
+icu_properties.workspace = true
 kurbo.workspace = true
 lawh-core.workspace = true
 lawh-math.workspace = true
 parley.workspace = true
+parley_data.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 # Glyph outline sizes for the frame budget; already in the tree through lawh-math.

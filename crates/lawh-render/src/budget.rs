@@ -77,9 +77,10 @@ const NS_PER_WALKED_RUN: f64 = 100.0;
 /// Each chunk of a text's plan looked at to estimate it (`crate::text::Plan`).
 const NS_PER_EXAMINED_CHUNK: f64 = 10.0;
 /// Laying out one text with parley and planning it (`calibrate_text_layout`): per text, per
-/// ASCII character (0.9 us for digits and punctuation, 0.5 us for words), per other character,
-/// per change of Unicode block (`crate::text::Facts::changes`: a text whose direction or script
-/// changes at every character took 1.8 us a character) and per line.
+/// ASCII character (0.9 us for digits and punctuation, 0.5 us for words), per other character
+/// (0.4 to 0.6 us), per place where parley starts another run because the script or the bidi
+/// level changes (`crate::text::Facts::changes`: about 1.2 to 1.4 us more; text that changes
+/// at every character took 1.6 to 1.9 us a character, 2026-10-11) and per line.
 const NS_PER_LAYOUT: f64 = 5_000.0;
 const NS_PER_LAYOUT_ASCII_CHAR: f64 = 950.0;
 const NS_PER_LAYOUT_OTHER_CHAR: f64 = 800.0;
@@ -502,7 +503,8 @@ pub(crate) fn least_cost(
 }
 
 /// The estimated cost of laying out a text of `chars` characters, `non_ascii` of them outside
-/// ASCII, with `changes` changes of Unicode block, in `lines` lines, and planning it.
+/// ASCII, with `changes` places where its script or bidi level changes, in `lines` lines, and
+/// planning it.
 pub(crate) fn layout(chars: usize, non_ascii: usize, changes: usize, lines: usize) -> f64 {
     let ascii = chars.saturating_sub(non_ascii);
     NS_PER_LAYOUT

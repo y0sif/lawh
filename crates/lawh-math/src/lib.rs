@@ -13,9 +13,9 @@
 //! ([`worker_main`]) with a memory cap, and kills it when a compile takes too
 //! long or restarts it when it crashes. [`MathEngine::new`] compiles in this
 //! process, for trusted input only. Either way [`MathEngine`] caches outcomes,
-//! within [`MAX_CACHED_LAYOUT_BYTES`] and [`MAX_CACHED_FAILURES`], and stops
-//! compiling a formula whose layout keeps being pushed out of the cache
-//! ([`MathStatus::Evicted`]).
+//! within [`MAX_CACHED_LAYOUT_BYTES`] and [`MAX_CACHED_FAILURES`], and limits
+//! how often it compiles layouts pushed out of the cache again
+//! ([`MathStatus::Evicted`], [`MAX_RECOMPILE_BURST`], [`RECOMPILE_INTERVAL`]).
 //!
 //! A layout that reaches past [`MAX_LAYOUT_EXTENT_PT`], or holds more than
 //! [`MAX_LAYOUT_GLYPHS`] glyphs or [`MAX_LAYOUT_PATH_ELEMENTS`] path elements,
@@ -34,8 +34,8 @@ mod world;
 
 pub use engine::{
     DEFAULT_TIMEOUT, MAX_CACHED_FAILURE_BYTES, MAX_CACHED_FAILURES, MAX_CACHED_LAYOUT_BYTES,
-    MAX_COMPILES_PER_FORMULA, MAX_ERROR_MESSAGE_BYTES, MAX_FORMULA_RECORDS, MAX_WORKERS,
-    MathEngine, MathStatus, MathWaker, RECOMPILE_COOLDOWN,
+    MAX_ERROR_MESSAGE_BYTES, MAX_FORMULA_RECORDS, MAX_RECOMPILE_BURST, MAX_WORKERS, MathEngine,
+    MathStatus, MathWaker, RECOMPILE_COOLDOWN, RECOMPILE_INTERVAL, WANTED_FOR,
 };
 pub use fonts::{FontAsset, fonts};
 pub use process::WorkerCommand;

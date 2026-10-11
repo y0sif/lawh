@@ -37,6 +37,11 @@ vello_cpu = "0.3.0"
 # No `system` feature: lawh never loads system fonts, and it would need fontconfig.
 parley = { version = "0.12.0", default-features = false, features = ["std", "bytemuck"] }
 bytemuck = "1.25.2"
+# The script and bidi class of a character, from the tables parley lays text out with, so the
+# frame budget can count where parley splits a text into runs. Both are in the tree through
+# parley already, at these versions.
+parley_data = "0.12.0"
+icu_properties = { version = "2.3.0", default-features = false }
 # App. winit keeps its default features: X11 and Wayland libraries are loaded at run time, so
 # building needs no system packages.
 winit = "0.30.13"

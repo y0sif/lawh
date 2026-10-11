@@ -1633,10 +1633,12 @@ name = "lawh-render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "icu_properties",
  "kurbo",
  "lawh-core",
  "lawh-math",
  "parley",
+ "parley_data",
  "thiserror 2.0.21",
  "tracing",
  "ttf-parser",

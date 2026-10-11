@@ -1,9 +1,10 @@
 name: Bench
 
 # Release-build timings of lawh-render: the calibrations of the frame budget's cost estimates
-# (each asserts measured <= 1.2 x estimate), the worst-case boards (frames < 33 ms, opening
-# < 100 ms) and the other benches. The limits were measured on the maintainer's laptop, so a
-# slower or noisier runner can fail them: read the printed numbers either way.
+# (each asserts measured <= 1.2 x estimate), the text cache's memory, the worst-case boards
+# (frames < 33 ms, opening < 100 ms) and the other benches. The limits were measured on the
+# maintainer's laptop, so a slower or noisier runner can fail them: read the printed numbers
+# either way.
 #
 # Run by hand only (`gh workflow run bench.yml`): the repo is private and Actions minutes are
 # limited.
@@ -36,7 +37,12 @@ jobs:
       # earlier one fails, so the whole picture is printed.
       - name: Calibrations
         if: ${{ !cancelled() }}
-        run: cargo test --release --locked -p lawh-render --lib -- --ignored --nocapture --test-threads=1 calibrate
+        run: cargo test --release --locked -p lawh-render --lib -- --ignored --nocapture --test-threads=1 calibrate --skip calibrate_text_memory
+      # Resident memory, measured in a new process for each kind of text (the test starts them):
+      # after other work, the allocator hands out memory it kept and the numbers read 0.
+      - name: Text cache memory
+        if: ${{ !cancelled() }}
+        run: cargo test --release --locked -p lawh-render --lib -- --ignored --nocapture --test-threads=1 calibrate_text_memory
       - name: Worst cases
         if: ${{ !cancelled() }}
         run: cargo test --release --locked -p lawh-render --test bench -- --ignored --nocapture --test-threads=1 frame_budget_worst_cases

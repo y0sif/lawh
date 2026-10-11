@@ -57,33 +57,43 @@ pub const MAX_CACHED_FAILURES: usize = 4096;
 /// board's objects, so every failing formula on one board stays cached.
 pub const MAX_CACHED_FAILURE_BYTES: usize = 16 * 1024 * 1024;
 
-/// Most times [`MathEngine::request`] compiles one formula to a layout. Once
-/// a formula's layout has been compiled this many times and pushed out of the
-/// cache again, [`MathEngine::request`] answers [`MathStatus::Evicted`]
-/// instead of compiling it a third time, for as long as the engine remembers
-/// the formula ([`MAX_FORMULA_RECORDS`]).
+/// Most layouts pushed out of the cache one engine compiles again at once;
+/// past that, one per [`RECOMPILE_INTERVAL`]. So in any `t` seconds it
+/// compiles at most `MAX_RECOMPILE_BURST + t / RECOMPILE_INTERVAL` layouts
+/// again (rounded up), 8 + 2t, however many formulas want it, each followed by
+/// one call of the waker.
 ///
 /// Layouts are only pushed out when the formulas a board shows take more than
-/// [`MAX_CACHED_LAYOUT_BYTES`] together. Without this, every formula pushed
+/// [`MAX_CACHED_LAYOUT_BYTES`] together. Without a limit, every formula pushed
 /// out was asked for again on the next frame and compiled again, pushing out
 /// another: 40 formulas at the complexity caps, all on screen, made 2,099
-/// compiles in 55 seconds and never settled. With it they settle after at most
-/// 80. Real formulas take a few kilobytes, so real boards never get here.
-pub const MAX_COMPILES_PER_FORMULA: u32 = 2;
+/// compiles in 55 seconds and never settled. Real formulas take a few
+/// kilobytes, so real boards never get here.
+pub const MAX_RECOMPILE_BURST: u32 = 8;
 
-/// How long after a formula's layout was pushed out of the cache
-/// [`MathEngine::request`] answers [`MathStatus::Evicted`] for it, before
-/// compiling it again (up to [`MAX_COMPILES_PER_FORMULA`] times). Long enough
-/// that formulas pushing each other out don't make the window redraw
-/// continuously; short enough that one panned back to is drawn again soon.
+/// How often one engine compiles a layout pushed out of the cache again, past
+/// [`MAX_RECOMPILE_BURST`]: two a second.
+pub const RECOMPILE_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How long after a formula's layout was pushed out of the cache the engine
+/// waits before compiling it again, at the least. Long enough that formulas
+/// pushing each other out don't make the window redraw continuously; short
+/// enough that one panned back to is drawn again soon.
 pub const RECOMPILE_COOLDOWN: Duration = Duration::from_secs(5);
 
-/// Most formulas whose compile history one engine remembers for
-/// [`MAX_COMPILES_PER_FORMULA`] and [`RECOMPILE_COOLDOWN`]: how often each
-/// was compiled and, once its layout is pushed out of the cache, a
-/// [`MathSummary`] of it. Kept by a hash of the source, about 100 bytes each;
-/// the oldest are forgotten first. Well above the number of objects a board
-/// may hold (500).
+/// How long a formula whose layout was pushed out of the cache stays wanted
+/// after [`MathEngine::request`] last asked for it: the engine compiles it
+/// again only while it is wanted. Well above how long one waits for its turn
+/// without the window drawing a frame (the cooldown, or the interval, and a
+/// compile; every compile then calls the waker, and the frame it draws asks
+/// again), so a formula on screen stays wanted, and one no longer on screen
+/// stops being compiled.
+pub const WANTED_FOR: Duration = Duration::from_secs(30);
+
+/// Most formulas one engine remembers the layout of once it is pushed out of
+/// the cache: when, and a [`MathSummary`] of it. Kept by a hash of the source,
+/// about 100 bytes each; the oldest are forgotten first. Well above the number
+/// of objects a board may hold (500).
 pub const MAX_FORMULA_RECORDS: usize = 4096;
 
 /// Longest compile error message the engine keeps, in bytes; longer ones are
@@ -106,11 +116,13 @@ pub enum MathStatus {
     /// Queued or compiling. The waker is called when it finishes.
     Pending,
     /// Laid out before, but the layout was pushed out of the cache by others
-    /// and is not compiled again for now: it was pushed out less than
-    /// [`RECOMPILE_COOLDOWN`] ago, or it has been compiled
-    /// [`MAX_COMPILES_PER_FORMULA`] times. Holds what the layout measured,
-    /// so the formula can be drawn as an outline. Nothing is queued and the
-    /// waker is not called; asking again after the cooldown may queue it.
+    /// and isn't cached again yet. Holds what the layout measured, so the
+    /// formula can be drawn as an outline. Nothing is queued: the engine
+    /// compiles it again on its own, [`RECOMPILE_COOLDOWN`] after it was
+    /// pushed out at the soonest and within [`MAX_RECOMPILE_BURST`] and
+    /// [`RECOMPILE_INTERVAL`], the formula pushed out longest ago first, as
+    /// long as it is asked for at least every [`WANTED_FOR`]; then the waker
+    /// is called.
     Evicted(MathSummary),
 }
 
@@ -131,12 +143,14 @@ impl From<Outcome> for MathStatus {
 /// layouts by [`MAX_CACHED_LAYOUT_BYTES`], failures by
 /// [`MAX_CACHED_FAILURES`] and [`MAX_CACHED_FAILURE_BYTES`], least recently
 /// used first out. A failure pushed out is compiled again when next asked
-/// for. A layout pushed out is compiled again by [`MathEngine::request`]
-/// only after [`RECOMPILE_COOLDOWN`], and at most
-/// [`MAX_COMPILES_PER_FORMULA`] times in all; until then `request` answers
-/// [`MathStatus::Evicted`], so formulas that don't fit in the cache together
-/// can't keep the compiler busy. [`MathEngine::layout_blocking`] always
-/// compiles again: exports need every formula.
+/// for. A layout pushed out isn't queued by [`MathEngine::request`], which
+/// answers [`MathStatus::Evicted`]: the engine compiles it again itself, after
+/// [`RECOMPILE_COOLDOWN`] and within an engine-wide limit
+/// ([`MAX_RECOMPILE_BURST`], [`RECOMPILE_INTERVAL`]), the one pushed out
+/// longest ago first, and calls the waker. So formulas that don't fit in the
+/// cache together are each drawn again in turn, but can't keep the compiler
+/// busy. [`MathEngine::layout_blocking`] always compiles again: exports need
+/// every formula.
 ///
 /// There are two modes:
 ///
@@ -239,7 +253,8 @@ impl MathEngine {
     }
 
     /// Calls `waker` whenever a queued compile finishes, so a UI that got
-    /// [`MathStatus::Pending`] knows to ask again. Replaces any earlier waker.
+    /// [`MathStatus::Pending`] or [`MathStatus::Evicted`] knows to ask again.
+    /// Replaces any earlier waker.
     pub fn set_waker(&self, waker: MathWaker) {
         *self
             .shared
@@ -249,20 +264,23 @@ impl MathEngine {
     }
 
     /// Where `src` stands, without blocking: the cached layout or error,
-    /// [`MathStatus::Evicted`] for a layout pushed out of the cache that isn't
-    /// compiled again for now (see [`MathEngine`]), or [`MathStatus::Pending`]
-    /// after queueing it (once; asking again while it is queued doesn't queue
-    /// it twice).
+    /// [`MathStatus::Evicted`] for a layout pushed out of the cache, which the
+    /// engine compiles again itself (see [`MathEngine`]), or
+    /// [`MathStatus::Pending`] after queueing it (once; asking again while it
+    /// is queued doesn't queue it twice).
     pub fn request(&self, src: &str) -> MathStatus {
         let mut state = self.shared.lock();
         if let Some(outcome) = state.cached(src) {
             return outcome.into();
         }
-        if let Some(summary) = state.held_back(src, Instant::now()) {
-            return MathStatus::Evicted(summary);
-        }
         if let Err(err) = self.ensure_queue_thread(&mut state) {
             return MathStatus::Failed(err);
+        }
+        if let Some(summary) = state.evicted(src) {
+            if state.want(src, Instant::now()) {
+                self.shared.changed.notify_all();
+            }
+            return MathStatus::Evicted(summary);
         }
         if !state.is_waiting(src) {
             state.queue.push_back(src.to_owned());
@@ -401,8 +419,8 @@ impl MathEngine {
 /// State shared between the engine and its queue thread.
 struct Shared {
     state: Mutex<State>,
-    /// Signalled when a compile finishes, a formula is queued, or the engine
-    /// shuts down.
+    /// Signalled when a compile finishes, a formula is queued or wanted again,
+    /// or the engine shuts down.
     changed: Condvar,
     waker: Mutex<Option<MathWaker>>,
 }
@@ -415,8 +433,10 @@ struct CacheLimits {
     failures: usize,
     failure_bytes: usize,
     records: usize,
-    max_compiles: u32,
     cooldown: Duration,
+    burst: u32,
+    interval: Duration,
+    wanted_for: Duration,
 }
 
 impl CacheLimits {
@@ -425,8 +445,10 @@ impl CacheLimits {
         failures: MAX_CACHED_FAILURES,
         failure_bytes: MAX_CACHED_FAILURE_BYTES,
         records: MAX_FORMULA_RECORDS,
-        max_compiles: MAX_COMPILES_PER_FORMULA,
         cooldown: RECOMPILE_COOLDOWN,
+        burst: MAX_RECOMPILE_BURST,
+        interval: RECOMPILE_INTERVAL,
+        wanted_for: WANTED_FOR,
     };
 }
 
@@ -435,11 +457,16 @@ struct State {
     ready: Lru<Arc<MathLayout>>,
     /// Failed formulas, bounded by count and bytes.
     failed: Lru<MathError>,
-    /// How often formulas were compiled to layouts, and what was pushed out
-    /// of `ready`.
+    /// What was pushed out of `ready`, and when.
     records: Records,
-    max_compiles: u32,
+    /// Formulas pushed out of `ready` and asked for since, by when they were
+    /// last asked for: the queue thread compiles them again
+    /// ([`State::recompile`]). At most as many as `records`.
+    wanted: HashMap<String, Instant>,
+    /// How many of them the queue thread may compile again, and when.
+    recompiles: Limiter,
     cooldown: Duration,
+    wanted_for: Duration,
     /// Compiles finished and cached, layouts and failures alike.
     compiles: u64,
     /// Formulas waiting for the queue thread, in order.
@@ -458,8 +485,10 @@ impl State {
             ready: Lru::new(usize::MAX, limits.layout_bytes),
             failed: Lru::new(limits.failures, limits.failure_bytes),
             records: Records::new(limits.records),
-            max_compiles: limits.max_compiles,
+            wanted: HashMap::new(),
+            recompiles: Limiter::new(limits.burst, limits.interval, Instant::now()),
             cooldown: limits.cooldown,
+            wanted_for: limits.wanted_for,
             compiles: 0,
             queue: VecDeque::new(),
             queued: HashSet::new(),
@@ -482,14 +511,81 @@ impl State {
     }
 
     /// The summary of `src`'s layout if it was pushed out of the cache and
-    /// [`MathEngine::request`] doesn't compile it again yet: it was pushed
-    /// out less than the cooldown before `now`, or it was compiled the most
-    /// times allowed.
-    fn held_back(&self, src: &str, now: Instant) -> Option<MathSummary> {
-        let record = self.records.get(src)?;
-        let (evicted_at, summary) = record.evicted?;
-        let cooling = now.saturating_duration_since(evicted_at) < self.cooldown;
-        (cooling || record.compiles >= self.max_compiles).then_some(summary)
+    /// isn't cached again yet.
+    fn evicted(&self, src: &str) -> Option<MathSummary> {
+        self.records.get(src)?.evicted.map(|(_, summary)| summary)
+    }
+
+    /// Marks `src`, whose layout was pushed out of the cache, as asked for at
+    /// `now`, unless it is being compiled already. `true` when it wasn't
+    /// wanted before, so the queue thread has something new to look at.
+    fn want(&mut self, src: &str, now: Instant) -> bool {
+        if self.is_waiting(src) {
+            return false;
+        }
+        if let Some(asked) = self.wanted.get_mut(src) {
+            *asked = now;
+            return false;
+        }
+        if self.wanted.len() >= self.records.max {
+            let stalest = self
+                .wanted
+                .iter()
+                .min_by_key(|(_, asked)| **asked)
+                .map(|(src, _)| src.clone());
+            if let Some(stalest) = stalest {
+                self.wanted.remove(&stalest);
+            }
+        }
+        self.wanted.insert(src.to_owned(), now);
+        true
+    }
+
+    /// A wanted formula to compile again now: of those pushed out at least
+    /// the cooldown before `now`, the one pushed out longest ago, if the
+    /// limiter lets one through (it is counted, and no longer wanted). `Err`
+    /// holds when to look again, and `None` means nothing is wanted. Forgets
+    /// formulas cached again, or not asked for within `wanted_for`.
+    fn recompile(&mut self, now: Instant) -> Option<Result<String, Instant>> {
+        let (records, wanted_for) = (&self.records, self.wanted_for);
+        self.wanted.retain(|src, asked| {
+            now.saturating_duration_since(*asked) <= wanted_for
+                && records
+                    .get(src)
+                    .is_some_and(|record| record.evicted.is_some())
+        });
+        // The longest pushed out of those cooled down, and when the next of the others is.
+        let mut oldest: Option<(Instant, &str)> = None;
+        let mut cooled_at: Option<Instant> = None;
+        for src in self.wanted.keys() {
+            let Some((evicted_at, _)) = self.records.get(src).and_then(|record| record.evicted)
+            else {
+                continue;
+            };
+            if self.is_waiting(src) {
+                continue;
+            }
+            let at = evicted_at.checked_add(self.cooldown).unwrap_or(now);
+            if at <= now {
+                if oldest.is_none_or(|(oldest, _)| evicted_at < oldest) {
+                    oldest = Some((evicted_at, src));
+                }
+            } else if cooled_at.is_none_or(|soonest| at < soonest) {
+                cooled_at = Some(at);
+            }
+        }
+        let allowed_at = self.recompiles.next();
+        match (oldest, cooled_at) {
+            (Some((_, src)), _) if allowed_at <= now => {
+                let src = src.to_owned();
+                self.wanted.remove(&src);
+                self.recompiles.take(now);
+                Some(Ok(src))
+            }
+            (Some(_), _) => Some(Err(allowed_at)),
+            (None, Some(at)) => Some(Err(at.max(allowed_at))),
+            (None, None) => None,
+        }
     }
 
     /// Caches `outcome` unless `src` is already cached (another compile got
@@ -503,9 +599,9 @@ impl State {
         self.compiles = self.compiles.saturating_add(1);
         match outcome {
             Ok(layout) => {
-                let record = self.records.entry(src);
-                record.compiles = record.compiles.saturating_add(1);
-                record.evicted = None;
+                if let Some(record) = self.records.get_mut(src) {
+                    record.evicted = None;
+                }
                 let bytes = src.len().saturating_add(approx_bytes(&layout));
                 let (layout, evicted) = self.ready.insert(src, layout, bytes);
                 let now = Instant::now();
@@ -561,7 +657,9 @@ impl Shared {
         stored
     }
 
-    /// The next formula to compile, or `None` once the engine is dropped.
+    /// The next formula to compile, or `None` once the engine is dropped:
+    /// one queued, or else a wanted one whose layout was pushed out of the
+    /// cache, once its cooldown and the limiter allow.
     fn next_job(&self) -> Option<String> {
         let mut state = self.lock();
         loop {
@@ -573,10 +671,31 @@ impl Shared {
                 state.current = Some((src.clone(), Instant::now()));
                 return Some(src);
             }
-            state = self
-                .changed
-                .wait(state)
-                .unwrap_or_else(PoisonError::into_inner);
+            let now = Instant::now();
+            let wait = match state.recompile(now) {
+                Some(Ok(src)) => {
+                    tracing::debug!(
+                        src_len = src.len(),
+                        "compiling a math layout pushed out of the cache again"
+                    );
+                    state.current = Some((src.clone(), now));
+                    return Some(src);
+                }
+                Some(Err(at)) => Some(at.saturating_duration_since(now)),
+                None => None,
+            };
+            state = match wait {
+                Some(wait) => {
+                    self.changed
+                        .wait_timeout(state, wait)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+                None => self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+            };
         }
     }
 
@@ -652,13 +771,12 @@ impl Drop for QueueGuard<'_> {
     }
 }
 
-/// What the engine remembers of a formula it compiled to a layout.
+/// What the engine remembers of a formula whose layout it pushed out of the
+/// cache.
 #[derive(Debug, Clone, Copy, Default)]
 struct Record {
-    /// Layouts compiled from it.
-    compiles: u32,
     /// When its layout was last pushed out of the cache, and what it
-    /// measured; `None` while it is cached.
+    /// measured; `None` once it is cached again.
     evicted: Option<(Instant, MathSummary)>,
 }
 
@@ -688,6 +806,10 @@ impl Records {
         self.by_hash.get(&self.hasher.hash_one(src))
     }
 
+    fn get_mut(&mut self, src: &str) -> Option<&mut Record> {
+        self.by_hash.get_mut(&self.hasher.hash_one(src))
+    }
+
     /// The record of `src`, new if there is none, forgetting the oldest if
     /// that makes too many.
     fn entry(&mut self, src: &str) -> &mut Record {
@@ -707,6 +829,44 @@ impl Records {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.by_hash.len()
+    }
+}
+
+/// Lets `burst` events through at once, then one per `interval`, evenly (a
+/// generic cell rate algorithm): in any span of time `t`, at most
+/// `burst + t / interval` of them, rounded up.
+#[derive(Debug, Clone, Copy)]
+struct Limiter {
+    burst: u32,
+    interval: Duration,
+    epoch: Instant,
+    /// When the next event would be due, after `epoch`, were they spaced
+    /// `interval` apart from the first.
+    due: Duration,
+}
+
+impl Limiter {
+    fn new(burst: u32, interval: Duration, now: Instant) -> Self {
+        Self {
+            burst,
+            interval,
+            epoch: now,
+            due: Duration::ZERO,
+        }
+    }
+
+    /// The soonest the next event may happen.
+    fn next(&self) -> Instant {
+        let slack = self.interval.saturating_mul(self.burst.saturating_sub(1));
+        self.epoch
+            .checked_add(self.due.saturating_sub(slack))
+            .unwrap_or(self.epoch)
+    }
+
+    /// Counts an event at `now`, no sooner than [`Self::next`].
+    fn take(&mut self, now: Instant) {
+        let now = now.saturating_duration_since(self.epoch);
+        self.due = self.due.max(now).saturating_add(self.interval);
     }
 }
 
@@ -991,11 +1151,9 @@ mod tests {
     }
 
     #[test]
-    fn request_compiles_a_pushed_out_layout_again_after_the_cooldown_at_most_twice() {
+    fn a_pushed_out_layout_alone_on_screen_is_drawn_again_after_the_cooldown() {
         let one = one_glyph_bytes();
-        // Long enough that a busy machine (other builds, swap) asks again within it: the test
-        // reads `Evicted` only while the cooldown runs.
-        let cooldown = Duration::from_secs(1);
+        let cooldown = Duration::from_millis(300);
         let engine = MathEngine::new().with_cache_limits(CacheLimits {
             layout_bytes: one + one / 2,
             cooldown,
@@ -1010,106 +1168,153 @@ mod tests {
             };
             layout
         };
-        let evicted = |src: &str| match engine.request(src) {
-            MathStatus::Evicted(summary) => summary,
-            other => panic!("{src}: expected Evicted, got {other:?}"),
-        };
-
         let x = ready("x");
-        ready("y");
-        // `y` pushed `x` out: held back while it cools down.
-        assert_eq!(evicted("x"), MathSummary::of(&x));
-        thread::sleep(cooldown * 2);
-        // Then compiled a second time, pushing `y` out.
-        ready("x");
-        assert!(matches!(evicted("y"), MathSummary { glyphs: 1, .. }));
-        thread::sleep(cooldown * 2);
-        ready("y");
-        // `x` has been compiled twice: held back for good, however long it waits.
-        thread::sleep(cooldown * 2);
-        assert_eq!(evicted("x"), MathSummary::of(&x));
-        assert_eq!(engine.compiles(), 4);
-        assert!(rx.recv_timeout(cooldown).is_err(), "nothing was compiling");
-
-        // Waiting for a layout always compiles it: exports need every formula.
-        assert_eq!(engine.layout_blocking("x").unwrap(), x);
-        assert_eq!(engine.wait_for("y").map(|y| y.items.len()), Ok(1));
+        let y = ready("y");
+        // `y` pushed `x` out just now. A window showing one formula at a time, as the app
+        // does: it asks for the formula once, draws an outline, and draws the next frame only
+        // when the waker calls. The two take turns, each pushing the other out, as often as
+        // they like: no formula is held back for good.
+        for (src, layout) in [("x", &x), ("y", &y), ("x", &x), ("y", &y)] {
+            // Not asked for since, so not compiled again yet.
+            let (pushed_out, _) = engine
+                .shared
+                .lock()
+                .records
+                .get(src)
+                .unwrap()
+                .evicted
+                .unwrap();
+            assert_eq!(
+                engine.request(src),
+                MathStatus::Evicted(MathSummary::of(layout)),
+                "{src}"
+            );
+            woken(&rx);
+            let waited = pushed_out.elapsed();
+            assert!(
+                matches!(engine.request(src), MathStatus::Ready(_)),
+                "{src} was not compiled again"
+            );
+            println!(
+                "{src} drawn again {:.0} ms after it was pushed out",
+                waited.as_secs_f64() * 1e3
+            );
+            // Not before its cooldown, and within it and a frame or two (the compile, and a
+            // busy machine).
+            assert!(
+                waited >= cooldown && waited <= cooldown + Duration::from_millis(250),
+                "{src}: {waited:?}"
+            );
+        }
         assert_eq!(engine.compiles(), 6);
+        // `x`, pushed out last, isn't asked for: it isn't compiled again.
+        assert!(rx.recv_timeout(cooldown * 3).is_err(), "nothing was wanted");
+        assert_eq!(engine.compiles(), 6);
+
+        // Waiting for a layout always compiles it at once: exports need every formula.
+        assert_eq!(engine.layout_blocking("x").unwrap(), x);
+        assert_eq!(engine.compiles(), 7);
     }
 
     #[test]
-    fn formulas_that_do_not_fit_in_the_cache_settle() {
-        // Forty formulas, only a quarter of which fit in the cache together, as forty
-        // formulas at the complexity caps don't fit in `MAX_CACHED_LAYOUT_BYTES`. Asked for
-        // over and over, as the window asks for every formula on screen on every frame.
-        const FORMULAS: u64 = 40;
+    fn formulas_that_do_not_fit_in_the_cache_are_compiled_again_at_a_bounded_rate() {
+        // Twenty formulas, only a quarter of which fit in the cache together, as forty formulas
+        // at the complexity caps don't fit in `MAX_CACHED_LAYOUT_BYTES`. Asked for over and
+        // over, as a window that draws frames all the time asks for every formula on screen.
+        const FORMULAS: usize = 20;
         let sources: Vec<String> = (0..FORMULAS).map(|i| format!("x_{}", 100 + i)).collect();
         let bytes =
             sources[0].len() + approx_bytes(&MathEngine::new().layout(&sources[0]).unwrap());
-        let cooldown = Duration::from_millis(20);
-        let engine = MathEngine::new().with_cache_limits(CacheLimits {
-            layout_bytes: bytes * 10 + bytes / 2,
-            cooldown,
+        let limits = CacheLimits {
+            layout_bytes: bytes * 5 + bytes / 2,
+            cooldown: Duration::from_millis(20),
+            burst: 2,
+            interval: Duration::from_millis(50),
             ..CacheLimits::DEFAULT
-        });
-        let started = Instant::now();
-        let mut last_change = (Instant::now(), engine.compiles());
-        let statuses = loop {
+        };
+        // Before the engine, so `allowed` below counts no less than its limiter does.
+        let created = Instant::now();
+        let engine = MathEngine::new().with_cache_limits(limits);
+        let mut drawn = [false; FORMULAS];
+        let mut thrashing = None;
+        loop {
             let statuses: Vec<MathStatus> = sources.iter().map(|src| engine.request(src)).collect();
+            assert!(
+                !statuses
+                    .iter()
+                    .any(|status| matches!(status, MathStatus::Failed(_))),
+                "{statuses:?}"
+            );
             let compiles = engine.compiles();
-            if compiles != last_change.1 {
-                last_change = (Instant::now(), compiles);
+            if thrashing.is_none() && compiles >= FORMULAS as u64 {
+                thrashing = Some(Instant::now());
             }
-            let quiet = last_change.0.elapsed();
-            if !statuses.contains(&MathStatus::Pending) && quiet > cooldown * 10 {
-                break statuses;
+            if let Some(since) = thrashing {
+                for (drawn, status) in drawn.iter_mut().zip(&statuses) {
+                    *drawn |= matches!(status, MathStatus::Ready(_));
+                }
+                if since.elapsed() > Duration::from_secs(2) {
+                    break;
+                }
             }
             assert!(
-                started.elapsed() < Duration::from_secs(120),
-                "never settled: {compiles} compiles"
+                created.elapsed() < Duration::from_secs(60),
+                "{compiles} compiles"
             );
             thread::sleep(Duration::from_millis(2));
-        };
-        let compiles = engine.compiles();
-        let cached = statuses
-            .iter()
-            .filter(|s| matches!(s, MathStatus::Ready(_)))
-            .count();
-        let outlines = statuses
-            .iter()
-            .filter(|s| matches!(s, MathStatus::Evicted(_)))
-            .count();
-        assert_eq!(cached + outlines, sources.len(), "{statuses:?}");
-        assert_eq!(cached, 10);
-        // Every formula once, the ones pushed out at most once more.
-        assert!(compiles > FORMULAS, "{compiles}");
-        assert!(
-            compiles <= FORMULAS * u64::from(MAX_COMPILES_PER_FORMULA),
-            "{compiles}"
-        );
-        // Still settled long after the cooldown.
-        for _ in 0..20 {
-            thread::sleep(cooldown);
-            for src in &sources {
-                assert_ne!(engine.request(src), MathStatus::Pending);
-            }
         }
-        assert_eq!(engine.compiles(), compiles);
+        // Every formula is compiled once, then the ones pushed out again by turns: at most
+        // `burst` at once and one per interval since the engine was made.
+        // Compiles counted before the time they are checked against.
+        let again = engine.compiles() - FORMULAS as u64;
+        let elapsed = created.elapsed();
+        let allowed = u64::from(limits.burst)
+            + u64::try_from(elapsed.as_nanos().div_ceil(limits.interval.as_nanos())).unwrap();
+        println!(
+            "{again} compiles again in {:.2} s, at most {allowed} allowed",
+            elapsed.as_secs_f64()
+        );
+        assert!(again <= allowed, "{again} > {allowed}");
+        // And every formula pushed out had its turn on screen.
+        assert!(again >= (FORMULAS - 5) as u64, "{again}");
+        assert!(drawn.iter().all(|drawn| *drawn), "{drawn:?}");
+    }
+
+    #[test]
+    fn the_limiter_lets_a_burst_through_then_one_per_interval() {
+        let start = Instant::now();
+        let interval = Duration::from_millis(100);
+        let mut limiter = Limiter::new(3, interval, start);
+        for _ in 0..3 {
+            assert!(limiter.next() <= start);
+            limiter.take(start);
+        }
+        assert_eq!(limiter.next(), start + interval);
+        // Time without events builds up to a burst again, no more.
+        let later = start + interval * 10;
+        for _ in 0..3 {
+            assert!(limiter.next() <= later);
+            limiter.take(later);
+        }
+        assert_eq!(limiter.next(), later + interval);
     }
 
     #[test]
     fn records_forget_the_oldest_formulas_first() {
+        let summary = MathSummary::of(&MathEngine::new().layout("x").unwrap());
+        let at = |glyphs: usize| Some((Instant::now(), MathSummary { glyphs, ..summary }));
+        let glyphs = |records: &Records, src| records.get(src)?.evicted.map(|(_, s)| s.glyphs);
         let mut records = Records::new(3);
-        for (i, src) in ["a", "b", "c", "d", "e"].into_iter().enumerate() {
-            records.entry(src).compiles = u32::try_from(i).unwrap() + 1;
+        for (i, src) in (1..).zip(["a", "b", "c", "d", "e"]) {
+            records.entry(src).evicted = at(i);
         }
         assert_eq!(records.len(), 3);
         assert!(records.get("a").is_none() && records.get("b").is_none());
-        assert_eq!(records.get("e").map(|r| r.compiles), Some(5));
+        assert_eq!(glyphs(&records, "e"), Some(5));
         // Using a remembered formula doesn't add a record.
-        records.entry("c").compiles += 10;
+        records.entry("c").evicted = at(13);
         assert_eq!(records.len(), 3);
-        assert_eq!(records.get("c").map(|r| r.compiles), Some(13));
+        assert_eq!(glyphs(&records, "c"), Some(13));
         records.entry("f");
         assert!(records.get("c").is_none(), "the oldest goes first");
     }

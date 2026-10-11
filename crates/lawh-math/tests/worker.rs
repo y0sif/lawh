@@ -397,43 +397,64 @@ fn run_repro_directory() {
 
 /// The review's churn: 40 different formulas at the glyph cap, each a run per glyph (about
 /// 2 MB cached), all asked for on every frame as if all were on screen: together they don't fit
-/// in `MAX_CACHED_LAYOUT_BYTES`. Prints how many compiles it takes to settle and what is left
-/// as outlines. Before `MathStatus::Evicted` this never settled (2,099 compiles in 55 s).
+/// in `MAX_CACHED_LAYOUT_BYTES`. Before `MathStatus::Evicted` they were compiled again as fast as
+/// the worker could (2,099 compiles in 55 s). Now the engine compiles a layout pushed out again
+/// at most `MAX_RECOMPILE_BURST` at once and one per `RECOMPILE_INTERVAL`, oldest pushed out
+/// first. Runs for a minute and prints the compiles, the rate, and how many formulas were drawn.
 /// `nice -n 19 cargo test --release -p lawh-math --test worker -- --ignored --nocapture churn`
 #[test]
 #[ignore = "a measurement, not a check; slow in debug"]
 fn measure_churn_of_formulas_that_do_not_fit_the_cache() {
+    // Before the engine, so `allowed` below counts no less than its limiter does.
+    let started = Instant::now();
     let worker = MathEngine::with_worker(worker()).with_timeout(Duration::from_secs(10));
     let sources: Vec<String> = (0..40)
         .map(|k| format!("#for i in range({}) {{ box(width: 0pt)[x] }}", 24_999 - k))
         .collect();
-    let started = Instant::now();
-    let mut last_change = (Instant::now(), worker.compiles());
     let mut frames = 0;
+    let mut first_compiles = None;
+    let mut drawn = vec![false; sources.len()];
     let statuses = loop {
         frames += 1;
         let statuses: Vec<MathStatus> = sources.iter().map(|src| worker.request(src)).collect();
-        if worker.compiles() != last_change.1 {
-            last_change = (Instant::now(), worker.compiles());
+        if first_compiles.is_none() && !statuses.contains(&MathStatus::Pending) {
+            first_compiles = Some((Instant::now(), worker.compiles()));
         }
-        let settled = !statuses.contains(&MathStatus::Pending)
-            && last_change.0.elapsed() > lawh_math::RECOMPILE_COOLDOWN * 2;
-        if settled || started.elapsed() > Duration::from_secs(300) {
+        if first_compiles.is_some() {
+            for (drawn, status) in drawn.iter_mut().zip(&statuses) {
+                *drawn |= matches!(status, MathStatus::Ready(_));
+            }
+        }
+        if started.elapsed() > Duration::from_secs(60) {
             break statuses;
         }
         std::thread::sleep(Duration::from_millis(16));
     };
     let count = |f: fn(&MathStatus) -> bool| statuses.iter().filter(|s| f(s)).count();
+    let (settled_at, first) = first_compiles.expect("the first compiles never finished");
+    let again = worker.compiles() - first;
+    let span = settled_at.elapsed().as_secs_f64();
     println!(
-        "{} compiles, the last {:.1} s after the first frame; {} frames in {:.1} s; \
-         {} ready, {} outlines, {} failed",
-        worker.compiles(),
-        last_change.0.duration_since(started).as_secs_f64(),
-        frames,
-        started.elapsed().as_secs_f64(),
+        "{first} compiles in {:.1} s until nothing was pending, then {again} more in {span:.1} s \
+         ({:.2} a second); {frames} frames; {} of {} formulas drawn since; at the end {} ready, \
+         {} outlines, {} failed",
+        settled_at.duration_since(started).as_secs_f64(),
+        again as f64 / span,
+        drawn.iter().filter(|drawn| **drawn).count(),
+        sources.len(),
         count(|s| matches!(s, MathStatus::Ready(_))),
         count(|s| matches!(s, MathStatus::Evicted(_))),
         count(|s| matches!(s, MathStatus::Failed(_))),
     );
-    assert!(worker.compiles() <= 80, "{}", worker.compiles());
+    // Compiles counted before the time they are checked against.
+    let compiles = worker.compiles();
+    let allowed = u64::from(lawh_math::MAX_RECOMPILE_BURST)
+        + u64::try_from(
+            started
+                .elapsed()
+                .as_nanos()
+                .div_ceil(lawh_math::RECOMPILE_INTERVAL.as_nanos()),
+        )
+        .unwrap();
+    assert!(compiles <= 40 + allowed, "{compiles} > 40 + {allowed}");
 }

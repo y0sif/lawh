@@ -483,7 +483,7 @@ const WORDS: &str = "lorem ipsum dolor sit amet consectetur adipiscing elit sed 
 
 /// Kinds of text, as the alphabets they cycle through: the costliest ones lawh-core's text caps
 /// were measured with (`text_caps_worst_cases` in `tests/bench.rs`) and plainer ones.
-const TEXT_KINDS: [(&str, &str); 12] = [
+const TEXT_KINDS: [(&str, &str); 14] = [
     ("words", WORDS),
     ("one word", "x"),
     ("digits and punctuation", "1,2.3;4:5!6?"),
@@ -497,6 +497,12 @@ const TEXT_KINDS: [(&str, &str); 12] = [
     ("bidi per char", "aא"),
     ("scripts per char", "aαа漢ا"),
     ("arabic", "سلام عليكم "),
+    // The script and the direction changing at every character, within one 128-code-point
+    // block.
+    ("armenian and hebrew per char", "\u{580}\u{5D0}"),
+    // The bidi level changing at every character, in one script: an Arabic letter and an
+    // Arabic-Indic digit.
+    ("arabic and digits per char", "\u{627}\u{661}"),
     ("emoji", "👨\u{200D}👩\u{200D}👧\u{FE0F}"),
     // Lines of nothing but their tag: every character a line break.
     ("newlines", "\n"),
@@ -557,7 +563,7 @@ fn rss_bytes() -> f64 {
 }
 
 /// Laying out text: every kind and shape at several lengths up to the cap, each text new to the
-/// cache, against `budget::layout`.
+/// cache, against `budget::layout`. `LAWH_CAL_KINDS` picks kinds by name prefix.
 #[test]
 #[ignore = "timing only; run in release with --ignored --nocapture"]
 fn calibrate_text_layout() {
@@ -565,6 +571,9 @@ fn calibrate_text_layout() {
     let mut glyphs = GlyphTable::new();
     let mut tag = 0;
     for (kind, alphabet) in TEXT_KINDS {
+        if !picked(kind) {
+            continue;
+        }
         for n in [100, 1000, MAX_TEXT_CHARS] {
             for (shape, per_line) in text_shapes(n) {
                 if alphabet == "\n" && shape != "one line" {
@@ -598,8 +607,8 @@ fn calibrate_text_layout() {
                 times.sort();
                 rows.add(
                     &format!(
-                        "lay out {kind}, {shape}: {} chars {} lines",
-                        facts.chars, facts.lines
+                        "lay out {kind}, {shape}: {} chars {} changes {} lines",
+                        facts.chars, facts.changes, facts.lines
                     ),
                     estimate,
                     ms(times[times.len() / 2]),
@@ -610,43 +619,87 @@ fn calibrate_text_layout() {
     rows.check();
 }
 
+/// Names the one kind of text [`calibrate_text_memory`] measures in a process of its own.
+const MEMORY_KIND_VAR: &str = "LAWH_CAL_MEMORY_KIND";
+
 /// For each kind of text, a board of it at the text caps laid out in a new cache: its resident
-/// memory against the cache's estimate. Prints only. The allocator keeps memory it got for
-/// earlier kinds, so run one kind per process for real numbers: `LAWH_CAL_KINDS` picks kinds by
+/// memory against the cache's estimate. Prints only. The allocator keeps memory that earlier
+/// work freed and hands it out again, so a measurement after other work in the same process
+/// reads about 0: the test runs itself again in a new process for each kind (picked by
+/// [`MEMORY_KIND_VAR`]), which is what CI's bench runs too. `LAWH_CAL_KINDS` picks kinds by
 /// name prefix.
-/// `for k in words cjk bidi scripts newlines; do LAWH_CAL_KINDS=$k nice -n 19 cargo test --release -p lawh-render --lib -- --ignored --nocapture calibrate_text_memory; done`
+/// `nice -n 19 cargo test --release -p lawh-render --lib -- --ignored --nocapture --test-threads=1 calibrate_text_memory`
 #[test]
 #[ignore = "memory only; run in release with --ignored --nocapture"]
 fn calibrate_text_memory() {
-    let kinds = std::env::var("LAWH_CAL_KINDS").unwrap_or_default();
-    let mut glyphs = GlyphTable::new();
-    for (kind, alphabet) in TEXT_KINDS {
-        if !kinds.is_empty() && !kinds.split(',').any(|k| kind.starts_with(k)) {
+    if let Ok(kind) = std::env::var(MEMORY_KIND_VAR) {
+        let (_, alphabet) = TEXT_KINDS
+            .into_iter()
+            .find(|(name, _)| *name == kind)
+            .unwrap();
+        text_memory(&kind, alphabet);
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let crate_path = module_path!().split_once("::").unwrap().1;
+    let test = format!("{crate_path}::calibrate_text_memory");
+    for (kind, _) in TEXT_KINDS {
+        if !picked(kind) {
             continue;
         }
-        let (per_text, per_line) = if alphabet == "\n" {
-            (MAX_TEXT_LINES - 1, usize::MAX)
-        } else {
-            (MAX_TEXT_CHARS, max_lines_per_line(MAX_TEXT_CHARS))
-        };
-        let count = (MAX_BOARD_TEXT_CHARS / per_text).min(MAX_OBJECTS);
-        let texts: Vec<String> = (0..count)
-            .map(|i| cycled(i, per_text, per_line, alphabet))
-            .collect();
-        let mut shaper = TextShaper::new();
-        let before = rss_bytes();
-        for text in &texts {
-            let key = shaper.key(text);
-            shaper.lay_out(key, text, &mut glyphs);
-        }
-        let measured = rss_bytes() - before;
-        let chars: usize = texts.iter().map(|text| text.chars().count()).sum();
-        println!(
-            "memory of {kind:<24} {count} x {per_text}: {chars} chars, measured {:.1} MB, estimated {:.1} MB",
-            measured / 1e6,
-            shaper.bytes() as f64 / 1e6
+        let out = std::process::Command::new(&exe)
+            .args([
+                &test,
+                "--exact",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(MEMORY_KIND_VAR, kind)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "{kind}: {stdout}{}",
+            String::from_utf8_lossy(&out.stderr)
         );
+        // The child's own `test ... ` line runs into what it prints.
+        for line in stdout
+            .lines()
+            .filter_map(|line| line.find("memory of").map(|at| &line[at..]))
+        {
+            println!("{line}");
+        }
     }
+}
+
+/// Lays out a board of `alphabet` at the text caps in a new cache and prints the resident
+/// memory it took against the cache's estimate.
+fn text_memory(kind: &str, alphabet: &str) {
+    let (per_text, per_line) = if alphabet == "\n" {
+        (MAX_TEXT_LINES - 1, usize::MAX)
+    } else {
+        (MAX_TEXT_CHARS, max_lines_per_line(MAX_TEXT_CHARS))
+    };
+    let count = (MAX_BOARD_TEXT_CHARS / per_text).min(MAX_OBJECTS);
+    let texts: Vec<String> = (0..count)
+        .map(|i| cycled(i, per_text, per_line, alphabet))
+        .collect();
+    let mut glyphs = GlyphTable::new();
+    let mut shaper = TextShaper::new();
+    let before = rss_bytes();
+    for text in &texts {
+        let key = shaper.key(text);
+        shaper.lay_out(key, text, &mut glyphs);
+    }
+    let measured = rss_bytes() - before;
+    let chars: usize = texts.iter().map(|text| text.chars().count()).sum();
+    println!(
+        "memory of {kind:<30} {count} x {per_text}: {chars} chars, measured {:.1} MB, estimated {:.1} MB",
+        measured / 1e6,
+        shaper.bytes() as f64 / 1e6
+    );
 }
 
 /// The views the text calibrations draw through at `width` x `height` and `scale`, for text
