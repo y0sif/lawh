@@ -49,7 +49,10 @@ const SLACK_MS: f64 = 0.2;
 /// load of 1.5 to 7 failed 3 of 3 times (measured, 2026-10-12), each on about 0.16% of its rows,
 /// no row twice, rows of small estimates 0.3 to 4 ms over; main failed at the same rate. Load
 /// only adds time, so the least of a few medians is the nearest to what a row costs, while a row
-/// whose estimate is too low is over its limit every time.
+/// whose estimate is too low is over its limit every time. Load slows an empty frame too, and a
+/// slower empty frame taken off would make a row look cheaper: a drawing row measures its empty
+/// frame once, before its first time (see [`Rows::add_past`]), so measuring again only takes
+/// noise off the time taken, never adds it to what is taken off.
 const MEASURES: usize = 3;
 
 /// Estimated and measured costs, printed as they come and checked at the end.
@@ -64,12 +67,26 @@ impl Rows {
     /// Adds a row of estimate `estimate_ms` and the time `measure` takes it to run (a median
     /// of several runs, in milliseconds), measured again when it is over its limit, in release
     /// (see [`MEASURES`]).
-    fn add(&mut self, name: &str, estimate_ms: f64, mut measure: impl FnMut() -> f64) {
+    fn add(&mut self, name: &str, estimate_ms: f64, measure: impl FnMut() -> f64) {
+        self.add_past(name, estimate_ms, 0.0, measure);
+    }
+
+    /// [`Rows::add`] for a row whose times hold an empty frame: `empty_ms`, measured once by the
+    /// caller, is taken off each time `measure` returns, so a row measured again under load can
+    /// only lose noise from its time taken.
+    fn add_past(
+        &mut self,
+        name: &str,
+        estimate_ms: f64,
+        empty_ms: f64,
+        mut measure: impl FnMut() -> f64,
+    ) {
         let over = |took_ms: f64| took_ms > MAX_RATIO * estimate_ms + SLACK_MS;
-        let mut took_ms = measure();
+        let mut past = || (measure() - empty_ms).max(0.0);
+        let mut took_ms = past();
         let mut times = 1;
         while !cfg!(debug_assertions) && over(took_ms) && times < MEASURES {
-            took_ms = took_ms.min(measure());
+            took_ms = took_ms.min(past());
             times += 1;
         }
         let ratio = took_ms / estimate_ms;
@@ -157,15 +174,14 @@ fn row(renderer: &mut Renderer, rows: &mut Rows, name: &str, layout: &MathLayout
         .math_cost(at, CAL_SIZE, layout, vp, clip, f64::INFINITY)
         .ns
         / 1e6;
-    rows.add(name, estimate, || {
-        let empty = empty_frame(renderer, vp);
-        let took = median(5, || {
+    let empty = ms(empty_frame(renderer, vp));
+    rows.add_past(name, estimate, empty, || {
+        ms(median(5, || {
             renderer.begin_frame(vp);
             let mut budget = Budget::unlimited();
             assert!(renderer.draw_math(at, CAL_SIZE, layout, vp, clip, &mut budget));
             black_box(renderer.finish_frame());
-        });
-        ms(took.saturating_sub(empty))
+        }))
     });
 }
 
@@ -568,7 +584,7 @@ const TEXT_KINDS: [(&str, &str); 24] = [
     ("emoji", "👨\u{200D}👩\u{200D}👧\u{FE0F}"),
     // Symbols Inter lacks, set in Libertinus Math (`crate::text`), between Inter's spaces; and
     // the font changing at every character.
-    ("math symbols", "∧∠⊞⨁⟶ "),
+    ("math symbols", "∧∠⊞⨁⟼ "),
     ("symbols and letters", "a∧"),
     // Hebrew is Libertinus Math's too: the font changes with the script and the direction.
     ("hebrew", "שלום עולם "),
@@ -853,9 +869,9 @@ fn calibrate_text_drawing() {
                         let (cost, _) =
                             text_cost(plan, view.lines(plan), &view, &vp, clip, f64::INFINITY);
                         let estimate = cost.ns / 1e6;
+                        let empty = ms(empty_frame(&mut renderer, &vp));
                         let measure = || {
-                            let empty = empty_frame(&mut renderer, &vp);
-                            let took = median(5, || {
+                            ms(median(5, || {
                                 renderer.begin_frame(&vp);
                                 let mut budget = Budget::unlimited();
                                 renderer.draw_text(
@@ -869,12 +885,12 @@ fn calibrate_text_drawing() {
                                     &mut budget,
                                 );
                                 black_box(renderer.finish_frame());
-                            });
-                            ms(took.saturating_sub(empty))
+                            }))
                         };
-                        rows.add(
+                        rows.add_past(
                             &format!("{width}x{height} {label} size {size} {kind}, {shape}"),
                             estimate,
+                            empty,
                             measure,
                         );
                     }
@@ -897,15 +913,15 @@ fn calibrate_text_drawing() {
                     (0, 0, 0),
                     "{name} {label}: {stats:?}"
                 );
-                rows.add(
+                let empty = ms(empty_frame(&mut renderer, &vp));
+                rows.add_past(
                     &format!("{width}x{height} {label} board {name}"),
                     ms(stats.estimated),
+                    empty,
                     || {
-                        let empty = empty_frame(&mut renderer, &vp);
-                        let took = median(5, || {
+                        ms(median(5, || {
                             black_box(renderer.draw_frame(&board, &vp, MathWait::Yes));
-                        });
-                        ms(took.saturating_sub(empty))
+                        }))
                     },
                 );
             }

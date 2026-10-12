@@ -1334,6 +1334,8 @@ mod tests {
             ("a\u{2227}b", [0, 1, 0].as_slice()),
             ("\u{2227} \u{2220} \u{229E}", &[1, 0, 1, 0, 1]),
             ("x\u{2A01}\u{2A01}y", &[0, 1, 0]),
+            // Inter has the long arrow (U+27F6), not the long arrow from a bar (U+27FC).
+            ("\u{27F6}\u{27FC}", &[0, 1]),
         ] {
             assert_eq!(run_fonts(&shaper.build(text)), fonts, "{text:?}");
             let facts = Facts::of(text);
@@ -1368,6 +1370,8 @@ mod tests {
             '\u{6F22}',
             '\u{627}',
             '\u{1F600}',
+            '\u{27F6}',
+            '\u{27FC}',
         ] {
             let expected = table.char_glyph(0, c).is_none() && table.char_glyph(1, c).is_some();
             assert_eq!(fallback.falls_back(c), expected, "{c:?}");
@@ -1383,12 +1387,22 @@ mod tests {
             assert!(fallback.falls_back(c), "{c:?}");
         }
         assert_eq!(fallback.samples.len(), 1);
-        // Libertinus Math's long arrows, 1.42 em: narrower than Inter's widest glyph.
-        assert!(
-            (fallback.widest_em - 1.42).abs() < 0.01,
-            "{}",
-            fallback.widest_em
-        );
+        // The widest characters that fall back are Libertinus Math's long arrows from a bar and
+        // long squiggle arrows, 1.411 em, narrower than Inter's widest glyph. Its plain long
+        // arrows are wider, 1.42 em, but Inter has them, so they never fall back.
+        for c in [
+            '\u{27FB}', '\u{27FC}', '\u{27FD}', '\u{27FE}', '\u{27FF}', '\u{2B33}',
+        ] {
+            assert!(fallback.falls_back(c), "{c:?}");
+        }
+        for c in '\u{27F5}'..='\u{27FA}' {
+            assert!(!fallback.falls_back(c), "{c:?}");
+        }
+        let (_, arrow) = table.char_glyph(1, '\u{27FC}').unwrap();
+        assert!((arrow - 1.411).abs() < 1e-6, "{arrow}");
+        // Equal but for the rounding of an f32.
+        let widest = f64::from(fallback.widest_em);
+        assert!((widest - arrow).abs() < 1e-6, "{widest}");
     }
 
     #[test]
@@ -1400,9 +1414,9 @@ mod tests {
             "lorem ipsum\ndolor sit amet",
             "WWWWWWWW\n\n\n",
             "\u{6F22}\u{5B57}\u{5D0}a\u{301}",
-            // From the math font: its long arrows are its widest characters, and a line with it
-            // is a little taller.
-            "\u{27F6}\u{27F6}\n\u{2227}x\n\u{2A01}",
+            // From the math font: its long arrows from a bar are the widest characters that fall
+            // back, and a line with one is a little taller.
+            "\u{27FC}\u{27FC}\n\u{2227}x\n\u{2A01}",
         ] {
             let before = known(&mut shaper, text);
             let estimated = shaper.size(&before);
