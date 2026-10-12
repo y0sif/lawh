@@ -89,8 +89,9 @@ A frame that ran out of budget for laying out text asks for the next frame itsel
 ## The `.lawh` format
 
 A board is a flat [KDL v2](https://kdl.dev) document: a `lawh version=1` header, then one object
-per line. Files must be UTF-8: the app refuses one that isn't, when it reads it (`main.rs`). A
-leading byte order mark (BOM, U+FEFF) is skipped (`format/parse.rs`).
+per line. Files must be UTF-8: the app refuses one that isn't, when it reads it (`read_board` in
+`crates/lawh/src/files.rs`). A leading byte order mark (BOM, U+FEFF) is skipped
+(`format/parse.rs`).
 
 ```kdl
 lawh version=1
@@ -202,8 +203,8 @@ the caps.
 | `timeoutlen` | at most 10,000 ms | `MAX_TIMEOUTLEN`, `engine/settings.rs` | Nobody pauses 10 s inside a mapping; a typo would leave keys stuck on the status line. |
 | lawhrc size | 1 MiB | `MAX_RC_BYTES`, `engine/rc.rs` | A real lawhrc is a few kilobytes; a wrong file (a log, a binary) is refused cheaply. |
 | lawhrc warnings listed | 100, then one that counts the rest | `MAX_RC_WARNINGS`, same | A wrong file can fail on every line; nobody reads past the first few. |
-| Work per typed key | 100,000,000 units (about 1 ns each in debug) | `MAX_KEY_WORK`, `engine/work.rs` | A key that runs out takes about 0.1 s in debug, 10 ms in release (measured); the costliest single command fits. See [What one key may cost](#what-one-key-may-cost). |
-| Writes per typed key | 4 | `MAX_WRITES_PER_KEY`, `engine/exec.rs` | One write costs the app 2.76 ms (measured, on an SSD); 4 take about 11 ms and leave room for a mapping that writes the board and a copy. |
+| Work per typed key | 100,000,000 units (about 1 ns each in debug) | `MAX_KEY_WORK`, `engine/work.rs` | A key that runs out takes about 0.1 s in debug, 10 ms in release (derived from the measured cost of a unit); the costliest single command fits. See [What one key may cost](#what-one-key-may-cost). |
+| Writes per typed key | 4 | `MAX_WRITES_PER_KEY`, `engine/exec.rs` | One write costs the app 2.76 ms (measured on an SSD, build not recorded); 4 take about 11 ms and leave room for a mapping that writes the board and a copy. |
 | Writes waiting for their report | 4 (= `MAX_WRITES_PER_KEY`) | `MAX_PENDING_WRITES`, same | The app reports right after the key, so only one key's writes wait together. |
 | Visual highlights per frame | 3 ms of estimated work | `HIGHLIGHT_BUDGET_NS`, `lawh-render/src/budget.rs` | A full board selected, every object crossing the screen, would take tens of milliseconds; past it the rectangle still shows the selection. |
 | Characters of a status string drawn | 256 | `STATUS_WINDOW_CHARS`, `lawh-render/src/status.rs` | About 1,800 logical pixels, wider than most windows; lays out in at most about 0.5 ms. |
@@ -475,10 +476,14 @@ each report to the oldest write it asked for with that path.
 
 - `write_done` marks the board saved when the write went to the board's own file (the same path
   once `.` and `..` are worked out, without asking the file system) and the board hasn't changed
-  since. It returns `Quit` for `:wq` and `:x` only then.
-- A write to another file is a copy: the board keeps its name and stays modified, so `:wq other`
-  writes the copy and doesn't quit, unless forced with `:wq!`. `:w name` on an unnamed board
-  names it.
+  since the write was asked for.
+- For `:wq` and `:x` it then returns `Quit` when the board has no unwritten changes left, or when
+  forced (`:wq!`, `:x!`). Neither the save mark nor the quit happens when the board changed after
+  the write was asked for (later keys of the same mapping).
+- A write to another file is a copy: the board keeps its name and its unwritten changes. So
+  `:wq other` on a changed board writes the copy and doesn't quit unless forced, while on an
+  unchanged board it writes the copy and quits. `:w name` on an unnamed board names it.
+- `:x` on a board with no unwritten changes quits at once, without writing.
 - A relative path is taken from the directory lawh started in.
 
 **Atomic writes** (`files::write_atomic`). An atomic write leaves the file either the old board
@@ -598,10 +603,11 @@ counted from the typed key (or timeout, or click) and reset at the next:
   fresh ids looked for, bytes of `:` lines run, and bytes of a block's text copied, scanned,
   split into graphemes or walked. A unit is about a nanosecond of work in a debug build: each
   weight was measured with `work_unit_costs` in `tests/engine_cost.rs`. A key that runs out
-  takes about 0.1 s in debug and 10 ms in release (50 ms if it was typing), and the costliest
-  single commands fit whole (`10000J` down a column of 500 objects is 62.5 million units).
+  takes about 0.1 s in debug and 10 ms in release (50 ms if it was typing; derived from the
+  measured cost of a unit), and the costliest single commands fit whole (`10000J` down a column
+  of 500 objects is 62.5 million units).
 - **`MAX_WRITES_PER_KEY`** (4): writes are counted apart, since the app does them and one costs
-  it 2.76 ms (measured, mostly the flush to disk).
+  it 2.76 ms (measured, build not recorded, mostly the flush to disk).
 
 When a key runs out of work or asks for a fifth write, the command under way stops where the
 board is consistent: a motion stops on the last object it reached, an operator or a put does

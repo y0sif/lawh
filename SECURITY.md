@@ -118,9 +118,10 @@ as a vulnerability and report it.
   - at most 1,000 mapping expansions (`MAX_MAP_DEPTH`) and 30,000 keys set off
     (`MAX_EXPANDED_KEYS`);
   - at most 100 million units of work (`MAX_KEY_WORK`), each kind of work weighted by what it
-    costs: spending it all takes about 0.1 s in debug and 10 ms in release (measured);
+    costs: spending it all takes about 0.1 s in debug and 10 ms in release (derived from the
+    measured cost of a unit);
   - at most 4 writes (`MAX_WRITES_PER_KEY`): about 11 ms, derived from 2.76 ms a write
-    (measured).
+    (measured, build not recorded).
 
   Past any of them the key stops with a message, its remaining keys are dropped, and the board is
   left consistent, as after any command. Before these caps, crafted mappings froze the window for

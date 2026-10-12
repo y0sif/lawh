@@ -52,8 +52,9 @@ Undo of a step that changes a whole board (500 objects): 1.7 ms a step in releas
 
 `MAX_KEY_WORK` is 100,000,000 units. Each kind of work has a weight, in units, from what one item
 of it took in a debug build of lawh-core, measured with `work_unit_costs` in `engine_cost.rs`
-(Linux `x86_64`, 2026-10-12, `FixedMeasure`). Source: the doc comments in
-`crates/lawh-core/src/engine/work.rs`.
+(Linux `x86_64`, 2026-10-12, with `FixedMeasure`, the measurer tests use: it sizes text at a
+fixed 0.3 units a character and 0.6 a line, where the app's renderer shapes it). Source: the doc
+comments in `crates/lawh-core/src/engine/work.rs`.
 
 | What | Figure | Kind |
 |---|---|---|
@@ -126,7 +127,7 @@ the overlay adds to a frame (the median of `render_with` minus that of `render`)
 | Worst (all 500 objects selected, a Visual rectangle over the view, the longest command line changing every frame) | 1.88 ms | 4.2 ms | measured |
 | `OVERLAY_TARGET` | 8 ms | 8 ms | target |
 
-The 1920x1080 figures are from the milestone's render lane run; the doc comment of
+The 1920x1080 figures were measured while building the overlay; the doc comment of
 `Renderer::render_with` (`crates/lawh-render/src/renderer/ui.rs`) rounds them to 0.1 ms and
 1.9 ms and gives the 2880x1800 ones.
 

@@ -32,7 +32,7 @@ saves it. Building the "area of a circle" example from an empty board takes 62 k
 
 ## What works
 
-- [x] **Modes:** Normal, Insert (inside a text or math block), Visual (select objects) and Command (`:`)
+- [x] **Modes:** Normal, Insert (inside a text or math block), block-Normal (Vim's Normal mode inside a block), Visual (select objects) and Command (`:`)
 - [x] **Canvas cursor** moved with `hjkl` and counts (`5l`), or onto objects with `w`, `b` and `HJKL`. New objects appear at the cursor.
 - [x] **Objects:** text block, math block, circle or ellipse, rectangle, line, arrow
 - [x] **Commands:** `:circle r=3`, `:rect 4 2`, `:arrow 3 0`, `:text`, `:math`

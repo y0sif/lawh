@@ -31,7 +31,9 @@ arrow. New objects appear at the cursor point and become the current object.
 ### Counts
 
 Type a number before a command to repeat it: `5j`, `3w`, `2dd`. Counts stop at 10,000. An
-operator's count and its motion's multiply: `2d3w` is `d6w`.
+operator (`d` or `y`: a key that acts on the objects reached by the motion typed after it, see
+[Changing objects](#changing-objects)) and its motion may each take a count, and the two
+multiply: `2d3w` is `d6w`.
 
 ### Moving
 
@@ -49,8 +51,9 @@ start from that point.
 
 ### Changing objects
 
-`d` deletes and `y` yanks (copies) objects into the unnamed register. They need the cursor on an
-object; on a grid point the status line says "no object under the cursor".
+The operators `d` (delete) and `y` (yank, which copies) take objects into the unnamed register:
+the one place lawh keeps what was deleted or yanked, which `p` and `P` put from. They need the
+cursor on an object; on a grid point the status line says "no object under the cursor".
 
 | Keys | Acts on |
 |---|---|
@@ -90,8 +93,8 @@ commands aren't repeated by `.`; use `@:` for commands. A count on an insert typ
 `3ia<Esc>` types `aaa`.
 
 Undo takes back one Normal command, one Insert session (from entering Insert mode to leaving it)
-or one `:` command at a time, and puts the cursor back where it was. The history keeps 1,000
-changes.
+or one `:` command at a time, and puts the cursor back where it was. The history keeps up to
+1,000 changes, fewer when they are large: past about 16 MiB (estimated) the oldest are dropped.
 
 ## Visual mode
 
@@ -169,15 +172,17 @@ A command may be cut short down to the letters in brackets: `:ci`, `:cir` ... `:
 
 ### Shapes, text and math
 
-Shapes go at the cursor point: the grid point, or the current object's anchor. Positional numbers
-are relative to it. `key=value` uses the file's names, is absolute, and wins over a positional.
+Shapes go at the cursor point (the grid point, or the current object's anchor) unless `x=` `y=`
+place them (`x1=` `y1=` for a line or an arrow). Positional numbers are sizes for `:ci`, `:el`
+and `:re`, and offsets from the start for `:li` and `:ar`. `key=value` uses the file's names, is
+absolute, and wins over a positional.
 
 | Command | Makes |
 |---|---|
 | `:ci[rcle] R` | A circle of radius R centred on the cursor. Keys: `x=` `y=` `r=` |
 | `:el[lipse] RX RY` | An ellipse centred on the cursor. Keys: `x=` `y=` `rx=` `ry=` |
 | `:re[ct] W H` | A rectangle with its top-left corner at the cursor. Keys: `x=` `y=` `w=` `h=` |
-| `:li[ne] DX DY` | A line from the cursor to the cursor + (DX, DY). Keys: `x1=` `y1=` `x2=` `y2=` |
+| `:li[ne] DX DY` | A line from its start to the start + (DX, DY). The start is the cursor point, or `x1=` `y1=`. Keys: `x1=` `y1=` `x2=` `y2=` |
 | `:ar[row] DX DY` | An arrow, the same way, its head at the end |
 | `:te[xt] <text>` | A text block of everything after the first space, as typed |
 | `:ma[th] <formula>` | A math block in [Typst](https://typst.app) math syntax: `:ma A = pi r^2` |
@@ -197,9 +202,10 @@ coordinates within -1,000,000 and 1,000,000. A board holds at most 500 objects.
 | `:w! [file]` | As `:w` |
 | `:q[uit]` | Quit, unless the board has unwritten changes |
 | `:q!` | Quit, dropping unwritten changes |
-| `:wq [file]` | Write, then quit. A copy to another file doesn't quit while the board's own file lacks changes |
+| `:wq [file]` | Write, then quit. Doesn't quit while the board has unwritten changes: a copy to another file leaves them unwritten |
 | `:wq! [file]` | Write, then quit anyway |
-| `:x[it] [file]` | Write only if there are changes, then quit; `:x!` as `:wq!` |
+| `:x[it] [file]` | With unwritten changes, as `:wq`; without, quit without writing |
+| `:x! [file]` | With unwritten changes, as `:wq!`; without, quit without writing |
 
 Writes are atomic: the file is always either the old board or the new one. A relative path is
 taken from the directory lawh was started in. `:w !cmd` and `:w >>file` are refused.
@@ -259,6 +265,12 @@ other mappings too.
   status line, then run the longest mapping they make, or run as typed.
 - At most 1,000 mappings a mode. One typed key may expand at most 1,000 mappings ("recursive
   mapping" past that) and set off at most 30,000 keys.
+- Everything one typed key sets off also shares two caps. It may ask for at most 4 writes
+  (`MAX_WRITES_PER_KEY`); past that: "that key asked for more than 4 writes; the rest of it was
+  dropped". And it has a work budget (`MAX_KEY_WORK`): each command counts the work it does
+  (objects looked at, bytes of text walked), and past the budget: "that key did too much work;
+  the rest of it was dropped". The key stops where it got to, and the board is left as after any
+  command.
 
 ### Key notation
 
@@ -304,7 +316,7 @@ cp examples/lawhrc ~/.config/lawh/lawhrc
 |---|---|
 | Pan | Drag with the left or middle mouse button |
 | Zoom | Mouse wheel or touchpad scroll, at the pointer, from 0.1 to 20 |
-| Select | Click an object to make it the current object, or empty space to put the cursor on the nearest grid point. A click ends Insert, Visual and the command line |
+| Select | Click an object to make it the current object, or empty space to put the cursor on the nearest grid point. A click ends Insert, block-Normal and Visual mode and the command line, and drops keys waiting for a mapping |
 | Close | The window's close button (Cmd+Q on macOS). With unwritten changes the first close only warns; close again to quit |
 
 The view follows the cursor as you type.
@@ -315,6 +327,9 @@ The view follows the cursor as you type.
 lawh                 # an empty board with no name: :w name.lawh names it
 lawh board.lawh      # open board.lawh; if it doesn't exist, an empty board that :w creates
 ```
+
+The cursor starts on the board's first object in reading order, as after `gg`. On an empty board
+it starts on the grid point 0,0.
 
 Logs go to stderr. lawhrc warnings show at the default level; `RUST_LOG=info lawh board.lawh`
 logs more.

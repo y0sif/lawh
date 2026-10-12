@@ -11,7 +11,7 @@ How lawh is tested, layer by layer. Test-only dependencies are `insta` (snapshot
 | Unit | Small checks next to the code: limits, escapes, protocol encoding, budget maths, pan and zoom maths | `#[cfg(test)]` modules in each crate |
 | Snapshots (`insta`) | Every way a `.lawh` file can be rejected, with its message and `line:column`; files as the writer prints them; math layouts (box size, baseline, what is drawn) | `lawh-core/tests/format_errors.rs`, `format_files.rs`; `lawh-math/tests/layout.rs` |
 | Engine key scripts (`insta`) | Keys in, board out: see [The Vim engine](#the-vim-engine-keys-in-board-out) | `lawh-core/tests/engine_*.rs`, `keymap.rs`, `acceptance.rs` |
-| Property tests (`proptest`) | Random boards survive a write and a read exactly, bit for bit; printed keys read back as the same keys; random key scripts undo and redo exactly | `lawh-core/tests/format_proptest.rs`, `key_notation.rs`, `engine_undo.rs` |
+| Property tests (`proptest`) | Random boards survive a write and a read exactly, bit for bit; random edits keep the board's index and text count right; a batch of changes does what they do one by one, or nothing; the fast text count agrees with counting one character at a time; printed keys read back as the same keys; random key scripts undo and redo exactly | `lawh-core/tests/format_proptest.rs`, `lawh-core/src/board.rs` (tests module), `key_notation.rs`, `engine_undo.rs` |
 | Differential, against `kdl` | lawh's parser reads random flat KDL documents and random "soup" (pieces of KDL syntax, mostly invalid) as kdl does, values included, and accepts what kdl accepts; written numbers and escapes read back the same in kdl and in lawh's parser | `lawh-core/src/format/parse.rs`, `write.rs` (tests modules) |
 | Golden PNGs | `examples/area.lawh` fitted to 800x600 and at zoom 3 around its formula; the overlay (`overlay_*.png`): the cursor on an object, a Visual selection, Insert in a word, a math block being edited, the command line, an error message | `lawh-render/tests/golden.rs`, `tests/golden/*.png` |
 | Renderer behaviour | Viewport maths, culling, placeholders, the frame budget's outlines; caret geometry, hit tests, the bounds the engine measures with, and the overlay leaving the board as `render` draws it | `lawh-render/tests/render.rs`, `overlay.rs` |
@@ -24,8 +24,11 @@ How lawh is tested, layer by layer. Test-only dependencies are `insta` (snapshot
 
 A differential test feeds the same input to two implementations and fails on any difference. The
 parser's property tests run 4,096 cases each by default; set `LAWH_PROPTEST_CASES` for a long run.
-The same variable sets the cases of `key_notation.rs` (1,024 by default) and `engine_undo.rs`
-(256). `format_proptest.rs` ignores it and always runs 512:
+The same variable sets the cases of `key_notation.rs` (1,024 by default), `engine_undo.rs` (256)
+and the three board property tests in `board.rs` (256 each):
+`edits_keep_the_index_and_text_count`, `a_batch_is_its_changes_one_by_one_or_nothing` and
+`check_text_counts_as_one_character_at_a_time_does`. `format_proptest.rs` ignores it and always
+runs 512:
 
 ```bash
 LAWH_PROPTEST_CASES=200000 nice -n 19 cargo test --release -p lawh-core --lib parser_
@@ -86,7 +89,7 @@ it ended with. Neither asserts a time: read the numbers.
 | `LAWH_CAP_CHARS`, `LAWH_CAP_LINES`, `LAWH_CAP_TOTAL` | Other text caps for `text_caps_worst_cases` |
 | `LAWH_READ_BYTES` | File size for `read_time_of_filler_files` |
 | `LAWH_COST_KINDS` | `key_costs` cases by comma-separated name prefix |
-| `LAWH_PROPTEST_CASES` | Cases for the parser, key notation and undo property tests |
+| `LAWH_PROPTEST_CASES` | Cases for the parser, board, key notation and undo property tests |
 
 `calibrate_text_memory` measures resident memory, so it starts itself again in a new process for
 each kind of text: after other work, the allocator hands out memory it kept and the numbers read 0.
@@ -201,8 +204,8 @@ the key count: 62 keys, counting each `<...>` as one, make `examples/area.lawh` 
 |---|---|---|---|
 | File format (`lawh-core`) | Read, write, errors, caps | Snapshots of every error, round-trip property tests, differential tests against kdl | Done |
 | Math (`lawh-math`) | Typst snippets compile, the sandbox and the worker hold | Layout snapshots, sandbox and worker tests | Done |
-| Rendering (`lawh-render`) | Pixels, the frame budget, the overlay | Golden PNGs, behaviour tests, calibrations and benches | Done (SVG and PDF export to come) |
-| App (`lawh`) | Command line, worker mode, keys, writes, lawhrc | Process tests without a window, unit tests | Done |
+| Rendering (`lawh-render`) | Pixels, the frame budget, the overlay | Golden PNGs, behaviour tests, calibrations and benches | Drawing done (milestone 1); the overlay built (milestone 2); SVG and PDF export to come |
+| App (`lawh`) | Command line, worker mode, keys, writes, lawhrc | Process tests without a window, unit tests | Command line and worker mode done (milestone 1); keys, writes and lawhrc built (milestone 2) |
 | Engine (`lawh-core`) | Modes, counts, operators, motions, text in blocks, undo, `.` repeat, key maps, the cost of a key | Key script → `insta` snapshot of the board, mode and cursor; undo property test; cost regressions | Built (milestone 2) |
 | `:` commands (`lawh-core`) | Parsing and errors | Table tests: input → command or error message | Built (milestone 2) |
 | Acceptance (`lawh-core/tests/`) | The "area of a circle" benchmark built from keys only | One key script produces `examples/area.lawh` in 62 keys, asserted | Built (milestone 2) |

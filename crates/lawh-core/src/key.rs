@@ -1,6 +1,6 @@
 //! Keys and Vim key notation: `<Esc>`, `<C-r>`, `<S-Tab>`, `3l2j:ci 2<CR>`.
 //!
-//! The engine, its test scripts and (later) key mappings all read keys in this notation.
+//! The engine, its test scripts and key mappings all read keys in this notation.
 //!
 //! - A plain character is itself.
 //! - `<...>` names a key, ignoring case: `<Esc> <CR> <Enter> <Return> <Tab> <BS> <Del> <Space>

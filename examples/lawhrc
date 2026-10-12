@@ -10,8 +10,9 @@
 set leader=<Space>
 
 " Move with jkl; instead of hjkl, on the board, in Visual mode, after d or y,
-" and inside text blocks. noremap covers those three modes; Insert mode keeps
-" its keys. With noremap, h j k l below run the built-in moves, not each other.
+" and inside text blocks. noremap covers all four (the board and text blocks
+" share Normal mode's mappings); Insert mode keeps its keys. With noremap,
+" h j k l below run the built-in moves, not each other.
 noremap j h
 noremap k j
 noremap l k
