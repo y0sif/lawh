@@ -638,43 +638,36 @@ fn grid_frame_time() {
 }
 
 /// Most the overlay ([`Renderer::render_with`]) may add to a frame in a release build, worst
-/// case: every object of a full board selected, a Visual rectangle over the whole view, and a
-/// command line and status text at their longest, changing every frame.
+/// case. The engine shows jump labels only in Normal and Visual mode and after an operator, and
+/// `:sym` rows only on a command line, so there are two worst cases: Visual mode with every
+/// object of a full board selected, a Visual rectangle over the whole view and a jump label on
+/// each object, spread over the view so none hides another's letters; and a `:sym` line typed
+/// from that Visual mode (the selection stays highlighted), at its longest, with a full set of
+/// rows of the longest names. Status text at its longest, and the command line and the rows,
+/// change every frame.
 const OVERLAY_TARGET: Duration = Duration::from_millis(8);
 
 /// What drawing the overlay adds to a frame: the median of `render_with` minus that of
-/// `render`, on an everyday overlay over the area board and on the worst one (see
+/// `render`, on an everyday overlay over the area board and on the two worst ones (see
 /// [`OVERLAY_TARGET`], asserted in release), at 1920x1080 and at 2880x1800 with scale factor 2.
+/// Also printed, not asserted: both worst cases in one overlay, which the engine never shows.
 /// `nice -n 19 cargo test --release -p lawh-render --test bench -- --ignored --nocapture overlay`
 #[test]
 #[ignore = "timing only; run with --release -- --ignored --nocapture"]
 fn overlay_frame_time() {
-    use std::fmt::Write as _;
-
     use lawh_core::ObjectId;
-    use lawh_core::engine::MAX_COMMAND_LINE_CHARS;
+    use lawh_core::engine::{MAX_COMMAND_LINE_CHARS, SYM_ROWS};
     use lawh_render::{Caret, Overlay, OverlayCursor, StatusLine};
 
     // 500 rectangles just inside the view, all selected.
-    let mut src = String::from("lawh version=1\n");
-    for i in 0..lawh_core::board::MAX_OBJECTS {
-        let inset = (i % 50) as f64 * 0.05;
-        writeln!(
-            src,
-            "rect id=r{i} x={} y={} w={} h={}",
-            -20.0 + inset,
-            -10.0 + inset,
-            40.0 - 2.0 * inset,
-            20.0 - 2.0 * inset
-        )
-        .unwrap();
-    }
-    let full = common::board(&src);
+    let full = nested_rects();
     let selection: Vec<ObjectId> = full.objects().iter().map(|o| o.id.clone()).collect();
     // A command line at its longest, of every digit so each window of it differs.
     let line: String = (0..MAX_COMMAND_LINE_CHARS)
         .map(|i| char::from_digit(u32::try_from(i % 10).unwrap(), 10).unwrap())
         .collect();
+    let labels = two_letter_labels(&full);
+    let rows = sym_rows();
     let area = common::area_board();
     let c1 = ObjectId::new("c1").unwrap();
     let t1 = ObjectId::new("t1").unwrap();
@@ -704,34 +697,120 @@ fn overlay_frame_time() {
             ms(added)
         );
 
-        let mut renderer = Renderer::new_trusted();
         let vp = Viewport::new(kurbo::Point::ZERO, 1.0, width, height, scale);
-        let worst = |frame: usize| Overlay {
+        let selected = |frame: usize| Overlay {
             cursor: OverlayCursor::Grid(kurbo::Point::new(1.0, 1.0)),
             selection: &selection,
             visual: Some(kurbo::Rect::new(-30.0, -20.0, 30.0, 20.0)),
             status: StatusLine {
-                left: "",
+                left: "-- VISUAL --",
                 right: &line[frame % 100..],
                 error: false,
             },
-            command_line: Some((&line, (frame * 997) % MAX_COMMAND_LINE_CHARS)),
-            caret: None,
+            ..Overlay::default()
         };
-        let added = overlay_cost(&mut renderer, &full, &vp, worst);
+        let with_labels = |frame: usize| Overlay {
+            labels: Some((&labels, "")),
+            ..selected(frame)
+        };
+        let sym_line = |frame: usize| Overlay {
+            visual: None,
+            command_line: Some((&line, (frame * 997) % MAX_COMMAND_LINE_CHARS)),
+            completions: Some((&rows[frame % rows.len()], Some(frame % SYM_ROWS))),
+            ..selected(frame)
+        };
+        let both = |frame: usize| Overlay {
+            labels: Some((&labels, "")),
+            ..sym_line(frame)
+        };
+        let n = selection.len();
+        let mut renderer = Renderer::new_trusted();
+        let added = overlay_cost(&mut renderer, &full, &vp, with_labels);
         println!(
-            "{} selected rects {width}x{height} scale {scale}, longest command line: the overlay adds {:.2} ms",
-            selection.len(),
+            "{width}x{height} scale {scale}, {n} selected rects, {} jump labels: the overlay \
+             adds {:.2} ms",
+            labels.len(),
+            ms(added)
+        );
+        let mut worst = added;
+        let mut renderer = Renderer::new_trusted();
+        let added = overlay_cost(&mut renderer, &full, &vp, sym_line);
+        println!(
+            "{width}x{height} scale {scale}, {n} selected rects, longest command line, \
+             {SYM_ROWS} :sym rows: the overlay adds {:.2} ms",
+            ms(added)
+        );
+        worst = worst.max(added);
+        let mut renderer = Renderer::new_trusted();
+        let added = overlay_cost(&mut renderer, &full, &vp, both);
+        println!(
+            "{width}x{height} scale {scale}, both at once (never shown): the overlay adds \
+             {:.2} ms",
             ms(added)
         );
         if !cfg!(debug_assertions) {
-            assert!(added <= OVERLAY_TARGET, "{added:?}");
+            assert!(worst <= OVERLAY_TARGET, "{worst:?}");
         }
     }
 }
 
+/// A full board of rectangles nested just inside a view of 1920x1080 at zoom 1, each 0.05 units
+/// inside the one before, 50 deep, ten times over.
+fn nested_rects() -> lawh_core::Board {
+    use std::fmt::Write as _;
+
+    let mut src = String::from("lawh version=1\n");
+    for i in 0..lawh_core::board::MAX_OBJECTS {
+        let inset = (i % 50) as f64 * 0.05;
+        writeln!(
+            src,
+            "rect id=r{i} x={} y={} w={} h={}",
+            -20.0 + inset,
+            -10.0 + inset,
+            40.0 - 2.0 * inset,
+            20.0 - 2.0 * inset
+        )
+        .unwrap();
+    }
+    common::board(&src)
+}
+
+/// A two-letter jump label on every object of `board`, at points spread over the middle of the
+/// view (25 across, 2 units apart, and 20 down, a unit apart), so no label hides another's
+/// letters and every letter is drawn.
+fn two_letter_labels(board: &lawh_core::Board) -> Vec<lawh_core::engine::JumpLabel> {
+    let letters: Vec<char> = "asdfghjklqwertyuiopzxcvbnm".chars().collect();
+    let n = letters.len();
+    board
+        .objects()
+        .iter()
+        .enumerate()
+        .map(|(i, object)| lawh_core::engine::JumpLabel {
+            id: object.id.clone(),
+            at: kurbo::Point::new((i % 25) as f64 * 1.4 - 17.0, (i / 25 % 20) as f64 - 10.0),
+            text: [letters[i / n % n], letters[i % n]].iter().collect(),
+        })
+        .collect()
+}
+
+/// 64 sets of `:sym` rows, one for each frame in turn, with the longest names `:sym` lists and
+/// a symbol from the math font each.
+fn sym_rows() -> Vec<Vec<lawh_core::engine::Symbol>> {
+    (0..64)
+        .map(|frame| {
+            (0..lawh_core::engine::SYM_ROWS)
+                .map(|row| lawh_core::engine::Symbol {
+                    name: format!("{frame:02}{row}{}", "arrow.r.long.".repeat(5))[..64].to_owned(),
+                    value: "\u{2A01}".to_owned(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// The median time `render_with` takes over `render` on the same board and view, the overlay
-/// of each frame made by `overlay(frame)`.
+/// of each frame made by `overlay(frame)`. The two are timed by turns, a frame of each, so a
+/// change in the machine's speed during the run (clock, other work) falls on both alike.
 fn overlay_cost<'a>(
     renderer: &mut Renderer,
     board: &lawh_core::Board,
@@ -741,21 +820,17 @@ fn overlay_cost<'a>(
     for frame in 0..WARM_UP {
         black_box(renderer.render_with(board, vp, &overlay(frame)));
     }
-    let mut plain: Vec<Duration> = (0..FRAMES)
-        .map(|_| {
-            let t = Instant::now();
-            black_box(renderer.render(board, vp));
-            t.elapsed()
-        })
-        .collect();
-    let mut with: Vec<Duration> = (0..FRAMES)
-        .map(|frame| {
-            let overlay = overlay(frame);
-            let t = Instant::now();
-            black_box(renderer.render_with(board, vp, &overlay));
-            t.elapsed()
-        })
-        .collect();
+    let mut plain = Vec::with_capacity(FRAMES);
+    let mut with = Vec::with_capacity(FRAMES);
+    for frame in 0..FRAMES {
+        let t = Instant::now();
+        black_box(renderer.render(board, vp));
+        plain.push(t.elapsed());
+        let overlay = overlay(frame);
+        let t = Instant::now();
+        black_box(renderer.render_with(board, vp, &overlay));
+        with.push(t.elapsed());
+    }
     plain.sort();
     with.sort();
     with[FRAMES / 2].saturating_sub(plain[FRAMES / 2])

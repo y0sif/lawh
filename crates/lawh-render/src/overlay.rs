@@ -1,12 +1,14 @@
 //! What the window draws over the board while editing: the cursor, a Visual selection, the
-//! caret in a text block and the status bar. Plain data the app builds from the engine each
-//! frame and hands to [`Renderer::render_with`](crate::Renderer::render_with).
+//! caret in a text block, jump labels, `:sym` completions and the status bar. Plain data the
+//! app builds from the engine each frame and hands to
+//! [`Renderer::render_with`](crate::Renderer::render_with).
 //!
 //! Sizes of everything drawn for it are in logical pixels times the window's scale factor, not
 //! in grid units, so it stays readable at any zoom.
 
 use kurbo::{Point, Rect};
 use lawh_core::ObjectId;
+use lawh_core::engine::{JumpLabel, Symbol};
 
 use crate::viewport::MAX_SCALE_FACTOR;
 
@@ -22,7 +24,9 @@ pub(crate) const STATUS_FONT_PX: f64 = 13.0;
 pub struct Overlay<'a> {
     /// Where the board cursor is.
     pub cursor: OverlayCursor<'a>,
-    /// The objects of a Visual selection, each highlighted. Empty outside Visual mode.
+    /// The objects of a Visual selection, each highlighted (`Engine::selection`). Empty outside
+    /// Visual mode, but for a command line opened from Visual mode, which keeps the selection
+    /// the command will act on (`:si 2`) while it is open.
     pub selection: &'a [ObjectId],
     /// The Visual rectangle in grid units, drawn as a see-through fill and its edge.
     pub visual: Option<Rect>,
@@ -34,6 +38,17 @@ pub struct Overlay<'a> {
     /// The command line, while it is open: the text after `:` and the cursor as a byte offset
     /// in it. Shown in place of [`StatusLine::left`].
     pub command_line: Option<(&'a str, usize)>,
+    /// Jump labels, while `s` waits for one (`Engine::jump_labels`): every label, nearest
+    /// object first, and the characters of a label typed so far. Only the labels that start
+    /// with those are drawn: each a small box centred on its object's anchor (kept inside the
+    /// window, above the status bar) with the label in it, the typed characters dimmer than the
+    /// ones left to type. Nearer labels are drawn over farther ones.
+    pub labels: Option<(&'a [JumpLabel], &'a str)>,
+    /// `:sym` completions, while a `:sym` line is open (`Engine::completions`): the matching
+    /// symbols, best first, and the selected one. Drawn above the status bar, best at the top,
+    /// at most `lawh_core::engine::SYM_ROWS` of them, each its name and its value, the selected
+    /// one highlighted.
+    pub completions: Option<(&'a [Symbol], Option<usize>)>,
 }
 
 /// Where the board cursor is, for [`Overlay::cursor`].

@@ -9,7 +9,8 @@
 //! prove it against the real goldens.
 //!
 //! The `overlay_*` goldens are window frames ([`Renderer::render_with`]) with the cursor, a
-//! Visual selection, a caret or the status bar drawn over the area board.
+//! Visual selection, a caret, jump labels, `:sym` completions or the status bar drawn over the
+//! area board. The `sizes` golden is text and math at sizes 0.5, 1, 2 and 4.
 //!
 //! `LAWH_UPDATE_GOLDEN=1 cargo test -p lawh-render --test golden` rewrites
 //! the images. Look at every rewritten image before committing it.
@@ -23,6 +24,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 
 use kurbo::{Point, Rect};
+use lawh_core::engine::{JumpLabel, Symbol, anchor};
 use lawh_core::{Board, ObjectId};
 use lawh_render::{Caret, Overlay, OverlayCursor, Renderer, StatusLine, Viewport};
 use vello_cpu::Pixmap;
@@ -351,4 +353,118 @@ fn overlay_error_message() {
         ..Overlay::default()
     };
     check_golden("overlay_error", &overlay_png(None, &overlay));
+}
+
+/// Text and math at sizes 0.5, 1, 2 and 4, each formula beside a text at the same `y`: the
+/// formula's baseline on the text's, its `x` as tall as the text's.
+#[test]
+fn text_and_math_at_four_sizes() {
+    let board = common::board(
+        "lawh version=1\n\
+         text id=t1 x=0 y=0 size=0.5 \"Size 0.5: x\"\n\
+         math id=m1 x=2.5 y=0 size=0.5 \"x = pi r^2\"\n\
+         text id=t2 x=0 y=1 \"Size 1: x\"\n\
+         math id=m2 x=3 y=1 \"x = pi r^2\"\n\
+         text id=t3 x=0 y=2.5 size=2 \"Size 2: x\"\n\
+         math id=m3 x=5.5 y=2.5 size=2 \"x = pi r^2\"\n\
+         text id=t4 x=0 y=5 size=4 \"Size 4: x\"\n\
+         math id=m4 x=10.5 y=5 size=4 \"x^2\"\n",
+    );
+    let mut renderer = Renderer::new_trusted();
+    renderer.resolve_math(&board);
+    let bounds = renderer.board_bounds(&board).unwrap();
+    let vp = Viewport::fit(bounds, 800, 600, 1.0);
+    check_golden("sizes", &renderer.render_png(&board, &vp).unwrap());
+}
+
+/// A label on each object of the area board but the current one (`t2`), in the order the
+/// engine gives them (nearest the cursor first), as `texts` gives them out.
+fn area_labels(texts: &[&str]) -> Vec<JumpLabel> {
+    let board = common::area_board();
+    let order = ["l1", "c1", "m1", "t1"];
+    order
+        .iter()
+        .zip(texts)
+        .map(|(name, text)| {
+            let object = board.get(&id(name)).unwrap();
+            JumpLabel {
+                id: object.id.clone(),
+                at: anchor(&object.shape),
+                text: (*text).to_owned(),
+            }
+        })
+        .collect()
+}
+
+/// Labels with nothing typed: one-letter labels for the two nearest objects, two-letter for the
+/// rest. The view leaves the circle's centre and the title's corner off its left edge, so their
+/// labels are kept inside the window; the line starts where the circle's centre is, so its
+/// label (nearer) covers the circle's.
+#[test]
+fn overlay_jump_labels() {
+    let t2 = id("t2");
+    let labels = area_labels(&["a", "s", "df", "dg"]);
+    let overlay = Overlay {
+        cursor: OverlayCursor::Object(&t2),
+        labels: Some((&labels, "")),
+        status: StatusLine {
+            left: "NORMAL",
+            right: "s  area.lawh  1,-1",
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    let vp = Viewport::new(Point::new(7.0, -0.5), 1.5, 800, 600, 1.0);
+    check_golden("overlay_labels", &overlay_png(Some(vp), &overlay));
+}
+
+/// The same labels after `d` was typed: only the two that start with it, their `d` dimmer.
+#[test]
+fn overlay_jump_labels_with_a_typed_character() {
+    let t2 = id("t2");
+    let labels = area_labels(&["a", "s", "df", "dg"]);
+    let overlay = Overlay {
+        cursor: OverlayCursor::Object(&t2),
+        labels: Some((&labels, "d")),
+        status: StatusLine {
+            left: "NORMAL",
+            right: "sd  area.lawh  1,-1",
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    check_golden("overlay_labels_typed", &overlay_png(None, &overlay));
+}
+
+/// `:sym plus` with its rows above the status bar, the second selected (`<Tab>` put its name
+/// on the line); `⨁`, `∔` and `⊞` come from Libertinus Math, which the status font falls back
+/// to, the others from Inter.
+#[test]
+fn overlay_sym_completions() {
+    let rows: Vec<Symbol> = [
+        ("plus", "+"),
+        ("plus.circle", "\u{2295}"),
+        ("plus.circle.big", "\u{2A01}"),
+        ("plus.dot", "\u{2214}"),
+        ("plus.minus", "\u{B1}"),
+        ("plus.square", "\u{229E}"),
+    ]
+    .iter()
+    .map(|(name, value)| Symbol {
+        name: (*name).to_owned(),
+        value: (*value).to_owned(),
+    })
+    .collect();
+    let overlay = Overlay {
+        cursor: OverlayCursor::Grid(Point::new(-4.0, -3.0)),
+        command_line: Some(("sym plus.circle", 15)),
+        completions: Some((&rows, Some(1))),
+        status: StatusLine {
+            left: "",
+            right: "area.lawh  -4,-3",
+            error: false,
+        },
+        ..Overlay::default()
+    };
+    check_golden("overlay_completions", &overlay_png(None, &overlay));
 }

@@ -15,13 +15,15 @@ use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use kurbo::{Affine, BezPath, Circle, Point, Rect, Shape as _};
-use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES};
+use lawh_core::board::{
+    DEFAULT_TEXT_SIZE, MAX_BOARD_TEXT_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES,
+    MAX_TEXT_SIZE,
+};
 use lawh_core::{Board, Object, ObjectId, Shape};
 use lawh_math::{MathEngine, MathGlyph, MathItem, MathLayout};
 
 use super::{
-    INK, MATH_SCALE, MathWait, Renderer, layout_bounds, math_to_board, text_box, text_cost,
-    text_view,
+    INK, MATH_SCALE, MathWait, Renderer, UNITS_PER_PT, layout_box, text_box, text_cost, text_view,
 };
 use crate::budget::{self, Budget};
 use crate::glyphs::{GlyphStats, GlyphTable};
@@ -107,19 +109,32 @@ fn empty_frame(renderer: &mut Renderer, vp: &Viewport) -> Duration {
     })
 }
 
-/// Adds the estimate and the measured time, past an empty frame, of drawing `layout` at the
-/// board origin through `vp`.
+/// The size math is drawn at here: one pt of a layout is [`UNITS_PER_PT`], so through
+/// [`pixel_viewport`] it is `scale` pixels.
+const CAL_SIZE: f64 = 1.0 / MATH_SCALE;
+
+/// Where a formula of size [`CAL_SIZE`] goes for the top-left corner of its `layout` (pt 0, 0)
+/// to land on the board origin: the renderer moves a formula to put its baseline on the text
+/// baseline.
+fn placed_at(renderer: &Renderer, layout: &MathLayout) -> Point {
+    let origin = renderer.math_to_board(Point::ZERO, CAL_SIZE, layout.baseline) * Point::ZERO;
+    Point::new(-origin.x, -origin.y)
+}
+
+/// Adds the estimate and the measured time, past an empty frame, of drawing `layout` with its
+/// top-left corner at the board origin through `vp`.
 fn row(renderer: &mut Renderer, rows: &mut Rows, name: &str, layout: &MathLayout, vp: &Viewport) {
     let clip = draw::clip_rect(vp);
+    let at = placed_at(renderer, layout);
     let estimate = renderer
-        .math_cost(Point::ZERO, layout, vp, clip, f64::INFINITY)
+        .math_cost(at, CAL_SIZE, layout, vp, clip, f64::INFINITY)
         .ns
         / 1e6;
     let empty = empty_frame(renderer, vp);
     let took = median(5, || {
         renderer.begin_frame(vp);
         let mut budget = Budget::unlimited();
-        assert!(renderer.draw_math(Point::ZERO, layout, vp, clip, &mut budget));
+        assert!(renderer.draw_math(at, CAL_SIZE, layout, vp, clip, &mut budget));
         black_box(renderer.finish_frame());
     });
     rows.add(name, estimate, ms(took.saturating_sub(empty)));
@@ -134,8 +149,8 @@ fn ms(d: Duration) -> f64 {
 fn pixel_viewport(width: u16, height: u16, scale: f64) -> Viewport {
     Viewport::new(
         Point::new(
-            f64::from(width) / 2.0 / scale * MATH_SCALE,
-            f64::from(height) / 2.0 / scale * MATH_SCALE,
+            f64::from(width) / 2.0 / scale * UNITS_PER_PT,
+            f64::from(height) / 2.0 / scale * UNITS_PER_PT,
         ),
         1.0,
         width,
@@ -377,11 +392,12 @@ fn calibrate_estimating() {
         ("elements on screen", paths(vec![on], Some(BLACK), None)),
         ("elements off screen", paths(vec![off], Some(BLACK), None)),
     ] {
+        let at = placed_at(&renderer, &layout);
         let examined = renderer
-            .math_cost(Point::ZERO, &layout, &vp, clip, f64::INFINITY)
+            .math_cost(at, CAL_SIZE, &layout, &vp, clip, f64::INFINITY)
             .examined();
         let took = median(9, || {
-            black_box(renderer.math_cost(Point::ZERO, &layout, &vp, clip, f64::INFINITY));
+            black_box(renderer.math_cost(at, CAL_SIZE, &layout, &vp, clip, f64::INFINITY));
         });
         rows.add(&format!("estimating {n} {name}"), examined / 1e6, ms(took));
     }
@@ -394,7 +410,7 @@ fn calibrate_estimating() {
         let key = renderer.text.key(&text);
         renderer.text.lay_out(key, &text, &mut renderer.glyphs);
         let vp = Viewport::new(Point::new(5.0, 5.0), 0.3, 1920, 1080, 1.0);
-        let view = text_view(Point::ZERO, &vp, clip).unwrap();
+        let view = text_view(Point::ZERO, DEFAULT_TEXT_SIZE, &vp, clip).unwrap();
         let plan = &renderer.text.shaped(key, &text).unwrap().plan;
         let lines = view.lines(plan);
         let chunks = plan.chunks(lines.clone()).len();
@@ -459,7 +475,9 @@ fn calibrate_formulas() {
             .to_owned(),
     ] {
         let layout = math.layout(&src).unwrap();
-        let bounds = math_to_board(Point::ZERO).transform_rect_bbox(layout_bounds(&layout));
+        let bounds = renderer
+            .math_to_board(placed_at(&renderer, &layout), CAL_SIZE, layout.baseline)
+            .transform_rect_bbox(layout_box(&layout).bounds);
         let short: String = src.chars().take(48).collect();
         for (width, height, scale) in [(1920, 1080, 1.0), (2560, 1600, 2.0), (2880, 1800, 2.0)] {
             let fit = Viewport::fit(bounds, width, height, scale);
@@ -764,11 +782,12 @@ fn picked(name: &str) -> bool {
     kinds.is_empty() || kinds.split(',').any(|k| name.starts_with(k))
 }
 
-/// Drawing text: one text of each kind and shape at the cap, then boards of each kind at the
-/// text caps (the bench's worst text boards), at the views the bench uses. One text is drawn
-/// with `draw_text` and an unlimited budget, against `text_cost`; a board is drawn as an export
-/// frame (nothing over its budget) once its text is laid out, against the frame's estimate.
-/// `LAWH_CAL_KINDS` picks kinds (and boards, by their name) by prefix.
+/// Drawing text: one text of each kind and shape at the cap, at the default size and the
+/// largest, then boards of each kind at the text caps (the bench's worst text boards), at the
+/// views the bench uses. One text is drawn with `draw_text` and an unlimited budget, against
+/// `text_cost`; a board is drawn as an export frame (nothing over its budget) once its text is
+/// laid out, against the frame's estimate. `LAWH_CAL_KINDS` picks kinds (and boards, by their
+/// name) by prefix.
 #[test]
 #[ignore = "timing only; run in release with --ignored --nocapture"]
 fn calibrate_text_drawing() {
@@ -785,29 +804,40 @@ fn calibrate_text_drawing() {
             let text = cycled(0, MAX_TEXT_CHARS, per_line, alphabet);
             let key = renderer.text.key(&text);
             let (w, h) = renderer.text.lay_out(key, &text, &mut renderer.glyphs);
-            let bounds = text_box(Point::ZERO, w, h);
             for (width, height, scale) in SCREENS {
-                for (label, vp) in text_views(bounds, width, height, scale) {
-                    let clip = draw::clip_rect(&vp);
-                    let Some(view) = text_view(Point::ZERO, &vp, clip) else {
-                        continue;
-                    };
-                    let plan = &renderer.text.shaped(key, &text).unwrap().plan;
-                    let (cost, _) =
-                        text_cost(plan, view.lines(plan), &view, &vp, clip, f64::INFINITY);
-                    let estimate = cost.ns / 1e6;
-                    let empty = empty_frame(&mut renderer, &vp);
-                    let took = median(5, || {
-                        renderer.begin_frame(&vp);
-                        let mut budget = Budget::unlimited();
-                        renderer.draw_text(Point::ZERO, key, &text, INK, &vp, clip, &mut budget);
-                        black_box(renderer.finish_frame());
-                    });
-                    rows.add(
-                        &format!("{width}x{height} {label} {kind}, {shape}"),
-                        estimate,
-                        ms(took.saturating_sub(empty)),
-                    );
+                for size in [DEFAULT_TEXT_SIZE, MAX_TEXT_SIZE] {
+                    let bounds = text_box(Point::ZERO, size, w, h);
+                    for (label, vp) in text_views(bounds, width, height, scale) {
+                        let clip = draw::clip_rect(&vp);
+                        let Some(view) = text_view(Point::ZERO, size, &vp, clip) else {
+                            continue;
+                        };
+                        let plan = &renderer.text.shaped(key, &text).unwrap().plan;
+                        let (cost, _) =
+                            text_cost(plan, view.lines(plan), &view, &vp, clip, f64::INFINITY);
+                        let estimate = cost.ns / 1e6;
+                        let empty = empty_frame(&mut renderer, &vp);
+                        let took = median(5, || {
+                            renderer.begin_frame(&vp);
+                            let mut budget = Budget::unlimited();
+                            renderer.draw_text(
+                                Point::ZERO,
+                                size,
+                                key,
+                                &text,
+                                INK,
+                                &vp,
+                                clip,
+                                &mut budget,
+                            );
+                            black_box(renderer.finish_frame());
+                        });
+                        rows.add(
+                            &format!("{width}x{height} {label} size {size} {kind}, {shape}"),
+                            estimate,
+                            ms(took.saturating_sub(empty)),
+                        );
+                    }
                 }
             }
         }
@@ -853,7 +883,7 @@ fn text_boards() -> Vec<(String, Board)> {
                     Shape::Text {
                         at: Point::ZERO,
                         text,
-                        size: lawh_core::board::DEFAULT_TEXT_SIZE,
+                        size: DEFAULT_TEXT_SIZE,
                     },
                 ))
                 .unwrap();

@@ -19,8 +19,14 @@
 //! cost to draw, so a frame estimates a text without walking its layout.
 //!
 //! While editing, [`Renderer::render_with`] draws an [`Overlay`] over the board: the cursor, a
-//! Visual selection, the caret in a text block and the status bar. The renderer also measures
-//! objects for the engine (`lawh_core::engine::Measure`), as it draws them.
+//! Visual selection, the caret in a text block, jump labels, `:sym` completions and the status
+//! bar. The renderer also measures objects for the engine (`lawh_core::engine::Measure`), as it
+//! draws them, sizes included.
+//!
+//! Text and math have a size (`lawh_core::board::MIN_TEXT_SIZE` to `MAX_TEXT_SIZE`), a
+//! multiple of [`TEXT_SIZE_UNITS`]. Math is drawn about 1.27 times as large as text of the
+//! same size, so the two have the same x-height (Libertinus Math's is smaller than Inter's), and
+//! a formula's first baseline sits on the baseline of a text at the same `y`.
 //!
 //! Board coordinates are grid units with y down. At zoom 1 and scale factor 1
 //! one unit is [`BASE_PX_PER_UNIT`] pixels.
@@ -44,5 +50,7 @@ pub use viewport::Viewport;
 /// Pixels per grid unit at zoom 1 and scale factor 1.
 pub const BASE_PX_PER_UNIT: f64 = 40.0;
 
-/// Em size of text and math, in grid units.
+/// Em size of text and math of size 1, in grid units. Text of size `s` has an em `s` times as
+/// large; math of size `s` is laid out at the same em and drawn about 1.27 times larger still,
+/// to match the text's x-height.
 pub const TEXT_SIZE_UNITS: f64 = 0.5;

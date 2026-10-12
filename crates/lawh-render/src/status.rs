@@ -1,5 +1,6 @@
-//! The status bar's text: the part of each string that is shown, and its layouts, cached by
-//! content.
+//! The status bar's text and the `:sym` rows above it: the part of each string that is shown,
+//! and its layouts, cached by content. They are laid out in the text font with the math font as
+//! a fallback (`crate::text::TextShaper::build_status`), so symbols show.
 //!
 //! A status string can be long: the command line holds up to
 //! `lawh_core::engine::MAX_COMMAND_LINE_CHARS` characters, and a message can name anything.
@@ -18,8 +19,11 @@ use crate::text::TextShaper;
 pub(crate) const STATUS_WINDOW_CHARS: usize = 256;
 
 /// Status strings kept laid out: the left and right of the status line and the command line,
-/// with room for the ones shown a moment ago.
-const STATUS_CACHE_ENTRIES: usize = 8;
+/// the name and the value of each of `lawh_core::engine::SYM_ROWS` (8) `:sym` rows, 19 in one
+/// frame, with room for as many shown a moment ago (the rows before the last key typed). A
+/// frame looks each string up by comparing it with every entry, about 600 comparisons of short
+/// strings at most: far less than laying one out.
+pub(crate) const STATUS_CACHE_ENTRIES: usize = 40;
 
 /// Shown where a status string is cut.
 const ELLIPSIS: char = '\u{2026}';
@@ -121,7 +125,7 @@ impl StatusText {
         self.built += 1;
         let entry = Entry {
             text: text.to_owned(),
-            layout: shaper.build(text),
+            layout: shaper.build_status(text),
             last_used: self.tick,
         };
         if self.entries.len() < STATUS_CACHE_ENTRIES {

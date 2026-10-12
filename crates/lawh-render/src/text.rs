@@ -11,6 +11,7 @@
 //! recently used entries. Nothing is dropped at the end of a frame, so a frame that draws nothing
 //! doesn't cost the next one its layouts.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::{BuildHasher, BuildHasherDefault, Hasher, RandomState};
 use std::ops::Range;
@@ -665,12 +666,15 @@ impl Entry {
     }
 }
 
-/// Lays out text with the bundled text font (`lawh_math::fonts()[0]`) only,
-/// and caches what it laid out (see the module docs).
+/// Lays out board text with the bundled text font (`lawh_math::fonts()[0]`) only,
+/// and caches what it laid out (see the module docs). Status strings ([`Self::build_status`])
+/// fall back to the bundled math font for characters the text font lacks.
 pub(crate) struct TextShaper {
     fonts: FontContext,
     layouts: LayoutContext<()>,
     family: &'static str,
+    /// The families of status strings: the text font, then every other bundled font.
+    status_families: Vec<FontFamilyName<'static>>,
     hasher: RandomState,
     cache: KeyMap<Entry>,
     /// Estimated bytes of everything in `cache`.
@@ -682,6 +686,8 @@ pub(crate) struct TextShaper {
     /// text not laid out yet is estimated from them.
     line_height: f32,
     max_advance: f32,
+    /// How far below the top of its box a one-line text's baseline is, in layout units.
+    baseline: f32,
     /// Texts hashed and laid out since this shaper was made, for logs and tests.
     pub(crate) hashed: u64,
     pub(crate) built: u64,
@@ -701,17 +707,30 @@ impl TextShaper {
             }),
             source_cache: SourceCache::default(),
         };
-        let asset = lawh_math::fonts().first();
-        if let Some(asset) = asset {
+        // Every bundled font is registered, but board text names only the text font, and the
+        // collection has no fallback families (no system fonts): board text never falls back to
+        // another font, so its glyphs are all Inter's (`Plan` looks their outlines up there).
+        // Status strings name the math font after it, for the symbols `:sym` lists.
+        for asset in lawh_math::fonts() {
             let families = fonts
                 .collection
                 .register_fonts(Blob::new(Arc::new(asset.data)), None);
             if families.is_empty() {
-                tracing::warn!(family = asset.family, "bundled text font failed to load");
+                tracing::warn!(family = asset.family, "bundled font failed to load");
             }
-        } else {
+        }
+        let asset = lawh_math::fonts().first();
+        if asset.is_none() {
             tracing::warn!("no bundled text font");
         }
+        let family = asset.map_or(FALLBACK_FAMILY, |asset| asset.family);
+        let mut status_families = vec![FontFamilyName::named(family)];
+        status_families.extend(
+            lawh_math::fonts()
+                .iter()
+                .filter(|other| other.family != family)
+                .map(|other| FontFamilyName::named(other.family)),
+        );
         let max_advance = asset
             .and_then(|asset| ttf_parser::Face::parse(asset.data, asset.index).ok())
             .map_or(LAYOUT_EM * 2.0, |face| {
@@ -724,7 +743,8 @@ impl TextShaper {
         let mut shaper = Self {
             fonts,
             layouts: LayoutContext::new(),
-            family: asset.map_or(FALLBACK_FAMILY, |asset| asset.family),
+            family,
+            status_families,
             hasher: RandomState::new(),
             cache: KeyMap::default(),
             bytes: 0,
@@ -732,12 +752,18 @@ impl TextShaper {
             tick: 0,
             line_height: LAYOUT_EM * 1.5,
             max_advance,
+            baseline: LAYOUT_EM,
             hashed: 0,
             built: 0,
         };
-        let line = shaper.build("x").height();
+        let x = shaper.build("x");
+        let line = x.height();
         if line.is_finite() && line > 0.0 {
             shaper.line_height = line;
+        }
+        let baseline = x.lines().next().map(|line| line.metrics().baseline);
+        if let Some(baseline) = baseline.filter(|v| v.is_finite() && *v > 0.0) {
+            shaper.baseline = baseline;
         }
         shaper
     }
@@ -814,6 +840,12 @@ impl TextShaper {
         self.line_height
     }
 
+    /// How far below the top of its box the baseline of a text's first line is, in layout
+    /// units: the text font's ascender (0.97 em for Inter).
+    pub(crate) fn baseline(&self) -> f32 {
+        self.baseline
+    }
+
     /// Estimated bytes of everything cached.
     #[cfg(test)]
     pub(crate) fn bytes(&self) -> usize {
@@ -885,16 +917,28 @@ impl TextShaper {
         );
     }
 
-    /// Lays `text` out as board text is laid out, without caching it: for status strings, which
-    /// have their own cache (`crate::status`).
+    /// Lays `text` out as board text is laid out, without caching it, in the text font only.
     pub(crate) fn build(&mut self, text: &str) -> Layout<()> {
+        let family = FontFamily::Single(FontFamilyName::named(self.family));
+        self.build_in(text, family)
+    }
+
+    /// Lays a status string out, without caching it (`crate::status` has its own cache): as
+    /// board text, but characters the text font lacks fall back to the math font, so `:sym`
+    /// rows show symbols such as `⨁` and `⟶`.
+    pub(crate) fn build_status(&mut self, text: &str) -> Layout<()> {
+        let families = std::mem::take(&mut self.status_families);
+        let layout = self.build_in(text, FontFamily::List(Cow::Borrowed(&families)));
+        self.status_families = families;
+        layout
+    }
+
+    fn build_in(&mut self, text: &str, family: FontFamily<'_>) -> Layout<()> {
         // No quantizing: positions stay fractional so text scales smoothly.
         let mut builder = self
             .layouts
             .ranged_builder(&mut self.fonts, text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily(FontFamily::Single(
-            FontFamilyName::named(self.family),
-        )));
+        builder.push_default(StyleProperty::FontFamily(family));
         builder.push_default(StyleProperty::FontSize(LAYOUT_EM));
         builder.push_default(FontFeatures::from(&FEATURES_OFF));
         let mut layout = builder.build(text);
@@ -1112,6 +1156,44 @@ mod tests {
         // Without a right-to-left character, brackets split nothing.
         assert_eq!(Facts::of("f(g(x)) [a] {b} \u{6F22}(c)").brackets, 0);
         assert_eq!(Facts::of("f(x) \u{5D0}").brackets, 2);
+    }
+
+    /// The bundled font each glyph run of `layout` is drawn from, by index into
+    /// `lawh_math::fonts`.
+    fn run_fonts(layout: &Layout<()>) -> Vec<usize> {
+        let mut fonts = Vec::new();
+        for line in layout.lines() {
+            for item in line.items() {
+                if let PositionedLayoutItem::GlyphRun(run) = item {
+                    let data = run.run().font().data.data().as_ptr();
+                    fonts.push(
+                        lawh_math::fonts()
+                            .iter()
+                            .position(|asset| std::ptr::eq(asset.data.as_ptr(), data))
+                            .unwrap(),
+                    );
+                }
+            }
+        }
+        fonts
+    }
+
+    /// Board text is drawn in the text font only, as the frame budget assumes; status strings
+    /// fall back to the math font for symbols the text font lacks.
+    #[test]
+    fn only_status_strings_fall_back_to_the_math_font() {
+        // U+2A01 N-ARY CIRCLED PLUS OPERATOR: in Libertinus Math, not in Inter.
+        let table = GlyphTable::new();
+        assert!(table.char_glyph(0, '\u{2A01}').is_none());
+        assert!(table.char_glyph(1, '\u{2A01}').is_some());
+        let mut shaper = TextShaper::new();
+        let text = "plus.circle.big \u{2A01}";
+        // The symbol is Inter's missing-glyph box on the board.
+        assert!(run_fonts(&shaper.build(text)).iter().all(|font| *font == 0));
+        assert_eq!(run_fonts(&shaper.build_status(text)), [0, 1]);
+        // Inter has Greek (a run of its own, a script of its own): no fallback.
+        let greek = run_fonts(&shaper.build_status("alpha \u{3B1}"));
+        assert!(!greek.is_empty() && greek.iter().all(|font| *font == 0));
     }
 
     #[test]

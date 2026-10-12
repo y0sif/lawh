@@ -385,6 +385,100 @@ fn the_renderer_measures_objects_as_object_bounds_does() {
     assert_ne!(Measure::bounds(&mut renderer, t1), Some(fixed));
 }
 
+/// A text or (`math`) a formula `name` holding `content` at `at`, of size `size`.
+fn sized(name: &str, at: Point, content: &str, size: f64, math: bool) -> Object {
+    let shape = if math {
+        Shape::Math {
+            at,
+            src: content.to_owned(),
+            size,
+        }
+    } else {
+        Shape::Text {
+            at,
+            text: content.to_owned(),
+            size,
+        }
+    };
+    Object::new(id(name), shape)
+}
+
+/// `rect` scaled by `size` about `at`.
+fn scaled(rect: Rect, at: Point, size: f64) -> Rect {
+    Rect::new(
+        at.x + (rect.x0 - at.x) * size,
+        at.y + (rect.y0 - at.y) * size,
+        at.x + (rect.x1 - at.x) * size,
+        at.y + (rect.y1 - at.y) * size,
+    )
+}
+
+fn near_rect(a: Rect, b: Rect) -> bool {
+    near(a.x0, b.x0) && near(a.y0, b.y0) && near(a.x1, b.x1) && near(a.y1, b.y1)
+}
+
+#[test]
+fn the_caret_and_clicks_follow_the_size() {
+    let mut renderer = Renderer::new_trusted();
+    for math in [false, true] {
+        let one = board_of([sized("b1", AT, "hello world", 1.0, math)]);
+        let at_one = renderer.caret_rect(&one, &id("b1"), 5).unwrap();
+        let block_bounds = renderer.object_bounds(&one.objects()[0]).unwrap();
+        for size in [0.5, 2.0, 4.0] {
+            let board = board_of([sized("b1", AT, "hello world", size, math)]);
+            // A formula with the caret in it is drawn as its source, at its size.
+            let caret = renderer.caret_rect(&board, &id("b1"), 5).unwrap();
+            assert!(
+                near_rect(caret, scaled(at_one, AT, size)),
+                "size {size} (math: {math}): {caret:?}, at size 1 {at_one:?}"
+            );
+            // A click near the far corner of the sized block hits it; at size 1 that is past it.
+            let corner = scaled(block_bounds, AT, size);
+            let click = Point::new(
+                AT.x + (corner.x1 - AT.x) * 0.95,
+                AT.y + (corner.y1 - AT.y) * 0.95,
+            );
+            assert_eq!(renderer.hit_test(&board, click, 0.0), Some(id("b1")));
+            if size > 1.0 {
+                assert_eq!(renderer.hit_test(&one, click, 0.0), None, "size {size}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_engine_measures_text_and_math_by_their_size_and_the_math_scale() {
+    let src = "A = pi r^2";
+    let mut renderer = Renderer::new_trusted();
+    let layout = lawh_math::MathEngine::new().layout_blocking(src).unwrap();
+    // What the formula covers in pt: its box joined with its ink.
+    let pt = Rect::new(0.0, 0.0, layout.width, layout.height).union(layout.ink);
+    for size in [0.25, 0.5, 1.0, 2.0, 4.0, 16.0] {
+        let text = sized("t1", AT, src, size, false);
+        let math = sized("m1", AT, src, size, true);
+        let board = board_of([text.clone(), math.clone()]);
+        renderer.resolve_math(&board);
+        let text_one = renderer
+            .object_bounds(&sized("t1", AT, src, 1.0, false))
+            .unwrap();
+        let measured = Measure::bounds(&mut renderer, &text).unwrap();
+        assert!(
+            near_rect(measured, scaled(text_one, AT, size)),
+            "size {size}"
+        );
+        // Math is drawn about 1.27 times as large as text of its size (a pt is 1/40 of a
+        // grid unit at size 1 before that), so its x-height matches the text's.
+        let measured = Measure::bounds(&mut renderer, &math).unwrap();
+        let per_pt = measured.width() / pt.width() / size;
+        assert!(
+            (per_pt * 40.0 - 1.2725).abs() < 1e-9,
+            "size {size}: {per_pt} units a pt"
+        );
+        assert!(near(measured.height() / pt.height() / size, per_pt));
+        assert!(near(measured.x0, AT.x), "size {size}: {measured:?}");
+    }
+}
+
 #[test]
 fn the_overlay_leaves_the_board_as_render_draws_it_above_the_status_bar() {
     let board = common::area_board();

@@ -90,6 +90,36 @@ impl GlyphTable {
         stats
     }
 
+    /// The glyph of font `font` (an index into [`lawh_math::fonts`]) for `c`, from the font's
+    /// character map, and its advance in ems: for a character drawn on its own, without
+    /// shaping (jump labels). `None` when the font has no glyph for it.
+    pub(crate) fn char_glyph(&self, font: usize, c: char) -> Option<(u32, f64)> {
+        let table = self.fonts.get(font)?;
+        let face = table.face.as_ref()?;
+        let id = face.glyph_index(c)?;
+        let advance = face.glyph_hor_advance(id).map_or(0.0, f64::from) / table.units_per_em;
+        Some((u32::from(id.0), advance))
+    }
+
+    /// The missing-glyph box of font `font` (glyph 0) and its advance in ems.
+    pub(crate) fn missing_glyph(&self, font: usize) -> (u32, f64) {
+        let advance = self.fonts.get(font).and_then(|table| {
+            let face = table.face.as_ref()?;
+            let advance = face.glyph_hor_advance(GlyphId(0))?;
+            Some(f64::from(advance) / table.units_per_em)
+        });
+        (0, advance.unwrap_or(0.5))
+    }
+
+    /// The cap height and the x-height of font `font`, in ems, from its OS/2 table; `None`
+    /// when it has none.
+    pub(crate) fn heights(&self, font: usize) -> Option<(f64, f64)> {
+        let table = self.fonts.get(font)?;
+        let face = table.face.as_ref()?;
+        let em = |v: i16| f64::from(v) / table.units_per_em;
+        Some((em(face.capital_height()?), em(face.x_height()?)))
+    }
+
     /// The glyph of each font that scores highest `by`, as `(font, id)`, for calibration.
     #[cfg(test)]
     pub(crate) fn most_complex(&mut self, by: impl Fn(&GlyphStats) -> f64) -> Vec<(usize, u32)> {

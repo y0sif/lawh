@@ -42,7 +42,8 @@ pub(crate) const OUTLINE_BUDGET_NS: f64 = 3e6;
 /// board and isn't charged to it. A highlight is an outline around an object's bounds, so a
 /// full board selected with every object crossing the screen would take tens of milliseconds;
 /// past this, the rest of the selection isn't highlighted (the Visual rectangle still shows
-/// it). The same as the outlines' budget.
+/// it). The same as the outlines' budget. Jump labels shown with the selection (`s` in Visual
+/// mode) are always drawn in full, and their estimated cost comes out of this first.
 pub(crate) const HIGHLIGHT_BUDGET_NS: f64 = 3e6;
 
 /// What an export may spend drawing objects. Exports don't need to be interactive, so this is

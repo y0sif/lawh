@@ -1,5 +1,6 @@
 //! What the window draws over the board while editing ([`Renderer::render_with`]): the cursor,
-//! a Visual selection, the caret and the status bar. With the queries the app makes of the same
+//! a Visual selection, the caret and the status bar, and (in their own modules) jump labels
+//! and `:sym` completions. With the queries the app makes of the same
 //! geometry: [`Renderer::caret_rect`], [`Renderer::hit_test`] and [`Measure`].
 
 use std::collections::HashSet;
@@ -38,10 +39,11 @@ const SELECTED_LINE_PX: f64 = 1.5;
 const VISUAL_LINE_PX: f64 = 1.0;
 /// Width of the caret bar, in a text block in Insert mode and on the command line.
 const CARET_PX: f64 = 2.0;
-/// Space between the status bar's ends and its text, and between its left and right text.
-const STATUS_PAD_PX: f64 = 8.0;
-/// Height of the line along the status bar's top.
-const STATUS_EDGE_PX: f64 = 1.0;
+/// Space between the status bar's ends and its text, and between its left and right text. The
+/// `:sym` rows above it start their names as far in.
+pub(super) const STATUS_PAD_PX: f64 = 8.0;
+/// Height of the line along the status bar's top, and of the edges of the `:sym` rows' panel.
+pub(super) const STATUS_EDGE_PX: f64 = 1.0;
 
 /// Width of the block caret where there is no character to cover (an empty line, the end of a
 /// text), in ems.
@@ -49,21 +51,27 @@ const EMPTY_BLOCK_EM: f64 = 0.5;
 
 impl Renderer {
     /// Draws `board` through `vp` as [`Self::render`] does, then `overlay` over it: the cursor,
-    /// a Visual selection, the caret in a text block and the status bar along the bottom (see
-    /// [`Overlay`]). A math block with the caret in it is drawn as its source in the board's
-    /// text style, without asking the math engine for it; once the caret leaves, the formula is
-    /// asked for and drawn again.
+    /// a Visual selection, the caret in a text block, jump labels, `:sym` completions and the
+    /// status bar along the bottom (see [`Overlay`]). A math block with the caret in it is drawn
+    /// as its source in the board's text style, at its size, without asking the math engine for
+    /// it; once the caret leaves, the formula is asked for and drawn again.
     ///
     /// Cost: the overlay is drawn after the board's budgeted work, and isn't charged to the
     /// frame's budget or counted in [`FrameStats`](crate::FrameStats). Its cost is bounded by
-    /// the image, not the board: a few outlines and fills cut to the image, a caret, and at most
-    /// two status strings of `STATUS_WINDOW_CHARS` characters, laid out only when they change.
-    /// Highlighting the objects of a Visual selection has its own budget (`HIGHLIGHT_BUDGET_NS`,
-    /// 3 ms of estimated work); past it the rest of the selection isn't highlighted. Measured in
-    /// release (`overlay_frame_time` in `tests/bench.rs`, Linux `x86_64`, 2026-10-11): an
-    /// everyday overlay adds 0.1 ms to a frame at 1920x1080 and 0.2 ms at 2880x1800; the worst
-    /// (a full board selected, a Visual rectangle over the whole view, the longest command line
-    /// changing every frame) 1.9 ms and 4.2 ms.
+    /// the image and lawh-core's caps, not the board's contents: a few outlines and fills cut to
+    /// the image, a caret, a label on at most every object (`lawh_core::board::MAX_OBJECTS`),
+    /// at most `lawh_core::engine::SYM_ROWS` completion rows, and status strings of at most
+    /// `STATUS_WINDOW_CHARS` characters, laid out only when they change. Highlighting the
+    /// objects of a Visual selection has its own budget (`HIGHLIGHT_BUDGET_NS`, 3 ms of
+    /// estimated work), less what jump labels drawn with it are estimated to cost; past it the
+    /// rest of the selection isn't highlighted. Measured in release (`overlay_frame_time` in
+    /// `tests/bench.rs`, Linux `x86_64`, 2026-10-12, load average 2 to 2.6 on 22 cores): an
+    /// everyday overlay adds up to 0.3 ms to a frame at 1920x1080 and at 2880x1800; the worst in
+    /// Visual mode (a full board selected, a Visual rectangle over the whole view, a jump label
+    /// on every object) 4.3 to 4.7 ms and 6.5 to 7.2 ms; the worst on a `:sym` line (a full
+    /// board selected, the longest command line and eight rows of the longest names, changing
+    /// every frame) 5.0 to 5.6 ms and 4.7 to 5.4 ms. The worst of M2 (no labels or rows),
+    /// measured 1.9 ms and 4.2 ms on 2026-10-11, took 1.9 to 4.5 ms on this day's machine.
     pub fn render_with(&mut self, board: &Board, vp: &Viewport, overlay: &Overlay<'_>) -> &[u8] {
         self.draw_frame_with(board, vp, MathWait::No, Some(overlay))
     }
@@ -73,13 +81,13 @@ impl Renderer {
     /// there is no such object or it isn't a text or a formula. A byte past the end stands at
     /// the end; one inside a grapheme, at the start of that grapheme.
     ///
-    /// Laid out as the board draws it: a formula as its source, as it is drawn while the caret
-    /// is in it. Lays the text out if this renderer hasn't yet.
+    /// Laid out as the board draws it, at the block's size: a formula as its source, as it is
+    /// drawn while the caret is in it. Lays the text out if this renderer hasn't yet.
     pub fn caret_rect(&mut self, board: &Board, id: &ObjectId, byte: usize) -> Option<Rect> {
-        let (at, text) = block_text(board.get(id)?)?;
+        let (at, size, text) = block_text(board.get(id)?)?;
         let key = self.text.key(text);
         self.text.lay_out(key, text, &mut self.glyphs);
-        self.caret_box(at, key, text, byte, false)
+        self.caret_box(at, size, key, text, byte, false)
     }
 
     /// The object a click at `at` selects; `None` when it hits none. Each kind is hit where it
@@ -154,6 +162,14 @@ impl Renderer {
         overlay: &Overlay<'_>,
     ) {
         let sf = vp.scale_factor;
+        // Labels are drawn last but placed first: what they cost comes out of the highlights'
+        // budget (see `labels`).
+        let labels = overlay
+            .labels
+            .map(|(labels, typed)| self.place_labels(vp, labels, typed));
+        let labels_ns = labels
+            .as_ref()
+            .map_or(0.0, |placed| self.labels_cost(vp, placed));
         if let Some(visual) = overlay.visual {
             let screen = vp.transform().transform_rect_bbox(visual);
             if screen.is_finite() && screen.overlaps(clip) {
@@ -164,7 +180,7 @@ impl Renderer {
             }
         }
         if !overlay.selection.is_empty() {
-            self.draw_highlights(board, seen, vp, clip, overlay.selection);
+            self.draw_highlights(board, seen, vp, clip, overlay.selection, labels_ns);
         }
         match overlay.cursor {
             OverlayCursor::Grid(point) => self.draw_cross(vp.to_screen(point), sf, clip),
@@ -182,6 +198,12 @@ impl Renderer {
         if let Some(caret) = overlay.caret {
             self.draw_caret(board, seen, vp, clip, caret);
         }
+        if let Some(placed) = &labels {
+            self.draw_labels(placed);
+        }
+        if let Some((rows, selected)) = overlay.completions {
+            self.draw_completions(vp, rows, selected);
+        }
         self.draw_status_bar(vp, overlay);
     }
 
@@ -198,8 +220,9 @@ impl Renderer {
         let index = board.objects().iter().position(|object| object.id == *id)?;
         let (object, seen) = (board.objects().get(index)?, seen.get(index)?);
         let mut bounds = self.bounds_with(object, seen.key, seen.math.as_ref(), TextSize::Known)?;
-        if let (Some(caret), Some((at, text)), Some(key)) = (caret, block_text(object), seen.key)
-            && let Some(caret) = self.caret_box(at, key, text, caret.byte, caret.block)
+        if let (Some(caret), Some((at, size, text)), Some(key)) =
+            (caret, block_text(object), seen.key)
+            && let Some(caret) = self.caret_box(at, size, key, text, caret.byte, caret.block)
         {
             bounds = bounds.union(caret);
         }
@@ -207,7 +230,8 @@ impl Renderer {
     }
 
     /// Outlines the objects of `selection` that reach into `clip`, in board order, while their
-    /// estimated cost fits in the highlights' budget.
+    /// estimated cost fits in the highlights' budget, less `taken` nanoseconds (what the jump
+    /// labels drawn over them cost).
     fn draw_highlights(
         &mut self,
         board: &Board,
@@ -215,12 +239,14 @@ impl Renderer {
         vp: &Viewport,
         clip: Rect,
         selection: &[ObjectId],
+        taken: f64,
     ) {
         let selected: HashSet<&ObjectId> = selection.iter().collect();
         let to_screen = vp.transform();
         let gap = SELECTED_GAP_PX * vp.scale_factor;
         let width = SELECTED_LINE_PX * vp.scale_factor;
         let mut budget = Budget::highlights();
+        budget.charge(taken);
         let mut path = BezPath::new();
         for (object, seen) in board.objects().iter().zip(seen) {
             if !selected.contains(&object.id) {
@@ -290,14 +316,14 @@ impl Renderer {
         else {
             return;
         };
-        let Some((at, text)) = block_text(object) else {
+        let Some((at, size, text)) = block_text(object) else {
             return;
         };
-        if text_view(at, vp, clip).is_none() {
+        if text_view(at, size, vp, clip).is_none() {
             // Its text isn't drawn at this zoom.
             return;
         }
-        let Some(rect) = self.caret_box(at, *key, text, caret.byte, caret.block) else {
+        let Some(rect) = self.caret_box(at, size, *key, text, caret.byte, caret.block) else {
             return;
         };
         let screen = vp.transform().transform_rect_bbox(rect);
@@ -313,12 +339,13 @@ impl Renderer {
         }
     }
 
-    /// The caret before byte `byte` of `text` (a block with its top-left corner at `at`), in grid
-    /// units: of no width, or over the grapheme there for a `block` caret. `None` when the text
-    /// isn't laid out.
+    /// The caret before byte `byte` of `text` (a block of size `size` with its top-left corner
+    /// at `at`), in grid units: of no width, or over the grapheme there for a `block` caret.
+    /// `None` when the text isn't laid out.
     fn caret_box(
         &self,
         at: Point,
+        size: f64,
         key: TextKey,
         text: &str,
         byte: usize,
@@ -326,7 +353,7 @@ impl Renderer {
     ) -> Option<Rect> {
         let shaped = self.text.shaped(key, text)?;
         let caret = caret_in_layout(&shaped.layout, byte, block, self.text.line_height());
-        let scale = text_scale();
+        let scale = text_scale(size);
         Some(Rect::new(
             at.x + caret.x0 * scale,
             at.y + caret.y0 * scale,
@@ -434,7 +461,7 @@ impl Renderer {
     }
 
     /// Fills `rect`, in screen pixels.
-    fn fill_screen(&mut self, rect: Rect, color: AlphaColor<Srgb>) {
+    pub(super) fn fill_screen(&mut self, rect: Rect, color: AlphaColor<Srgb>) {
         if rect.width() > 0.0 && rect.height() > 0.0 {
             self.ctx.set_transform(Affine::IDENTITY);
             self.ctx.set_paint(color);
@@ -456,6 +483,8 @@ impl Renderer {
 }
 
 /// The renderer measures objects for the engine as it draws them: [`Renderer::object_bounds`].
+/// Text and math bounds grow with their size, and a formula's with the math scale and the move
+/// that puts its baseline on the text baseline.
 ///
 /// A formula this renderer hasn't seen laid out yet (one still compiling, as right after
 /// `:ma ...`) is measured by its source text, as it is drawn until it compiles; its bounds
@@ -577,11 +606,13 @@ fn outside_ellipse_distance(long: f64, short: f64, along: f64, across: f64) -> f
     (Point::new(along, across) - nearest).hypot()
 }
 
-/// Where a text or math block's text starts, and its text (a formula's source).
-fn block_text(object: &Object) -> Option<(Point, &str)> {
+/// Where a text or math block's text starts, its size, and its text (a formula's source): as
+/// the block is drawn while the caret is in it, a formula as its source in the board's text
+/// style.
+fn block_text(object: &Object) -> Option<(Point, f64, &str)> {
     match &object.shape {
-        Shape::Text { at, text, .. } => Some((*at, text)),
-        Shape::Math { at, src, .. } => Some((*at, src)),
+        Shape::Text { at, text, size } => Some((*at, *size, text)),
+        Shape::Math { at, src, size } => Some((*at, *size, src)),
         _ => None,
     }
 }
@@ -633,7 +664,7 @@ fn caret_in_layout(layout: &Layout<()>, byte: usize, block: bool, line_height: f
 
 /// Fills the glyphs of `layout` (one line or a few, short), which `transform` maps to screen
 /// pixels.
-fn fill_layout(
+pub(super) fn fill_layout(
     ctx: &mut RenderContext,
     resources: &mut Resources,
     layout: &Layout<()>,

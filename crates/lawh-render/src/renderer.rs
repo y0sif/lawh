@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape as _, Stroke};
+use lawh_core::board::{DEFAULT_TEXT_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE};
 use lawh_core::{Board, Object, Shape};
 use lawh_math::{MATH_FONT_SIZE_PT, MathEngine, MathItem, MathLayout, MathStatus, MathSummary};
 use parley::PositionedLayoutItem;
@@ -20,6 +21,8 @@ use crate::status::StatusText;
 use crate::text::{Chunk, KeyMap, Known, LAYOUT_EM, Plan, TextKey, TextShaper};
 use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
 
+mod completions;
+mod labels;
 mod ui;
 
 /// Board background.
@@ -51,8 +54,13 @@ const SELECTED: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD9, 0x77, 0x06);
 const VISUAL_FILL: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xD9, 0x77, 0x06, 0x1A);
 const VISUAL_EDGE: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xD9, 0x77, 0x06, 0xB3);
 /// The status bar, and the line along its top. Its text is [`INK`], or [`ERROR`] for an error.
+/// The `:sym` rows above it are the same, with the selected row in [`CURSOR_BLOCK`].
 const STATUS_BAR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xEE, 0xEE, 0xE9);
 const STATUS_EDGE: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
+/// Jump labels are boxes of the cursor's blue ([`CURSOR`]) with the letters left to type in the
+/// paper colour, and the letters typed so far in the paper colour at 50 %, dimmer.
+const LABEL_LEFT: AlphaColor<Srgb> = PAPER;
+const LABEL_TYPED: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xFA, 0xFA, 0xF7, 0x80);
 
 /// Width of those outlines in logical pixels.
 const OUTLINE_PX: f64 = 1.0;
@@ -66,8 +74,13 @@ const GLYPH_REACH_EM: f64 = 3.0;
 const RUN_SLACK_EM: f64 = 2.0;
 
 /// Glyphs whose em is larger than this many physical pixels aren't drawn. A
-/// text em at the largest drawable zoom is 5,000 pixels; only math that asks
-/// for an absurd font size gets near this. It covers math glyph runs too.
+/// text em of the largest size (`lawh_core::board::MAX_TEXT_SIZE`, 16) is 25,600
+/// pixels at the app's closest zoom (20) and scale factor 4, and math of that
+/// size 32,600 ([`MATH_SCALE`]), inside the sizes the frame budget is
+/// calibrated for (`calibrate_glyphs`, up to 65,536). Only viewports closer than
+/// the app ever shows (the largest drawable is 10,000 pixels per unit, an
+/// 80,000-pixel em of size-16 text), and math that asks for an absurd font
+/// size, get near this. It covers math glyph runs too.
 const MAX_GLYPH_EM_PX: f64 = 100_000.0;
 
 /// Math strokes wider than this many physical pixels aren't drawn: their
@@ -78,8 +91,17 @@ const MAX_STROKE_PX: f64 = 100_000.0;
 /// Typst's default text colour; math drawn in it is drawn in [`INK`] instead.
 const TYPST_BLACK: [u8; 4] = [0, 0, 0, 255];
 
-/// Grid units per Typst pt of math.
-const MATH_SCALE: f64 = TEXT_SIZE_UNITS / MATH_FONT_SIZE_PT;
+/// Grid units per Typst pt of math of size 1, before [`MATH_SCALE`]: a math em is then a text
+/// em.
+const UNITS_PER_PT: f64 = TEXT_SIZE_UNITS / MATH_FONT_SIZE_PT;
+
+/// How much larger than text of the same size math is drawn, so the two have the same
+/// x-height: Inter's x-height over Libertinus Math's, 0.5459 em over 0.429 (1,118 of 2,048
+/// and 429 of 1,000 units in the fonts' OS/2 tables). At one em, math's `x` would be 21 %
+/// shorter than the text's beside it. A test holds this to the bundled fonts within 0.1 %
+/// (`the_math_scale_is_the_ratio_of_the_fonts_x_heights`), and one to what is drawn
+/// (`math_and_text_share_x_height_and_baseline`).
+const MATH_SCALE: f64 = 1.2725;
 
 /// Whether a frame waits for math.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,11 +189,19 @@ struct Seen {
     edited: bool,
 }
 
-/// The bounds of a formula that has laid out, in pt within its layout.
+/// What placing a laid-out formula takes, in pt within its layout: the bounds of everything it
+/// draws, and its first line's baseline, which sits on the baseline of text at the same `y`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MathBox {
+    bounds: Rect,
+    baseline: f64,
+}
+
+/// A formula that has laid out.
 struct KnownMath {
     /// The formula's source, compared on lookup: the map is keyed by its hash.
     src: Box<str>,
-    bounds: Rect,
+    placed: MathBox,
     /// The frame that last looked at it.
     last_used: u64,
 }
@@ -190,6 +220,11 @@ struct Work {
     /// highlights' budget was spent.
     highlighted: usize,
     not_highlighted: usize,
+    /// Jump labels drawn, their letters drawn (not those under a nearer label's box), and the
+    /// glyph runs that drew the letters.
+    labels: usize,
+    label_letters: usize,
+    label_runs: usize,
 }
 
 /// Work drawing text.
@@ -449,7 +484,7 @@ impl Renderer {
                 match self.math.layout_blocking(src) {
                     Ok(layout) => {
                         let key = self.text.key(src);
-                        self.record_bounds(key, src, layout_bounds(&layout));
+                        self.record_math(key, src, layout_box(&layout));
                     }
                     Err(err) => tracing::debug!(id = %object.id, %err, "math did not lay out"),
                 }
@@ -588,24 +623,24 @@ impl Renderer {
         budget: &mut Budget,
         stats: &mut FrameStats,
     ) {
-        if text_view(Point::ZERO, vp, clip).is_none() {
-            // Text isn't drawn at this zoom.
-            return;
-        }
         let to_screen = vp.transform();
         let center = Point::new(f64::from(vp.width) / 2.0, f64::from(vp.height) / 2.0);
         let mut wanted = Vec::new();
         for (index, (object, seen)) in board.objects().iter().zip(seen).enumerate() {
-            let (Some((at, text)), Some(key)) =
+            let (Some((at, size, text)), Some(key)) =
                 (drawn_as_text(object, seen.math.as_ref()), seen.key)
             else {
                 continue;
             };
+            if text_view(at, size, vp, clip).is_none() {
+                // Text this size isn't drawn at this zoom.
+                continue;
+            }
             let known = self.text.known(key, text);
             if known.shaped {
                 continue;
             }
-            let screen = to_screen.transform_rect_bbox(self.text_rect(at, &known));
+            let screen = to_screen.transform_rect_bbox(self.text_rect(at, size, &known));
             let shown = screen.is_finite()
                 && screen.overlaps(clip)
                 && screen.width().max(screen.height()) >= MIN_VISIBLE_PX;
@@ -626,7 +661,7 @@ impl Renderer {
             let (Some(object), Some(seen)) = (objects.get(index), seen.get(index)) else {
                 continue;
             };
-            let (Some((_, text)), Some(key)) =
+            let (Some((_, _, text)), Some(key)) =
                 (drawn_as_text(object, seen.math.as_ref()), seen.key)
             else {
                 continue;
@@ -700,43 +735,43 @@ impl Renderer {
     /// whose layout the engine pushed out of its cache).
     fn noted(&mut self, key: TextKey, src: &str, status: MathStatus) -> MathStatus {
         match &status {
-            MathStatus::Ready(layout) => self.record_bounds(key, src, layout_bounds(layout)),
-            MathStatus::Evicted(summary) => self.record_bounds(key, src, summary_bounds(summary)),
+            MathStatus::Ready(layout) => self.record_math(key, src, layout_box(layout)),
+            MathStatus::Evicted(summary) => self.record_math(key, src, summary_box(summary)),
             MathStatus::Pending | MathStatus::Failed(_) => {}
         }
         status
     }
 
-    fn record_bounds(&mut self, key: TextKey, src: &str, bounds: Rect) {
+    fn record_math(&mut self, key: TextKey, src: &str, placed: MathBox) {
         let frame = self.frame;
         if let Some(known) = self
             .known_math
             .get_mut(&key.0)
             .filter(|known| *known.src == *src)
         {
-            known.bounds = bounds;
+            known.placed = placed;
             known.last_used = frame;
         } else {
             self.known_math.insert(
                 key.0,
                 KnownMath {
                     src: src.into(),
-                    bounds,
+                    placed,
                     last_used: frame,
                 },
             );
         }
     }
 
-    /// The bounds of a formula known to have laid out, in pt within its layout.
-    fn known_math_bounds(&mut self, key: TextKey, src: &str) -> Option<Rect> {
+    /// The bounds and baseline of a formula known to have laid out, in pt within its layout.
+    fn known_math_box(&mut self, key: TextKey, src: &str) -> Option<MathBox> {
         let frame = self.frame;
         self.known_math
             .get_mut(&key.0)
             .filter(|known| *known.src == *src)
             .map(|known| {
                 known.last_used = frame;
-                known.bounds
+                known.placed
             })
     }
 
@@ -748,7 +783,7 @@ impl Renderer {
         object: &Object,
         key: Option<TextKey>,
         math: Option<&MathStatus>,
-        size: TextSize,
+        how: TextSize,
     ) -> Option<Rect> {
         let bounds = match &object.shape {
             Shape::Ellipse { center, rx, ry } => {
@@ -762,47 +797,73 @@ impl Renderer {
             }
             Shape::Rect { origin, w, h } => Some(Rect::from_origin_size(*origin, (*w, *h)).abs()),
             Shape::Line { a, b } | Shape::Arrow { a, b } => Some(Rect::from_points(*a, *b)),
-            Shape::Text { at, text, .. } => {
+            Shape::Text { at, text, size } => {
                 let key = key.unwrap_or_else(|| self.text.key(text));
-                Some(self.text_bounds(*at, key, text, size))
+                Some(self.text_bounds(*at, *size, key, text, how))
             }
-            Shape::Math { at, src, .. } => {
+            Shape::Math { at, src, size } => {
                 let key = key.unwrap_or_else(|| self.text.key(src));
                 let laid_out = match math {
-                    Some(MathStatus::Ready(layout)) => Some(layout_bounds(layout)),
-                    Some(MathStatus::Evicted(summary)) => Some(summary_bounds(summary)),
+                    Some(MathStatus::Ready(layout)) => Some(layout_box(layout)),
+                    Some(MathStatus::Evicted(summary)) => Some(summary_box(summary)),
                     // Still compiling or failed: the source is drawn as text.
                     Some(MathStatus::Pending | MathStatus::Failed(_)) => None,
-                    None => self.known_math_bounds(key, src),
+                    None => self.known_math_box(key, src),
                 };
                 match laid_out {
-                    Some(pt) => Some(math_to_board(*at).transform_rect_bbox(pt)),
-                    None => Some(self.text_bounds(*at, key, src, size)),
+                    Some(placed) => Some(
+                        self.math_to_board(*at, *size, placed.baseline)
+                            .transform_rect_bbox(placed.bounds),
+                    ),
+                    None => Some(self.text_bounds(*at, *size, key, src, how)),
                 }
             }
         };
         bounds.filter(Rect::is_finite)
     }
 
-    /// The bounds of text with its top-left corner at `at`, in grid units.
-    fn text_bounds(&mut self, at: Point, key: TextKey, text: &str, size: TextSize) -> Rect {
-        match size {
+    /// The bounds of text of size `size` with its top-left corner at `at`, in grid units.
+    fn text_bounds(
+        &mut self,
+        at: Point,
+        size: f64,
+        key: TextKey,
+        text: &str,
+        how: TextSize,
+    ) -> Rect {
+        match how {
             TextSize::Exact => {
                 let (width, height) = self.text.lay_out(key, text, &mut self.glyphs);
-                text_box(at, width, height)
+                text_box(at, size, width, height)
             }
             TextSize::Known => {
                 let known = self.text.known(key, text);
-                self.text_rect(at, &known)
+                self.text_rect(at, size, &known)
             }
         }
     }
 
-    /// The bounds of a text the cache knows, with its top-left corner at `at`: of its layout,
-    /// or estimated when it has none yet.
-    fn text_rect(&self, at: Point, known: &Known) -> Rect {
+    /// The bounds of a text of size `size` the cache knows, with its top-left corner at `at`:
+    /// of its layout, or estimated when it has none yet.
+    fn text_rect(&self, at: Point, size: f64, known: &Known) -> Rect {
         let (width, height) = self.text.size(known);
-        text_box(at, width, height)
+        text_box(at, size, width, height)
+    }
+
+    /// A formula's layout (pt, origin at its top-left) → grid units, for a formula of size
+    /// `size` at `at` whose first baseline is `baseline` pt below the top of its box: drawn
+    /// [`MATH_SCALE`] times as large as text of the same size, and moved up or down so that
+    /// baseline sits where the first baseline of a text at `at` does, at any size.
+    fn math_to_board(&self, at: Point, size: f64, baseline: f64) -> Affine {
+        let units_per_pt = math_units_per_pt(size);
+        let text_baseline = f64::from(self.text.baseline()) * text_scale(size);
+        let down = text_baseline - baseline * units_per_pt;
+        Affine::translate((at.x, at.y + down)) * Affine::scale(units_per_pt)
+    }
+
+    /// [`Self::math_to_board`], then on to screen pixels through `vp`.
+    fn math_transform(&self, at: Point, size: f64, baseline: f64, vp: &Viewport) -> Affine {
+        vp.transform() * self.math_to_board(at, size, baseline)
     }
 
     /// Draws one object whose bounds reach into `clip` (screen pixels), if
@@ -855,24 +916,24 @@ impl Renderer {
                 }
                 Outcome::Drawn
             }
-            Shape::Text { at, text, .. } => match seen.key {
-                Some(key) => self.draw_text(*at, key, text, INK, vp, clip, budget),
+            Shape::Text { at, text, size } => match seen.key {
+                Some(key) => self.draw_text(*at, *size, key, text, INK, vp, clip, budget),
                 None => Outcome::Pending,
             },
-            Shape::Math { at, src, .. } => match (&seen.math, seen.key) {
+            Shape::Math { at, src, size } => match (&seen.math, seen.key) {
                 (Some(MathStatus::Ready(layout)), _) => {
-                    fits(self.draw_math(*at, layout, vp, clip, budget))
+                    fits(self.draw_math(*at, *size, layout, vp, clip, budget))
                 }
                 // Laid out before, but pushed out of the math cache and not compiled again yet:
                 // drawn as the faint outline of its bounds.
                 (Some(MathStatus::Evicted(_)), _) => Outcome::Evicted,
                 (Some(MathStatus::Failed(err)), Some(key)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");
-                    self.draw_text(*at, key, src, ERROR, vp, clip, budget)
+                    self.draw_text(*at, *size, key, src, ERROR, vp, clip, budget)
                 }
                 (Some(MathStatus::Pending) | None, Some(key)) => {
                     let color = if seen.edited { INK } else { PENDING };
-                    self.draw_text(*at, key, src, color, vp, clip, budget)
+                    self.draw_text(*at, *size, key, src, color, vp, clip, budget)
                 }
                 (_, None) => Outcome::Pending,
             },
@@ -946,10 +1007,11 @@ impl Renderer {
         true
     }
 
-    /// Draws text with its top-left corner at `at`, if its estimated cost fits in `budget`:
-    /// only the lines whose baseline is near `clip`, and of those only the glyph runs and glyphs
-    /// that can reach into it. The estimate comes from the text's plan, so a text over the
-    /// budget is never walked. [`Outcome::Pending`] when the text has no layout cached.
+    /// Draws text of size `size` with its top-left corner at `at`, if its estimated cost fits in
+    /// `budget`: only the lines whose baseline is near `clip`, and of those only the glyph runs
+    /// and glyphs that can reach into it. The estimate comes from the text's plan, at the text's
+    /// pixels per em, so a text over the budget is never walked and larger text costs more.
+    /// [`Outcome::Pending`] when the text has no layout cached.
     #[expect(
         clippy::too_many_arguments,
         reason = "the text, where and how to draw it, and the budget"
@@ -957,6 +1019,7 @@ impl Renderer {
     fn draw_text(
         &mut self,
         at: Point,
+        size: f64,
         key: TextKey,
         text: &str,
         color: AlphaColor<Srgb>,
@@ -964,7 +1027,7 @@ impl Renderer {
         clip: Rect,
         budget: &mut Budget,
     ) -> Outcome {
-        let Some(view) = text_view(at, vp, clip) else {
+        let Some(view) = text_view(at, size, vp, clip) else {
             // Nothing of it is drawn at this zoom.
             return Outcome::Drawn;
         };
@@ -1052,13 +1115,14 @@ impl Renderer {
     fn math_cost(
         &mut self,
         at: Point,
+        size: f64,
         layout: &MathLayout,
         vp: &Viewport,
         clip: Rect,
         limit: f64,
     ) -> Estimate {
-        let transform = math_transform(at, vp);
-        let px_per_pt = vp.px_per_unit() * MATH_SCALE;
+        let transform = self.math_transform(at, size, layout.baseline, vp);
+        let px_per_pt = vp.px_per_unit() * math_units_per_pt(size);
         let mut cost = Estimate::new(clip, vp.width, vp.height, limit);
         for item in &layout.items {
             if cost.over() {
@@ -1068,7 +1132,7 @@ impl Renderer {
                 MathItem::Glyphs {
                     font, size, glyphs, ..
                 } => {
-                    let Some(near) = self.glyph_run_area(*font, *size, vp, clip) else {
+                    let Some(near) = self.glyph_run_area(*font, *size, px_per_pt, clip) else {
                         continue;
                     };
                     cost.run();
@@ -1101,37 +1165,39 @@ impl Renderer {
         cost
     }
 
-    /// Where on screen a math glyph run's glyph origins must be to be drawn;
-    /// `None` when none of it is drawn (unknown font, glyphs under half a
-    /// pixel or absurdly large).
-    fn glyph_run_area(&self, font: usize, size: f64, vp: &Viewport, clip: Rect) -> Option<Rect> {
+    /// Where on screen a math glyph run's glyph origins must be to be drawn, for glyphs of
+    /// `size` pt drawn `px_per_pt` pixels to the pt; `None` when none of it is drawn (unknown
+    /// font, glyphs under half a pixel or absurdly large).
+    fn glyph_run_area(&self, font: usize, size: f64, px_per_pt: f64, clip: Rect) -> Option<Rect> {
         if self.math_fonts.get(font).is_none() {
             tracing::warn!(font, "math glyphs reference an unknown font");
             return None;
         }
-        if (size * MATH_SCALE * vp.px_per_unit()).abs() < MIN_VISIBLE_PX {
+        let em_px = (size * px_per_pt).abs();
+        if em_px < MIN_VISIBLE_PX {
             return None;
         }
-        glyph_area(size * MATH_SCALE, vp, clip)
+        glyph_area(em_px, clip)
     }
 
-    /// Draws a formula with its top-left corner at `at`, skipping glyphs and
-    /// paths that can't reach into `clip` and cutting paths down to it, if it
-    /// fits in `budget`.
+    /// Draws a formula of size `size` placed at `at` ([`Self::math_to_board`]), skipping
+    /// glyphs and paths that can't reach into `clip` and cutting paths down to it, if it fits
+    /// in `budget`.
     fn draw_math(
         &mut self,
         at: Point,
+        size: f64,
         layout: &MathLayout,
         vp: &Viewport,
         clip: Rect,
         budget: &mut Budget,
     ) -> bool {
-        let cost = self.math_cost(at, layout, vp, clip, budget.left());
+        let cost = self.math_cost(at, size, layout, vp, clip, budget.left());
         if !budget.settle(&cost) {
             return false;
         }
-        let transform = math_transform(at, vp);
-        let px_per_pt = vp.px_per_unit() * MATH_SCALE;
+        let transform = self.math_transform(at, size, layout.baseline, vp);
+        let px_per_pt = vp.px_per_unit() * math_units_per_pt(size);
         for item in &layout.items {
             match item {
                 MathItem::Glyphs {
@@ -1140,7 +1206,7 @@ impl Renderer {
                     fill,
                     glyphs,
                 } => {
-                    let Some(near) = self.glyph_run_area(*font, *size, vp, clip) else {
+                    let Some(near) = self.glyph_run_area(*font, *size, px_per_pt, clip) else {
                         continue;
                     };
                     let Some(font_data) = self.math_fonts.get(*font) else {
@@ -1229,30 +1295,42 @@ fn path_area(
     (bounds.is_finite() && bounds.overlaps(near)).then_some(near)
 }
 
-/// A formula's layout (pt, origin at its top-left) → screen pixels, for a
-/// formula at `at`.
-fn math_transform(at: Point, vp: &Viewport) -> Affine {
-    vp.transform() * math_to_board(at)
+/// Grid units per pt of math of size `size`.
+fn math_units_per_pt(size: f64) -> f64 {
+    UNITS_PER_PT * MATH_SCALE * drawn_size(size)
 }
 
-/// A formula's layout (pt) → grid units, for a formula at `at`.
-fn math_to_board(at: Point) -> Affine {
-    Affine::translate(at.to_vec2()) * Affine::scale(MATH_SCALE)
+/// The bounds of everything a layout covers, in pt (its box joined with its ink, which can
+/// reach outside the box), and its first baseline.
+fn layout_box(layout: &MathLayout) -> MathBox {
+    MathBox {
+        bounds: Rect::new(0.0, 0.0, layout.width, layout.height)
+            .abs()
+            .union(layout.ink.abs()),
+        baseline: layout.baseline,
+    }
 }
 
-/// The bounds of everything a layout covers, in pt: its box joined with its
-/// ink, which can reach outside the box.
-fn layout_bounds(layout: &MathLayout) -> Rect {
-    Rect::new(0.0, 0.0, layout.width, layout.height)
-        .abs()
-        .union(layout.ink.abs())
+/// [`layout_box`] of a layout the math engine no longer holds.
+fn summary_box(summary: &MathSummary) -> MathBox {
+    MathBox {
+        bounds: Rect::new(0.0, 0.0, summary.width, summary.height)
+            .abs()
+            .union(summary.ink.abs()),
+        baseline: summary.baseline,
+    }
 }
 
-/// [`layout_bounds`] of a layout the math engine no longer holds.
-fn summary_bounds(summary: &MathSummary) -> Rect {
-    Rect::new(0.0, 0.0, summary.width, summary.height)
-        .abs()
-        .union(summary.ink.abs())
+/// The size text or math of size `size` is drawn at: `size` within lawh-core's range
+/// (`lawh_core::board::MIN_TEXT_SIZE` to `MAX_TEXT_SIZE`), or the default for one that isn't a
+/// number above zero. A board refuses such sizes, but an [`Object`] made on its own can hold
+/// anything, and the frame budget and the glyph size guards count on the range.
+fn drawn_size(size: f64) -> f64 {
+    if size.is_finite() && size > 0.0 {
+        size.clamp(MIN_TEXT_SIZE, MAX_TEXT_SIZE)
+    } else {
+        DEFAULT_TEXT_SIZE
+    }
 }
 
 /// How far `p` is from `rect`; 0 inside it.
@@ -1263,10 +1341,10 @@ fn distance(rect: Rect, p: Point) -> f64 {
 }
 
 /// Where on screen a glyph's origin must be for any of it to reach into
-/// `clip`, for glyphs of `em_units` grid units; `None` when glyphs that size
-/// aren't drawn at all (non-finite, or past [`MAX_GLYPH_EM_PX`]).
-fn glyph_area(em_units: f64, vp: &Viewport, clip: Rect) -> Option<Rect> {
-    let em_px = (em_units * vp.px_per_unit()).abs();
+/// `clip`, for glyphs `em_px` physical pixels to the em; `None` when glyphs
+/// that size aren't drawn at all (non-finite, or past [`MAX_GLYPH_EM_PX`]).
+fn glyph_area(em_px: f64, clip: Rect) -> Option<Rect> {
+    let em_px = em_px.abs();
     if !(em_px.is_finite() && em_px <= MAX_GLYPH_EM_PX) {
         tracing::debug!(em_px, "glyphs too large to draw");
         return None;
@@ -1275,26 +1353,16 @@ fn glyph_area(em_units: f64, vp: &Viewport, clip: Rect) -> Option<Rect> {
     Some(clip.inflate(reach, reach))
 }
 
-/// Grid units per layout unit of text.
-fn text_scale() -> f64 {
-    TEXT_SIZE_UNITS / f64::from(LAYOUT_EM)
+/// Grid units per layout unit of text of size `size`.
+fn text_scale(size: f64) -> f64 {
+    TEXT_SIZE_UNITS / f64::from(LAYOUT_EM) * drawn_size(size)
 }
 
-/// The em size of text in grid units.
-fn text_em_units() -> f64 {
-    f64::from(LAYOUT_EM) * text_scale()
-}
-
-/// The box of a text `width` x `height` layout units with its top-left corner at `at`, in grid
-/// units.
-fn text_box(at: Point, width: f32, height: f32) -> Rect {
-    Rect::from_origin_size(
-        at,
-        (
-            f64::from(width) * text_scale(),
-            f64::from(height) * text_scale(),
-        ),
-    )
+/// The box of a text of size `size`, `width` x `height` layout units, with its top-left corner
+/// at `at`, in grid units.
+fn text_box(at: Point, size: f64, width: f32, height: f32) -> Rect {
+    let scale = text_scale(size);
+    Rect::from_origin_size(at, (f64::from(width) * scale, f64::from(height) * scale))
 }
 
 /// Marks the object `id` in `seen` as holding the caret, if it is a text or a formula.
@@ -1317,13 +1385,16 @@ fn source(object: &Object) -> Option<&str> {
     }
 }
 
-/// Where and what an object draws as text, given its math status: a text, or the source of a
-/// formula still compiling or that failed.
-fn drawn_as_text<'a>(object: &'a Object, math: Option<&MathStatus>) -> Option<(Point, &'a str)> {
+/// Where, at what size and what an object draws as text, given its math status: a text, or the
+/// source of a formula still compiling or that failed.
+fn drawn_as_text<'a>(
+    object: &'a Object,
+    math: Option<&MathStatus>,
+) -> Option<(Point, f64, &'a str)> {
     match (&object.shape, math) {
-        (Shape::Text { at, text, .. }, _) => Some((*at, text)),
-        (Shape::Math { at, src, .. }, Some(MathStatus::Pending | MathStatus::Failed(_))) => {
-            Some((*at, src))
+        (Shape::Text { at, text, size }, _) => Some((*at, *size, text)),
+        (Shape::Math { at, src, size }, Some(MathStatus::Pending | MathStatus::Failed(_))) => {
+            Some((*at, *size, src))
         }
         _ => None,
     }
@@ -1374,17 +1445,18 @@ impl TextView {
     }
 }
 
-/// How text with its top-left corner at `at` lands on screen through `vp`; `None` when no text
-/// is drawn at this zoom (glyphs under half a pixel, or absurdly large).
-fn text_view(at: Point, vp: &Viewport, clip: Rect) -> Option<TextView> {
-    let em = text_em_units();
-    let em_px = em * vp.px_per_unit();
+/// How text of size `size` with its top-left corner at `at` lands on screen through `vp`;
+/// `None` when text that size isn't drawn at this zoom (glyphs under half a pixel, or absurdly
+/// large).
+fn text_view(at: Point, size: f64, vp: &Viewport, clip: Rect) -> Option<TextView> {
+    let scale = text_scale(size);
+    let em_px = f64::from(LAYOUT_EM) * scale * vp.px_per_unit();
     if em_px < MIN_VISIBLE_PX {
         return None;
     }
-    let near = glyph_area(em, vp, clip)?;
+    let near = glyph_area(em_px, clip)?;
     Some(TextView {
-        transform: vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(text_scale()),
+        transform: vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(scale),
         near,
         em_px,
     })
@@ -1477,14 +1549,17 @@ mod tests {
     const BLACK: [u8; 4] = [0, 0, 0, 255];
     const MAX: f64 = MAX_LAYOUT_EXTENT_PT;
 
-    /// Draws only `layout`, its top-left corner at the board origin, as an
-    /// export draws a math object, and returns the image and how long it took.
+    /// Draws only `layout`, its top-left corner at the board origin and a pt [`UNITS_PER_PT`]
+    /// across, as an export draws a math object, and returns the image and how long it took.
     fn render_layout(layout: &MathLayout, vp: &Viewport) -> (Vec<u8>, Duration) {
         let mut renderer = Renderer::new_trusted();
+        let size = 1.0 / MATH_SCALE;
+        let origin = renderer.math_to_board(Point::ZERO, size, layout.baseline) * Point::ZERO;
+        let at = Point::new(-origin.x, -origin.y);
         let started = Instant::now();
         assert!(renderer.begin_frame(vp));
         let mut budget = Budget::export();
-        assert!(renderer.draw_math(Point::ZERO, layout, vp, draw::clip_rect(vp), &mut budget));
+        assert!(renderer.draw_math(at, size, layout, vp, draw::clip_rect(vp), &mut budget));
         let image = renderer.finish_frame().to_vec();
         (image, started.elapsed())
     }
@@ -1561,7 +1636,7 @@ mod tests {
     #[test]
     fn a_huge_layout_under_the_cap_draws_fast_and_exactly_at_max_zoom() {
         let layout = huge_layout();
-        let units = |pt: f64| pt * MATH_SCALE;
+        let units = |pt: f64| pt * UNITS_PER_PT;
         // 40 * 125 * 2 = 10,000 pixels per unit, the most a viewport may show:
         // 250 pixels per pt, so the circle is 2.5e7 pixels across and its 0.04 pt
         // stroke 10 pixels wide.
@@ -1633,7 +1708,7 @@ mod tests {
         };
         // The circle's leftmost point, at max zoom: its 1 pt stroke is 250
         // pixels wide.
-        let vp = Viewport::new(Point::new(0.0, r * MATH_SCALE), 125.0, 400, 300, 2.0);
+        let vp = Viewport::new(Point::new(0.0, r * UNITS_PER_PT), 125.0, 400, 300, 2.0);
         let (image, took) = render_layout(&layout, &vp);
         assert!(took < Duration::from_millis(500), "took {took:?}");
         ink_at_center_only(&image, &vp, (1.0, 0.0), 150.0);
@@ -1649,7 +1724,7 @@ mod tests {
                     Shape::Text {
                         at: Point::ZERO,
                         text: text(i),
-                        size: lawh_core::board::DEFAULT_TEXT_SIZE,
+                        size: DEFAULT_TEXT_SIZE,
                     },
                 ))
                 .unwrap();
@@ -1672,6 +1747,41 @@ mod tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn the_math_scale_is_the_ratio_of_the_fonts_x_heights() {
+        let table = GlyphTable::new();
+        let (_, text) = table.heights(0).unwrap();
+        let (_, math) = table.heights(1).unwrap();
+        assert!((text - 0.5459).abs() < 1e-3 && (math - 0.429).abs() < 1e-3);
+        let ratio = text / math;
+        assert!(
+            (MATH_SCALE / ratio - 1.0).abs() < 1e-3,
+            "{MATH_SCALE} vs {ratio}"
+        );
+    }
+
+    #[test]
+    fn sizes_outside_the_range_are_drawn_within_it() {
+        assert!((drawn_size(2.0) - 2.0).abs() < f64::EPSILON);
+        assert!((drawn_size(100.0) - MAX_TEXT_SIZE).abs() < f64::EPSILON);
+        assert!((drawn_size(0.01) - MIN_TEXT_SIZE).abs() < f64::EPSILON);
+        for garbage in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!((drawn_size(garbage) - DEFAULT_TEXT_SIZE).abs() < f64::EPSILON);
+        }
+        // An object made without the board's checks still draws and measures.
+        let mut renderer = Renderer::new_trusted();
+        let object = Object::new(
+            lawh_core::ObjectId::new("t1").unwrap(),
+            Shape::Text {
+                at: Point::ZERO,
+                text: "x".to_owned(),
+                size: f64::NAN,
+            },
+        );
+        let bounds = renderer.object_bounds(&object).unwrap();
+        assert!(bounds.height() > 0.5 && bounds.height() < 1.0, "{bounds:?}");
     }
 
     #[test]
@@ -1781,7 +1891,8 @@ mod tests {
             }
             assert!(glyphs > 0.0, "{name}: nothing drawn");
         }
-        // A pile of math glyphs, drawn whole at zoom 1 and in part at zoom 20.
+        // A pile of math glyphs, drawn whole at zoom 1 and in part at zoom 15 (an em of 380
+        // pixels: closer, the pile is over a frame's budget).
         let board = lawh_core::from_lawh(
             "lawh version=1\nmath id=m1 x=0 y=0 \"#for i in range(300) { box(width: 0pt)[x] }\"\n",
         )
@@ -1789,7 +1900,7 @@ mod tests {
         let mut renderer = Renderer::new_trusted();
         renderer.resolve_math(&board);
         let bounds = renderer.board_bounds(&board).unwrap();
-        for zoom in [1.0, 20.0] {
+        for zoom in [1.0, 15.0] {
             let vp = Viewport::new(bounds.center(), zoom, 800, 600, 1.0);
             renderer.render(&board, &vp);
             let (work, frame) = (renderer.work, renderer.last_frame());

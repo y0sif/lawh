@@ -460,6 +460,8 @@ impl App {
                 error: status.error,
             },
             command_line: self.engine.command_line(),
+            labels: self.engine.jump_labels(),
+            completions: self.engine.completions(),
         };
         let pixels = self
             .renderer

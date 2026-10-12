@@ -361,10 +361,181 @@ fn math_bounds_scale_with_the_text_size() {
     let mut renderer = Renderer::new_trusted();
     renderer.resolve_math(&board);
     let bounds = renderer.board_bounds(&board).unwrap();
-    assert!((bounds.x0 - 5.0).abs() < 1e-9 && bounds.y0.abs() < 1e-9);
+    // Its left edge where it is placed; its top moved by at most half an em to put its
+    // baseline on the text baseline.
+    assert!((bounds.x0 - 5.0).abs() < 1e-9, "{bounds:?}");
+    assert!(bounds.y0.abs() < TEXT_SIZE_UNITS / 2.0, "{bounds:?}");
     // About one em tall and a few ems wide.
     assert!(bounds.height() > TEXT_SIZE_UNITS * 0.6 && bounds.height() < TEXT_SIZE_UNITS * 2.0);
     assert!(bounds.width() > TEXT_SIZE_UNITS * 2.0 && bounds.width() < TEXT_SIZE_UNITS * 8.0);
+}
+
+/// One text and one formula of size `size` at `at`, as `t1` and `m1`.
+fn sized(at: Point, size: f64, text: &str, math: &str) -> Board {
+    let size = if (size - 1.0).abs() < f64::EPSILON {
+        String::new()
+    } else {
+        format!(" size={size}")
+    };
+    common::board(&format!(
+        "lawh version=1\n\
+         text id=t1 x={x} y={y}{size} \"{text}\"\n\
+         math id=m1 x={x} y={y}{size} \"{math}\"\n",
+        x = at.x,
+        y = at.y,
+    ))
+}
+
+#[test]
+fn text_and_math_bounds_scale_with_their_size_from_where_they_are() {
+    let at = Point::new(2.0, -3.0);
+    let mut renderer = Renderer::new_trusted();
+    // Laid out, and (math) still compiling: the source's extents at the same size.
+    for resolved in [false, true] {
+        let one = sized(at, 1.0, "Area of a circle\\nr", "A = pi r^2");
+        if resolved {
+            renderer.resolve_math(&one);
+        }
+        let bounds = |renderer: &mut Renderer, board: &Board| -> Vec<Rect> {
+            board
+                .objects()
+                .iter()
+                .map(|object| renderer.object_bounds(object).unwrap())
+                .collect()
+        };
+        let base = bounds(&mut renderer, &one);
+        for size in [0.25, 0.5, 2.0, 4.0, 16.0] {
+            let board = sized(at, size, "Area of a circle\\nr", "A = pi r^2");
+            if resolved {
+                renderer.resolve_math(&board);
+            }
+            for (got, base) in bounds(&mut renderer, &board).iter().zip(&base) {
+                let want = Rect::new(
+                    at.x + (base.x0 - at.x) * size,
+                    at.y + (base.y0 - at.y) * size,
+                    at.x + (base.x1 - at.x) * size,
+                    at.y + (base.y1 - at.y) * size,
+                );
+                let off = [
+                    got.x0 - want.x0,
+                    got.y0 - want.y0,
+                    got.x1 - want.x1,
+                    got.y1 - want.y1,
+                ];
+                assert!(
+                    off.iter().all(|d| d.abs() < 1e-9 * size.max(1.0) * 10.0),
+                    "size {size} (math resolved: {resolved}): {got:?}, want {want:?}"
+                );
+            }
+        }
+    }
+}
+
+/// `px`, a pixel column inside an image, as a whole number.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "columns inside a small image"
+)]
+fn whole_px(px: f64) -> u16 {
+    px.round().clamp(0.0, f64::from(u16::MAX)) as u16
+}
+
+/// The rows of `image` (`width` wide) with dark ink in columns `x0..x1`, top and bottom.
+fn ink_rows(image: &[u8], width: u16, x0: u16, x1: u16) -> Option<(u16, u16)> {
+    let height = u16::try_from(image.len() / 4 / usize::from(width)).unwrap();
+    let rows: Vec<u16> = (0..height)
+        .filter(|y| (x0..x1).any(|x| common::pixel(image, width, x, *y)[0] < 128))
+        .collect();
+    Some((*rows.first()?, *rows.last()?))
+}
+
+/// Acceptance criterion A4: at the same `y` and size, a one-line formula's baseline is a text's
+/// (within 0.05 units at size 1), and its x-height is the text's (within 3 %): math is drawn
+/// `MATH_SCALE` times larger and moved onto the text baseline. Measured on the drawn pixels of
+/// an `x` in each, at every size, with the em 400 pixels: Inter's `x` sits on the baseline, and
+/// Libertinus Math's italic `x` dips 0.01 em below it, so the x-height is measured from the text's
+/// baseline. The first line of a two-line formula is placed as a one-line formula.
+#[test]
+fn math_and_text_share_x_height_and_baseline() {
+    for size in [0.5, 1.0, 2.0, 4.0] {
+        let board = common::board(&format!(
+            "lawh version=1\n\
+             text id=t1 x=0 y=0 size={size} \"x\"\n\
+             math id=m1 x={m1} y=0 size={size} \"x\"\n\
+             math id=m2 x={m2} y=0 size={size} \"x \\\\ x\"\n",
+            m1 = 0.6 * size,
+            m2 = 1.2 * size,
+        ));
+        let mut renderer = Renderer::new_trusted();
+        renderer.resolve_math(&board);
+        // 800 pixels a unit at size 1: an em of 400 pixels at every size.
+        let vp = Viewport::new(
+            Point::new(0.85 * size, 0.3 * size),
+            20.0 / size,
+            1600,
+            800,
+            1.0,
+        );
+        let image = renderer.render(&board, &vp).to_vec();
+        assert_eq!(renderer.last_frame().drawn, 3, "size {size}");
+        let column = |x: f64| whole_px(vp.to_screen(Point::new(x * size, 0.0)).x);
+        let row = |y: u16| vp.to_board(Point::new(0.0, f64::from(y))).y;
+        let (text_top, text_bottom) = ink_rows(&image, 1600, column(-0.1), column(0.55)).unwrap();
+        let (math_top, math_bottom) = ink_rows(&image, 1600, column(0.55), column(1.15)).unwrap();
+        let (lines_top, _) = ink_rows(&image, 1600, column(1.15), column(1.8)).unwrap();
+        let baseline_off = (row(math_bottom) - row(text_bottom)).abs();
+        assert!(
+            baseline_off <= 0.05 * size,
+            "size {size}: math baseline {baseline_off} units off the text's"
+        );
+        let text_x = row(text_bottom) - row(text_top);
+        let math_x = row(text_bottom) - row(math_top);
+        assert!(
+            (math_x / text_x - 1.0).abs() <= 0.03,
+            "size {size}: math x-height {math_x}, text {text_x}"
+        );
+        assert!(
+            (row(lines_top) - row(math_top)).abs() <= 0.01 * size,
+            "size {size}: a two-line formula's first line sits higher or lower"
+        );
+        println!(
+            "size {size}: baseline {baseline_off:.4} units off, x-height math {math_x:.4} \
+             text {text_x:.4} ({:+.2} %)",
+            (math_x / text_x - 1.0) * 100.0
+        );
+    }
+}
+
+#[test]
+fn larger_text_costs_more_to_draw() {
+    let mut renderer = Renderer::new_trusted();
+    let mut estimated = Vec::new();
+    for size in [1.0, 4.0, 16.0] {
+        let board = sized(Point::ZERO, size, "lorem ipsum dolor", "x");
+        renderer.resolve_math(&board);
+        let bounds = renderer.board_bounds(&board).unwrap();
+        // Everything on screen, at the same zoom for every size.
+        let vp = Viewport::new(bounds.center(), 0.5, 1920, 1080, 1.0);
+        let shown = vp.visible_board_rect();
+        assert!(
+            shown.contains(bounds.origin()) && shown.contains(Point::new(bounds.x1, bounds.y1))
+        );
+        for _ in 0..2 {
+            renderer.render(&board, &vp);
+        }
+        let frame = renderer.last_frame();
+        assert_eq!(
+            (frame.drawn, frame.downgraded),
+            (2, 0),
+            "size {size}: {frame:?}"
+        );
+        estimated.push(frame.estimated);
+    }
+    assert!(
+        estimated.windows(2).all(|pair| pair[1] > pair[0]),
+        "{estimated:?}"
+    );
 }
 
 #[test]
