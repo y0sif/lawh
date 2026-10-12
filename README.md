@@ -13,9 +13,9 @@
 lawh (لوح, "board" or "slate") is a native, open-source whiteboard and text editor for the
 keyboard. You draw shapes, write math and arrange text with Vim motions and commands instead of a
 mouse or a pen. Type `:circle r=3` and the circle appears at your cursor. Type `:math A = pi r^2`
-and it renders as math. Jump between objects with `w` and `HJKL`, take one with `dd` and put it
-under another with `p`. No drawing tablet, no hunting for toolbar buttons, no dragging to get the
-size right.
+and it renders as math. Jump between objects with `w` and `HJKL`, or to any object in view with
+`s` and a short label, take one with `dd` and put it under another with `p`. No drawing tablet, no
+hunting for toolbar buttons, no dragging to get the size right.
 
 Whiteboards like Excalidraw and tldraw are built for the mouse: keyboard shortcuts pick a tool, then
 you drag. lawh drives the whole canvas with a Vim grammar (modes, counts, operators, motions and
@@ -26,9 +26,12 @@ you drag. lawh drives the whole canvas with a Vim grammar (modes, counts, operat
 **Pre-alpha.** Milestone 1, "see a board", is done: `lawh file.lawh` opens a window and draws the
 board's text, math (rendered with Typst), circles, ellipses, rectangles, lines and arrows.
 
-Milestone 2, the Vim engine, is built and being tested: the keyboard now drives the board, and `:w`
-saves it. Building the "area of a circle" example from an empty board takes 62 keys (see the
+Milestone 2, the Vim engine, is done: the keyboard drives the board, and `:w` saves it. Building
+the "area of a circle" example from an empty board takes 62 keys (see the
 [quick start](#quick-start)).
+
+Milestone 3 is built and being tested: sizes for text and math, jump labels to reach any object in
+view in two or three keys, and `:sym` to put in a math symbol by name.
 
 ## What works
 
@@ -38,6 +41,9 @@ saves it. Building the "area of a circle" example from an empty board takes 62 k
 - [x] **Commands:** `:circle r=3`, `:rect 4 2`, `:arrow 3 0`, `:text`, `:math`
 - [x] **Math** in [Typst](https://typst.app) syntax: `A = pi r^2`, `sum_(i=1)^n i`
 - [x] **Editing:** delete, yank and put, undo and redo, `.` to repeat, counts everywhere, Vim editing inside text and math blocks
+- [x] **Sizes:** text and math from 0.25 to 16 times the default size, with `<C-a>` and `<C-x>`, `:size 2`, or `size=2` in the file; math is drawn to match the height of the text beside it
+- [x] **Jump labels:** `s` puts a one- or two-letter label on every object in view; type one to jump there, or `ds` and a label to delete a far object without moving
+- [x] **Symbol search:** `:sym integral` finds a math symbol by its Typst name, with the best matches shown as you type (fuzzy matching: a name matches when it holds the query's letters in order, not necessarily side by side)
 - [x] **Placing:** put objects or a new text block below or above another, clear of the rest (`p`, `P`, `o`, `O`)
 - [x] **Files:** plain-text `.lawh` boards that diff cleanly in git, saved atomically with `:w`
 - [x] **Config:** key maps (`:nnoremap` and family) and settings (`:set`) in a `lawhrc`
@@ -45,9 +51,9 @@ saves it. Building the "area of a circle" example from an empty board takes 62 k
 
 ## Planned for v1
 
-- [ ] **Moving things:** move a selection with `hjkl`, jump to any object by a short label, place one object beside another
-- [ ] **Symbol search:** `:sym integral` finds a math symbol by name
-- [ ] **Export:** SVG, PNG and PDF
+- [ ] **Export:** SVG, PNG and PDF (next)
+- [ ] **Moving things:** move a selection with `hjkl`, place one object beside another
+- [ ] **Visual design pass:** the look of the canvas, the status line and the labels, before the repository goes public
 
 Not in v1: freehand drawing, collaboration, a document view, right-to-left text, images, plugins.
 
@@ -80,10 +86,11 @@ arrow id=a1 x1=0 y1=0 x2=3 y2=0
 ```
 
 Text and math sit at the top-left of their box, circles and ellipses at their centre, rectangles
-at their top-left corner, and arrows point from `x1,y1` to `x2,y2`. Hand-written files may use
-comments, any property order and other KDL string forms; lawh writes this fixed shape. A board
-holds at most 500 objects and the file at most 1 MiB. Files must be UTF-8; a leading byte order
-mark (BOM) is skipped.
+at their top-left corner, and arrows point from `x1,y1` to `x2,y2`. Text and math may take a
+`size` after `y` (`text id=t3 x=0 y=-8 size=2 "Title"`): a multiplier on the text height, from
+0.25 to 16, written only when it isn't 1. Hand-written files may use comments, any property order
+and other KDL string forms; lawh writes this fixed shape. A board holds at most 500 objects and
+the file at most 1 MiB. Files must be UTF-8; a leading byte order mark (BOM) is skipped.
 
 The `:` commands use the same names, so `:circle r=3` reads like the line it creates.
 
@@ -94,14 +101,16 @@ The `:` commands use the same names, so `:circle r=3` reads like the line it cre
                          │
                          ▼
                     lawh-core ── board model, .lawh reader and writer,
-                         │       Vim engine (modes, : commands, undo, key maps)
+                         │       Vim engine (modes, : commands, undo, key maps,
+                         │       sizes, jump labels, :sym)
                          ▼
                     lawh-render ── draws the board (vello_cpu) with a per-frame work budget,
-                         │         and the cursor, selection and status line over it
-                         │         (later: export SVG / PNG / PDF)
+                         │         and the cursor, selection, jump labels, :sym rows and
+                         │         status line over it (later: export SVG / PNG / PDF)
                          │
                          └──► lawh-math ── Typst math → vector paths, compiled in a
-                                           sandboxed worker process
+                                           sandboxed worker process; Typst's symbol
+                                           names for :sym
 ```
 
 `lawh-core` has no rendering or windowing code, so the Vim engine is tested as plain functions:
@@ -174,10 +183,13 @@ The essentials. Every key and command: [docs/keys.md](docs/keys.md).
 |---|---|
 | `h` `j` `k` `l` | Move the cursor one grid unit; with a count, `5l` |
 | `w` `b`, `H` `J` `K` `L` | Jump to the next or previous object, or the nearest one left, down, up or right |
+| `s` then a label | Jump to any object in view by the label shown on it |
 | `:circle r=3`, `:rect 4 2`, `:line 3 0`, `:arrow 3 0` | Draw at the cursor |
 | `:text Hello`, `:math A = pi r^2` | Text or math at the cursor |
 | `i` `a` `o` | Type a new text block, or into the current text or math block |
 | `<CR>` | Edit the current text or math block in Vim's Normal mode |
+| `<C-a>` `<C-x>` | Make the current text or math block larger or smaller |
+| `:sym integral` | Put in a math symbol by name; `<C-k>` while typing in a block |
 | `dd` `yy` `p` `P` | Delete, yank, put below or above |
 | `v` | Select objects with a rectangle |
 | `u` `<C-r>` `.` | Undo, redo, repeat the last change |

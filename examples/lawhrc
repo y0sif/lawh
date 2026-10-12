@@ -32,6 +32,11 @@ nnoremap ' ;
 " U redoes, as Ctrl+R does.
 nnoremap U <C-r>
 
+" Jump labels (s) are made of these characters, the first for the nearest
+" object. Uncomment to add ; to the home row: keys typed while labels show
+" are never mapped, so ; types a label even with noremap ; l above.
+" set jumplabels=asdfghjkl;qwertyuiopzxcvbnm
+
 " Typing j then k quickly in Insert mode leaves it, as <Esc> does. After j,
 " lawh waits timeoutlen (1000 ms by default) for the k before typing the j.
 inoremap jk <Esc>

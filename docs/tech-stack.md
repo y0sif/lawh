@@ -11,11 +11,13 @@ here and must pass `cargo deny check` (see [deny.toml](../deny.toml)).
 | Geometry | `kurbo` | 0.13.1 | Apache-2.0 OR MIT | core, math, render | Points, rectangles, Bézier paths and transforms. Must stay the version `vello_cpu` re-exports. |
 | Library errors | `thiserror` | 2.0.21 | MIT OR Apache-2.0 | core, math, render | Typed error enums callers can match on. |
 | Graphemes | `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 | core | Splits a block's text into graphemes (what a reader sees as one character), so the cursor moves and `x` deletes `é` with a combining accent, or a family emoji, as one. Its `GraphemeCursor` finds the boundary next to a byte without splitting the whole text. Already in the tree through Typst and winit. |
+| Symbol search | `nucleo-matcher` | 0.3.1 (pinned `=`) | MPL-2.0 | core | Fuzzy matching (a name matches when it holds the query's letters in order) of symbol names for `:sym`: Helix's matcher, with fzf's query syntax and smart case. Only the matcher, not `nucleo` 0.5, which brings threads and rayon. It adds only `memchr` to lawh-core (it uses `unicode-segmentation` too, already there). Pinned exactly: the ranking `:sym` shows, and its tests, follow its scores. Matching over Typst's 1,142 `sym` names took 25 to 75 µs a query in release (measured while choosing it). |
 | Logging | `tracing` | 0.1.44 | MIT | math, render, app | Structured logs, the Rust standard. |
 | Log output | `tracing-subscriber` (`env-filter`) | 0.3.23 | MIT | app | Prints logs to stderr, filtered by `RUST_LOG`. |
 | App errors | `anyhow` | 1.0.104 | MIT OR Apache-2.0 | app | Context chaining at the top level. |
 | Math | `typst` | 0.15.1 (pinned `=`) | Apache-2.0 | math | Real math layout from readable syntax (`pi r^2`), pure Rust. Pinned exactly: lawh-math walks its frame types, which change between releases. |
 | Math output | `typst-layout` | 0.15.1 (pinned `=`) | Apache-2.0 | math | `PagedDocument`, the compiled page lawh converts to paths. |
+| Symbol names | `codex` (no default features) | 0.3.0 (pinned `=`) | Apache-2.0 | math | Typst's own table of symbol names (`sym`, with `gender` and `control`), read for `:sym`'s list without running Typst. Pinned to the version Typst 0.15.1 takes them from, so every name in the list is one the worker compiles. No new crates: Typst already brings it. |
 | Glyph outlines | `ttf-parser` (no default features) | 0.25.1 | MIT OR Apache-2.0 | math, render | Typst's own font type. Reads glyph outlines and bounds for math, and outline statistics for the frame budget. |
 | Worker memory cap | `rlimit` | 0.11.0 | MIT | math (Unix only) | Caps the math worker's address space (`RLIMIT_AS`) and turns off its core dumps, without `unsafe` code of our own (the workspace denies it). |
 | Drawing | `vello_cpu` | 0.3.0 | Apache-2.0 OR MIT | render | Vello's most mature renderer by its own README; draws on the CPU, headless. |
@@ -58,8 +60,11 @@ can't probe what is installed. Sources and checksums are in
 
 | Font | File | Version | Licence | Used for |
 |---|---|---|---|---|
-| Inter Regular (static) | `Inter-Regular.ttf` | 4.1 | OFL-1.1 (`Inter-OFL.txt`) | Text, and text inside math |
-| Libertinus Math Regular | `LibertinusMath-Regular.otf` | 7.051 | OFL-1.1 (`Libertinus-OFL.txt`) | Math (it has the OpenType `MATH` table Typst needs) |
+| Inter Regular (static) | `Inter-Regular.ttf` | 4.1 | OFL-1.1 (`Inter-OFL.txt`) | Text, the status bar and jump labels, and text inside math |
+| Libertinus Math Regular | `LibertinusMath-Regular.otf` | 7.051 | OFL-1.1 (`Libertinus-OFL.txt`) | Math (it has the OpenType `MATH` table Typst needs), and the fallback for characters Inter lacks in text, the status bar and jump labels (`:sym` symbols such as `⊞`) |
+
+Of the 1,189 symbol names Typst math knows (codex 0.3.0), the two fonts draw 732; `:sym` lists
+only those. A bundled font with more symbols is a decision for the visual design pass.
 
 OFL-1.1 asks that the licence travel with the font. Since the binary embeds both, the release
 archives ship `Inter-OFL.txt` and `Libertinus-OFL.txt` next to `LICENSE`.
@@ -91,7 +96,6 @@ checked on crates.io on 2026-10-10.
 | Job | Crate | Version | Licence | Why |
 |---|---|---|---|---|
 | Spatial index for motions | `rstar` | 0.13.0 | MIT OR Apache-2.0 | Nearest-object queries for `H J K L`, if scanning the board's 500 objects (how motions work today, bounded by `MAX_KEY_WORK`) gets too slow. |
-| Symbol search | `nucleo` | 0.5.0 | MPL-2.0 | Helix's fuzzy matcher for `:sym integral`. |
 | PDF export | `krilla` | 0.8.2 | MIT OR Apache-2.0 | The PDF library Typst itself uses. |
 | Clipboard | `arboard` | 3.6.1 | MIT OR Apache-2.0 | Cross-platform, Wayland support behind a feature. |
 | Live reload | `notify` | 8.2.0 | CC0-1.0 | Reload a board when it changes on disk (hand edits, agents). |
@@ -100,8 +104,8 @@ checked on crates.io on 2026-10-10.
 `vello_gpu` (0.3.0) is the upgrade path if the CPU renderer gets too slow; a release frame of
 `examples/area.lawh` takes about 1.1 ms today.
 
-`nucleo` is MPL-2.0, a file-level copyleft: fine as an unmodified dependency of an MIT app, but
-changes to its own files would have to stay MPL.
+`nucleo-matcher` is MPL-2.0, a file-level copyleft: fine as an unmodified dependency of an MIT
+app, but changes to its own files would have to stay MPL.
 
 ## Rejected
 

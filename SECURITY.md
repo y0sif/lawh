@@ -47,12 +47,14 @@ window.
   worst hostile file found took 32 ms to read.
 - **Caps:** at most 500 objects, 6 entries per node, 64 KiB per string or number in the file,
   5,000 characters and 500 lines per text or formula, 40,000 characters of text on a board, ids of
-  64 characters, coordinates and sizes within 1,000,000 grid units, and block comments 16 levels
-  deep. The full table is in [docs/architecture.md](docs/architecture.md#limits).
+  64 characters, coordinates and sizes within 1,000,000 grid units, text and math sizes from 0.25
+  to 16, and block comments 16 levels deep. The full table is in
+  [docs/architecture.md](docs/architecture.md#limits).
 - **First problem stops it:** reading stops at the first problem, and no window opens for a file
   that fails.
 - **Drawing:** every frame's work is budgeted, so a board built to be slow to draw can't freeze
-  the window: objects over the budget are drawn as outlines.
+  the window: objects over the budget are drawn as outlines. The largest text size is inside what
+  the budget's glyph costs were measured for.
 
 ### An untrusted formula
 
@@ -96,6 +98,12 @@ t seconds. lawh stays responsive meanwhile:
 - Only formulas on screen are asked for, nearest the centre of the view first.
 - A formula that failed or timed out isn't compiled again: its failure is cached.
 
+**The `:sym` list compiles nothing.** The symbols `:sym` offers come from codex's static tables
+(Typst's own list of names, pinned to the version lawh's Typst takes them from) and the bundled
+fonts' character maps, read in the app process at start. Nothing from a board or a keystroke goes
+into making it, and no formula is compiled to make it. A pick puts a name into a math block,
+which then compiles in the worker like any other formula.
+
 **What the sandbox is not:** it is not an operating-system sandbox. The worker runs as your user
 with the same permissions as lawh; what keeps Typst from your files and the network is the Typst
 world lawh gives it, which offers no file, network or clock access. Treat a way around that world
@@ -119,7 +127,11 @@ as a vulnerability and report it.
     (`MAX_EXPANDED_KEYS`);
   - at most 100 million units of work (`MAX_KEY_WORK`), each kind of work weighted by what it
     costs: spending it all takes about 0.1 s in debug and 10 ms in release (derived from the
-    measured cost of a unit);
+    measured cost of a unit; 30 ms in release when it was matching `:sym` names, 66 ms over the
+    longest names, measured). Text the renderer lays out to measure it for a key counts too
+    (`Measure::take_work`): before it did, a mapping that typed into a long text and then showed
+    jump labels (the short labels `s` puts on objects to jump to) or moved froze the window for
+    1.9 to 6.4 s in release; now it stops within 46 to 99 ms (measured);
   - at most 4 writes (`MAX_WRITES_PER_KEY`): about 11 ms, derived from 2.76 ms a write
     (measured, build not recorded).
 
@@ -127,11 +139,22 @@ as a vulnerability and report it.
   left consistent, as after any command. Before these caps, crafted mappings froze the window for
   1.8 s to 858 s in release (measured). In a fuzz of 4,000 random key scripts during review, the
   slowest key took 35 ms in release (measured).
+
+  Milestone 3's commands have caps of their own: jump labels of at most 2 characters
+  (`MAX_LABEL_KEYS`) from an alphabet of 2 to 52 (`MIN_LABEL_CHARS`, `MAX_LABEL_CHARS`); at most
+  4,096 symbols for `:sym` (`MAX_SYMBOLS`); and a `:sym` query of at most 64 characters
+  (`MAX_SYM_QUERY_CHARS`), one past 256 bytes (`MAX_SYM_QUERY_BYTES`) refused before it is copied
+  or counted.
 - **Atomic writes.** `:w` writes a new file next to the board, flushes it to disk and renames it
   over the board; on Unix it flushes the directory too. A crash or power cut leaves the old board
   or the new one, never half of each. On Unix the new file has the old file's permissions from
   the moment it is created, so a write never makes a board more readable.
 - **Links.** A symbolic link is written through: the file it points at is replaced and the link
   stays. At most 40 links in a row are followed (`MAX_LINK_HOPS`); past that the write fails.
+- **Same file.** After a good write, the app asks whether the file it wrote is the board's own
+  under another name (`~/a.lawh`, an absolute path, a link), to mark the board saved. It follows
+  links as the atomic write does, then compares device and inode on Unix, or canonical paths
+  elsewhere. It only reads file metadata, after the write; a path it can't look up (a loop of
+  links) counts as another file, so the board stays marked unsaved.
 - **Where writes go.** Only to the path typed after `:w` (or the board's own), a relative one taken
   from the directory lawh started in. `:w !cmd` and `:w >>file` are refused: no shell runs.
