@@ -42,7 +42,7 @@ view in two or three keys, and `:sym` to put in a math symbol by name.
 - [x] **Math** in [Typst](https://typst.app) syntax: `A = pi r^2`, `sum_(i=1)^n i`
 - [x] **Editing:** delete, yank and put, undo and redo, `.` to repeat, counts everywhere, Vim editing inside text and math blocks
 - [x] **Sizes:** text and math from 0.25 to 16 times the default size, with `<C-a>` and `<C-x>`, `:size 2`, or `size=2` in the file; math is drawn to match the height of the text beside it
-- [x] **Jump labels:** `s` puts a one- or two-letter label on every object in view; type one to jump there, or `ds` and a label to delete a far object without moving
+- [x] **Jump labels:** `s` puts a one- or two-character label on every other object in view; type one to jump there, or `ds` and a label to delete a far object without moving
 - [x] **Symbol search:** `:sym integral` finds a math symbol by its Typst name, with the best matches shown as you type (fuzzy matching: a name matches when it holds the query's letters in order, not necessarily side by side)
 - [x] **Placing:** put objects or a new text block below or above another, clear of the rest (`p`, `P`, `o`, `O`)
 - [x] **Files:** plain-text `.lawh` boards that diff cleanly in git, saved atomically with `:w`

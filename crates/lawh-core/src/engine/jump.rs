@@ -72,8 +72,9 @@ pub const MIN_LABEL_CHARS: usize = 2;
 /// them take 208 bytes, the largest `:set` value.
 pub const MAX_LABEL_CHARS: usize = 52;
 
-/// The `jumplabels` option by default: flash.nvim's, the home row, then the top row, then the
-/// bottom row, each from the left.
+/// The `jumplabels` option by default: flash.nvim's
+/// (<https://github.com/folke/flash.nvim/blob/main/lua/flash/config.lua>), the home row, then
+/// the top row, then the bottom row, each from the left.
 pub const DEFAULT_JUMP_LABELS: &str = "asdfghjklqwertyuiopzxcvbnm";
 
 /// The keys that show jump labels, in Normal mode, Visual mode and after an operator.

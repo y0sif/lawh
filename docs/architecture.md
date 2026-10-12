@@ -241,7 +241,7 @@ the caps.
 | Symbols `:sym` keeps | 4,096 | `MAX_SYMBOLS`, `engine/sym.rs` | Typst's 1,189 names (732 drawable), with room for a later Typst and more fonts. Every key of the costliest 64-character query over 4,096 Typst-like names fits in a third of `MAX_KEY_WORK`: 4.3 ms in debug (measured). |
 | Characters in a `:sym` query | 64 | `MAX_SYM_QUERY_CHARS`, same | The longest Typst name has 28. Each query word is a pass over every name: a query of 1,000 characters and 500 words took 7.3 ms in release (measured); 64 characters hold at most 32 words. |
 | Bytes of a `:sym` query read | 256 (4 a character) | `MAX_SYM_QUERY_BYTES`, same | A longer query is refused before the line is copied or counted (derived from UTF-8's 4 bytes a character). A mapping that typed on a 20 KB `:sym` line 30,000 times took 110 ms in release before, 6.5 ms after (measured). |
-| `:sym` rows shown | 8 | `SYM_ROWS`, same | As many as a completion menu shows in Helix or Neovim without scrolling; they fit above the status bar in any window lawh is usable in. |
+| `:sym` rows shown | 8 | `SYM_ROWS`, same | Eight rows fit above the status bar in any window lawh is usable in, and a query a few characters long already narrows Typst's names to a handful. |
 | Writes per typed key | 4 | `MAX_WRITES_PER_KEY`, `engine/exec.rs` | One write costs the app 2.76 ms (measured on an SSD, build not recorded); 4 take about 11 ms and leave room for a mapping that writes the board and a copy. |
 | Writes waiting for their report | 4 (= `MAX_WRITES_PER_KEY`) | `MAX_PENDING_WRITES`, same | The app reports right after the key, so only one key's writes wait together. |
 | Visual highlights per frame, less what jump labels cost | 3 ms of estimated work | `HIGHLIGHT_BUDGET_NS`, `lawh-render/src/budget.rs` | A full board selected, every object crossing the screen, would take tens of milliseconds; past it the rectangle still shows the selection. Jump labels are always drawn in full (one not drawn can't be typed), and their estimated cost comes out of this first. |
@@ -482,10 +482,10 @@ The formula is then moved so its first **baseline** (the line its letters sit on
 text's first baseline is when the two share a `y` (`MathLayout::baseline`): a short formula beside
 a label reads as one line. Measured on the drawn pixels of an `x` in each
 (`math_and_text_share_x_height_and_baseline` in `lawh-render/tests/render.rs`, which asserts
-within 0.05 units and 3%): at size 1 the baselines are 0.0075 units apart and math's `x` is 2.30%
-taller, the same ratio at sizes 0.5, 2 and 4. The 2.3% is Libertinus Math's italic `x`, 0.439 em
-tall where its OS/2 x-height says 0.429 (derived from the two). A two-line formula's first line
-sits where a one-line formula does.
+the baselines within `0.05 * size` units and the x-heights within 3%): at size 1 the baselines
+are 0.0075 units apart and math's `x` is 2.30% taller, the same ratio at sizes 0.5, 2 and 4. The
+2.3% is Libertinus Math's italic `x`, 0.439 em tall where its OS/2 x-height says 0.429 (derived
+from the two). A two-line formula's first line sits where a one-line formula does.
 
 A size outside the range (only from a board built without the board's checks) is drawn clamped
 to it. A glyph's drawing cost grows with its size on screen, and the frame budget prices it so:
@@ -727,8 +727,9 @@ the other). From a size between steps the first press goes to the next step that
 the size stays and the message says so. In Visual mode they resize every text and math block of
 the selection, each from its own size, as one undo step, and Visual mode stays. `:si N`, `:si +N`
 and `:si -N` set, add or take, on the current object or on a selection kept from Visual mode
-(below), refused whole when any result is out of range. A resize is an `Edit::Replace` of the
-object's shape, so undo needs nothing new.
+(below), refused whole when any result is out of range. `@:` after a `:si` from Visual mode acts
+on the current object only, since no selection is kept for it. A resize is an `Edit::Replace` of
+the object's shape, so undo needs nothing new.
 
 - **New blocks** take the `size` option, kept in hundredths (`u32`): a float would stop
   `OptionValue` from being `Eq`, and `:set size=` reads its digits without float rounding, at
@@ -782,8 +783,9 @@ one name), in a text block the character (`α`), on the board a new math block o
   against the bundled fonts' character maps, in the app process, without running Typst. It keeps
   the 732 the fonts draw, of 1,189 names, and passes them with
   `Engine::set_symbols(Arc<[Symbol]>)`. The engine keeps up to `MAX_SYMBOLS` usable ones (a name of
-  1 to 64 characters with no space or control character, a value with no control character, the
-  first of a name given twice), and takes a list already in its order as it is, without a copy.
+  1 to 64 characters with no space or control character, a value of 1 or more characters, none a
+  control character, the first of a name given twice), and takes a list already in its order as
+  it is, without a copy.
 - **Matching** is **fuzzy** (a name matches when it holds the query's letters in order, not
   necessarily side by side) by `nucleo-matcher`, Helix's matcher, with fzf's syntax (`^`, `$`,
   `'`, `!`), smart case and a bonus for matches near the start of a name. Best first: the exact
@@ -797,8 +799,6 @@ one name), in a text block the character (`α`), on the board a new math block o
 - **`<C-k>` in Insert mode** opens a line with `sym ` typed that goes back to the Insert session:
   only `:sym` runs from it, and the pick is typed into the session, so it is part of its undo step
   and `.` types the same characters again.
-
-### What one key may cost
 
 ### What one key may cost
 
@@ -818,11 +818,12 @@ counted from the typed key (or timeout, or click) and reset at the next:
   `SYM_CELL_WORK`), fresh ids looked for, bytes of `:` lines run, and bytes of a block's text
   copied, scanned, split into graphemes or walked. A unit is about a nanosecond of work in a debug
   build: each weight was measured with `work_unit_costs` in `tests/engine_cost.rs`. A key that
-  runs out takes about 0.1 s in debug and 10 ms in release (50 ms if it was typing, 15 to 22 ms
-  if it was resizing or showing jump labels; derived from the measured cost of a unit). Matching
-  `:sym` names is the exception: nucleo is a dependency, built optimised in debug too, so a key
-  that runs out matching takes 30 ms in release over 4,096 names as long as Typst's, 66 ms over
-  names of 64 characters (measured). The costliest single commands fit whole: `10000J` down a
+  runs out takes about 0.1 s in debug and 10 ms in release (50 ms if it was typing; derived from
+  the measured cost of a unit). A mapping that runs out resizing takes 12 to 19 ms in release,
+  one that runs out showing jump labels 15 to 22 ms (measured). Matching `:sym` names costs the
+  most in release: nucleo is a dependency, built optimised in debug too, so a key that runs out
+  matching takes 30 ms in release over 4,096 names as long as Typst's, 66 ms over names of 64
+  characters (measured). The costliest single commands fit whole: `10000J` down a
   column of 500 objects is 62.5 million units, `s` over a full board of text 1.3 million, and each
   key of a 64-character `:sym` query over 4,096 names as long as Typst's 32.8 million at most.
 - **`MAX_WRITES_PER_KEY`** (4): writes are counted apart, since the app does them and one costs

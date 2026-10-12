@@ -106,9 +106,8 @@ const MAX_SYM_QUERY_BYTES: usize = 4 * MAX_SYM_QUERY_CHARS;
 
 /// Rows of completions a `:sym` line shows (8), the best match first.
 ///
-/// As many as a completion menu shows in Helix or Neovim without scrolling. Eight rows of the
-/// status line's height stay above the status line in any window lawh is usable in, and a query
-/// a few characters long already narrows Typst's names to a handful.
+/// Eight rows of the status line's height stay above the status line in any window lawh is
+/// usable in, and a query a few characters long already narrows Typst's names to a handful.
 pub const SYM_ROWS: usize = 8;
 
 /// The key that opens a `:sym` line from Insert mode.

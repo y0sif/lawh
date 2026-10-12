@@ -41,10 +41,11 @@ use super::{Engine, Measure};
 /// Each weight below is what one item of its kind of work took in a debug build, measured with
 /// `work_unit_costs` in `tests/engine_cost.rs` (Linux `x86_64`, 2026-10-12, measuring with
 /// [`FixedMeasure`](super::FixedMeasure)). Over its cases a unit took 0.1 to 1.1 ns in debug
-/// and at most 0.1 ns in release (0.5 ns for typing, which is copying, 0.2 ns for resizing
-/// text and looking through jump labels, 0.3 ns for making them), so a key that runs out takes
-/// about 0.1 s in debug and 10 ms in release (50 ms if it was typing, 15 to 22 ms if it was
-/// resizing a board of text or showing jump labels). Matching `:sym` names is the exception:
+/// and at most 0.1 ns in release, except for typing (0.5 ns, which is copying), resizing text
+/// and jump labels, so a key that runs out takes about 0.1 s in debug and 10 ms in release
+/// (50 ms if it was typing). Measured on mappings that run out: resizing a board of text takes
+/// 12 to 19 ms in release and 92 to 115 ms in debug (see `SIZE_WORK`), showing jump labels 15
+/// to 22 ms in release and 89 to 95 ms in debug. Matching `:sym` names costs the most in release:
 /// nucleo does it, and dependencies are optimised in debug builds too, so a unit of it takes
 /// up to 0.9 ns in release as in debug, and a key that runs out matching takes 30 ms in release
 /// over 4,096 names as long as Typst's, 66 ms over names of 64 characters. Keys that do no work

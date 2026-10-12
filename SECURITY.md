@@ -127,8 +127,8 @@ as a vulnerability and report it.
     (`MAX_EXPANDED_KEYS`);
   - at most 100 million units of work (`MAX_KEY_WORK`), each kind of work weighted by what it
     costs: spending it all takes about 0.1 s in debug and 10 ms in release (derived from the
-    measured cost of a unit; 30 ms in release when it was matching `:sym` names, 66 ms over the
-    longest names, measured). Text the renderer lays out to measure it for a key counts too
+    measured cost of a unit; 30 ms in release when it was matching `:sym` names, 66 ms over names
+    of 64 characters, measured). Text the renderer lays out to measure it for a key counts too
     (`Measure::take_work`): before it did, a mapping that typed into a long text and then showed
     jump labels (the short labels `s` puts on objects to jump to) or moved froze the window for
     1.9 to 6.4 s in release; now it stops within 46 to 99 ms (measured);

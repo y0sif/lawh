@@ -17,8 +17,9 @@ typed, whatever the keyboard layout.
 | Block-Normal | Vim's Normal mode inside a text or math block | `-- TEXT --` | `<CR>` on a text or math object | `<Esc>` |
 | Command line | Typing a `:` command | the line itself | `:`; `<C-k>` in Insert mode opens a `:sym` line | `<CR>` runs, `<Esc>` cancels |
 
-Jump labels (`s`, see [Jump labels](#jump-labels)) are not a mode: they show over Normal mode,
-Visual mode or a pending `d` or `y` until a label is typed or they end.
+Jump labels (`s` puts a short label on every object in view; type one to jump there, see
+[Jump labels](#jump-labels)) are not a mode: they show over Normal mode, Visual mode or a pending
+`d` or `y` until a label is typed or they end.
 
 ## The cursor
 
@@ -297,7 +298,8 @@ coordinates within -1,000,000 and 1,000,000. A board holds at most 500 objects.
 | `:si[ze] N` | Set the size of the current text or math block, from 0.25 to 16 |
 | `:si +N`, `:si -N` | Add N to it, or take N from it |
 
-From Visual mode they act on every text and math block selected. See [Sizes](#sizes).
+From Visual mode they act on every text and math block selected; `@:` after one acts on the
+current object only. See [Sizes](#sizes).
 
 ### Symbols: `:sym`
 
@@ -384,8 +386,9 @@ Several options may follow one `:set`. A word starting with `"` ends the line.
 | `size` | 0.25 to 16, at most two decimals | `1` | The size of new text and math blocks (see [Sizes](#sizes)) |
 | `timeoutlen` (`tm`) | 0 to 10,000 | 1000 | Milliseconds keys that start a longer mapping wait for the rest |
 
-The default `jumplabels` is flash.nvim's: the home row, then the top row, then the bottom row,
-each from the left.
+The default `jumplabels` is
+[flash.nvim's](https://github.com/folke/flash.nvim/blob/main/lua/flash/config.lua): the home
+row, then the top row, then the bottom row, each from the left.
 
 ## Key mappings
 

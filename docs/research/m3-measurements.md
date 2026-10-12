@@ -107,7 +107,7 @@ From the doc comments of `LABEL_WORK`, `PICK_WORK` and `MAX_KEY_WORK` in
 | 127 times `m<BS>` among 499 labels, every label looked at each time | 1.27 ms, debug | measured |
 | `PICK_WORK` | 20 units a label looked at | from the row above |
 | `s` over a full board of text | 1.3 million units: 1.1 ms in debug, 0.14 ms in release | measured |
-| A key that runs out showing labels or resizing | 15 to 22 ms, release | derived from the measured cost of a unit (0.2 to 0.3 ns in release) |
+| A mapping that shows labels until the key runs out of work | 15 to 22 ms in release, 89 to 95 ms in debug | measured (lane log, not in the repo) |
 | 500 objects and the default 26 letters | 7 one-character labels, 19 first letters for the two-character ones | derived (`split` in `engine/jump.rs`) |
 | Labels two characters of 26 can make | 676, more than a board holds objects (500) | derived (doc of `MAX_LABEL_KEYS`) |
 
@@ -155,7 +155,7 @@ From the doc comments of `SYM_WORK`, `SYM_CHAR_WORK`, `SYM_CELL_WORK` and `MAX_K
 | The same | 0.20 ms, release | measured (lane log, not in the repo) |
 | `aa` and 61 `a`s over 4,096 names of 64 characters | 1.42 and 2.00 µs a name, debug | measured |
 | 32 `a`s over 4,096 names of 64 characters | 23.8 ms, debug; two words of 31 `a`s 47 ms | measured |
-| Each key of the costliest 64-character query over 4,096 Typst-like names | at most 32.8 million units, 4.3 ms in debug | measured (`a_max_length_query_fits_the_work_budget`) |
+| Each key of the costliest 64-character query over 4,096 Typst-like names | at most 32.8 million units, 4.3 ms in debug | measured (`work_unit_costs`) |
 | A key that runs out of work matching | 30 ms in release over 4,096 Typst-like names, 66 ms over names of 64 characters | measured |
 | A query of 1,000 characters and 500 words over the 1,142 `sym` names | 7.3 ms, release | measured (why `MAX_SYM_QUERY_CHARS` is 64) |
 | A mapping that types and takes back a character after a 20 KB `:sym` query, 30,000 keys | before `MAX_SYM_QUERY_BYTES`: 110 ms in release, 171 ms in debug, no work counted; after: 6.5 ms and 52 ms | measured (`key_costs`) |
@@ -188,7 +188,7 @@ lawh-render builds without optimisation in debug and lays text out about 3.3 tim
 |---|---|---|
 | `w` over 500 texts of 79 characters already laid out | 1.05 million units, 0.63 ms in debug, 40 µs in release | measured (`work_unit_costs` in `measure_cost.rs`; doc of `MEASURE_WORK`) |
 | A whole board of text laid out afresh, at the text caps | estimated at up to 125 ms (125 million units); takes about 70 ms in release | estimate derived, time measured (`text_caps_worst_cases`) |
-| The worst board to open, after board text gained its font fallback (a character Inter lacks drawn from Libertinus Math) | 70.7 ms, release | measured (lane log, not in the repo); the table in `MAX_BOARD_TEXT_CHARS`'s doc still gives 68 and 69 ms from 2026-10-11 |
+| The worst board to open, after board text gained its font fallback (a character Inter lacks drawn from Libertinus Math) | 70.7 ms, release | measured (lane log, not in the repo; noted in `MAX_BOARD_TEXT_CHARS`'s doc, whose table keeps the 68 and 69 ms of 2026-10-11) |
 | Text with characters neither font has, after the font fallback | 0.05 to 0.2 µs a character slower to lay out | measured (lane log, not in the repo; build not recorded) |
 
 `Engine::go_first` on a board just opened doesn't count laying the board out, since that would

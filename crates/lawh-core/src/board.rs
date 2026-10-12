@@ -147,6 +147,9 @@ pub const MAX_TEXT_LINES: usize = 500;
 /// | 80 failing formulas of 499 line breaks, drawn as their source | 25 ms | +9 MiB | 9 ms |
 /// | before these caps: 83 texts of 100,000 line breaks (an 8.3 MB file) | 4,203 ms | +1,475 MiB | 167 ms |
 ///
+/// Since board text gained its font fallback (characters Inter lacks drawn from Libertinus
+/// Math), the worst of these boards opens in 70.7 ms (measured, release, 2026-10-12).
+///
 /// Laying out costs from 0.4 us a character for plain words to 1.7 us for text that changes
 /// script or direction at every character, so the cap keeps opening under about 100 ms even
 /// then, and frames stay well inside the renderer's budget. Real boards hold a few thousand

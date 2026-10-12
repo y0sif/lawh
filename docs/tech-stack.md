@@ -60,7 +60,7 @@ can't probe what is installed. Sources and checksums are in
 
 | Font | File | Version | Licence | Used for |
 |---|---|---|---|---|
-| Inter Regular (static) | `Inter-Regular.ttf` | 4.1 | OFL-1.1 (`Inter-OFL.txt`) | Text, the status bar and jump labels, and text inside math |
+| Inter Regular (static) | `Inter-Regular.ttf` | 4.1 | OFL-1.1 (`Inter-OFL.txt`) | Text, the status bar and jump labels (the short labels `s` puts on objects to jump to), and text inside math |
 | Libertinus Math Regular | `LibertinusMath-Regular.otf` | 7.051 | OFL-1.1 (`Libertinus-OFL.txt`) | Math (it has the OpenType `MATH` table Typst needs), and the fallback for characters Inter lacks in text, the status bar and jump labels (`:sym` symbols such as `⊞`) |
 
 Of the 1,189 symbol names Typst math knows (codex 0.3.0), the two fonts draw 732; `:sym` lists
