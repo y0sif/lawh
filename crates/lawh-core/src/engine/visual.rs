@@ -1,9 +1,11 @@
 //! Visual mode: `v` spans a rectangle from where it was pressed to the cursor and selects the
-//! objects inside it, for `d`, `x` and `y`.
+//! objects inside it, for `d`, `x` and `y`, the size keys `<C-a>` and `<C-x>`, and `:si` (`:`
+//! keeps the selection for the command line it opens).
 
 use kurbo::Rect;
 
 use super::normal::{Lookup, MOTIONS, Motion, Operator, Pending, lookup};
+use super::size::Grow;
 use super::{Cursor, Effect, Engine, Measure, Mode, bounds};
 use crate::board::ObjectId;
 use crate::key::{Key, KeyCode};
@@ -15,8 +17,10 @@ enum Visual {
     Operator(Operator),
     /// `v` or `<Esc>`.
     Leave,
-    /// `:` leaves Visual mode and opens the command line.
+    /// `:` leaves Visual mode and opens the command line, keeping the selection for `:si`.
     CommandLine,
+    /// `<C-a>`, `<C-x>`: resize the text and math selected; Visual mode stays.
+    Size(Grow),
 }
 
 /// Visual-mode commands by their keys, after any count. Motions come from [`MOTIONS`].
@@ -27,6 +31,8 @@ const VISUAL: &[(&[Key], Visual)] = &[
     (&[Key::char('v')], Visual::Leave),
     (&[Key::named(KeyCode::Esc)], Visual::Leave),
     (&[Key::char(':')], Visual::CommandLine),
+    (&[Key::ctrl('a')], Visual::Size(Grow::Larger)),
+    (&[Key::ctrl('x')], Visual::Size(Grow::Smaller)),
 ];
 
 /// What some keys make in Visual mode.
@@ -38,7 +44,13 @@ enum Found {
 
 impl Engine {
     /// The Visual selection: the objects whose bounds lie inside [`Engine::visual_rect`], in
-    /// z-order, as measured after the last key. Empty outside Visual mode.
+    /// z-order, as measured after the last key that moved the cursor. Empty outside Visual
+    /// mode, except on a command line opened from Visual mode with `:`, which keeps the
+    /// selection for `:si` (as Vim's `:'<,'>`) until it closes, while
+    /// [`Engine::visual_rect`] is `None`.
+    ///
+    /// The size keys in Visual mode keep the same objects selected, even those that grew out
+    /// of the rectangle; the next motion selects from the rectangle again.
     ///
     /// Every key that moves the cursor in Visual mode pays for the new selection before it
     /// moves (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)), so a motion that runs out of work part
@@ -77,10 +89,12 @@ impl Engine {
         self.select(measure);
     }
 
-    /// Leaves Visual mode, if in it, for Normal mode.
+    /// Leaves Visual mode, if in it, for Normal mode, and drops the selection (that of a
+    /// command line opened from Visual mode too).
     pub(super) fn leave_visual(&mut self) {
         self.visual = None;
         self.selection.clear();
+        self.visual_command = false;
         if self.mode == Mode::Visual {
             self.mode = Mode::Normal;
         }
@@ -140,8 +154,15 @@ impl Engine {
             }
             Lookup::Found(Found::Command(Visual::Leave)) => self.leave_visual(),
             Lookup::Found(Found::Command(Visual::CommandLine)) => {
+                let selection = std::mem::take(&mut self.selection);
                 self.leave_visual();
                 self.open_command_line();
+                self.selection = selection;
+                self.visual_command = true;
+            }
+            Lookup::Found(Found::Command(Visual::Size(grow))) => {
+                let count = self.pending.count.unwrap_or(1);
+                self.visual_size_key(grow, count);
             }
         }
         self.pending = Pending::default();

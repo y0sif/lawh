@@ -107,9 +107,22 @@ impl Run {
         self
     }
 
-    /// Tells the engine the app wrote `path` (or failed to), keeping the effects it returns.
+    /// Tells the engine the app wrote `path` (or failed to), keeping the effects it returns. The
+    /// app found `path` to be another file than the board's own, or did not look.
     pub fn write_done(&mut self, path: &str, result: Result<(), &str>) -> &mut Self {
-        let effects = self.engine.write_done(path, result.map_err(str::to_owned));
+        let effects = self
+            .engine
+            .write_done(path, result.map_err(str::to_owned), false);
+        self.effects.extend(effects);
+        self
+    }
+
+    /// [`Run::write_done`] for a write the app found to be to the board's own file, whatever
+    /// its path says (a link to it, say).
+    pub fn write_done_same_file(&mut self, path: &str, result: Result<(), &str>) -> &mut Self {
+        let effects = self
+            .engine
+            .write_done(path, result.map_err(str::to_owned), true);
         self.effects.extend(effects);
         self
     }

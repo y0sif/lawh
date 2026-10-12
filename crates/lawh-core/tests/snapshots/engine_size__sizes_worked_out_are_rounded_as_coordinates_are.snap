@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_size.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=object(t1) keys=11
+lawh version=1
+text id=t1 x=0 y=0 size=1.3 "a"

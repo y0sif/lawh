@@ -6,7 +6,7 @@
 
 use lawh_core::engine::{
     Command, CommandError, End, Escape, MAX_MAP_KEYS, MAX_TIMEOUTLEN, MapKey, MapMode, OptionName,
-    OptionValue, Segment, SetArg, parse_command,
+    OptionValue, Segment, SetArg, SizeChange, parse_command,
 };
 use lawh_core::{Key, parse_keys};
 
@@ -73,6 +73,7 @@ fn every_short_form_names_its_command() {
         ("cunmap", 2, "cu a"),
         ("cmapclear", 5, "cmapc"),
         ("set", 2, "se tm=5"),
+        ("size", 2, "si 2"),
     ];
     for (name, min, example) in cases {
         let expected = parsed(example);
@@ -192,24 +193,31 @@ fn numbers_are_plain_decimals() {
     }
 }
 
+/// `:text` of `text` at `size`.
+fn text(text: &str, size: Option<f64>) -> Command {
+    Command::Text {
+        text: text.to_owned(),
+        size,
+    }
+}
+
+/// `:math` of `src` at `size`.
+fn math(src: &str, size: Option<f64>) -> Command {
+    Command::Math {
+        src: src.to_owned(),
+        size,
+    }
+}
+
 #[test]
 fn text_and_math_are_verbatim_after_the_first_space() {
     let special = r#"a | b "c" # d \n %e $f <g> \"#;
-    assert_eq!(
-        parsed(&format!("te {special}")),
-        Command::Text(special.to_owned())
-    );
-    assert_eq!(
-        parsed(&format!("ma {special}")),
-        Command::Math(special.to_owned())
-    );
+    assert_eq!(parsed(&format!("te {special}")), text(special, None));
+    assert_eq!(parsed(&format!("ma {special}")), math(special, None));
     // Only the first space goes: more spaces at the start, and any at the end, are kept.
-    assert_eq!(parsed("te   two  "), Command::Text("  two  ".to_owned()));
-    assert_eq!(parsed("text\tx"), Command::Text("x".to_owned()));
-    assert_eq!(
-        parsed("math A = pi r^2"),
-        Command::Math("A = pi r^2".to_owned())
-    );
+    assert_eq!(parsed("te   two  "), text("  two  ", None));
+    assert_eq!(parsed("text\tx"), text("x", None));
+    assert_eq!(parsed("math A = pi r^2"), math("A = pi r^2", None));
     // Nothing, or only spaces, is no text.
     assert_eq!(error("te"), "missing the text: `:te[xt] <text>`");
     assert_eq!(error("te    "), "missing the text: `:te[xt] <text>`");
@@ -217,6 +225,91 @@ fn text_and_math_are_verbatim_after_the_first_space() {
     assert_eq!(error("te! x"), "`:text` takes no `!`");
     // The name must end at a space.
     assert_eq!(error("te|x"), "unknown command `:te|x`");
+}
+
+#[test]
+fn text_and_math_take_size_options_first() {
+    assert_eq!(parsed("te ++size=2 Title"), text("Title", Some(2.0)));
+    assert_eq!(parsed("ma ++size=.5 x^2"), math("x^2", Some(0.5)));
+    // One space after an option goes, as after the name; the rest is verbatim.
+    assert_eq!(parsed("te ++size=1.5   a  "), text("  a  ", Some(1.5)));
+    assert_eq!(parsed("te ++size=16\tx"), text("x", Some(16.0)));
+    // Only leading `++` words are options: these are text.
+    for line in [
+        "te size=2 Title",
+        "te Title ++size=2",
+        "te  ++size=2 x",
+        "te +size=2",
+        "te ++",
+        "te ++2",
+        "te ++=2",
+    ] {
+        let body = &line[3..];
+        assert_eq!(parsed(line), text(body, None), "{line:?}");
+    }
+    let cases = [
+        ("te ++size=2", "missing the text: `:te[xt] <text>`"),
+        ("ma ++size=2   ", "missing the formula: `:ma[th] <formula>`"),
+        (
+            "te ++size=17 x",
+            "size 17 is out of range: sizes go from 0.25 to 16",
+        ),
+        (
+            "te ++size=0.2 x",
+            "size 0.2 is out of range: sizes go from 0.25 to 16",
+        ),
+        (
+            "ma ++size=-1 x",
+            "size -1 is out of range: sizes go from 0.25 to 16",
+        ),
+        ("te ++size=big x", "`big` is not a number"),
+        ("te ++size= x", "`` is not a number"),
+        ("te ++size x", "missing a number: `++size=N`"),
+        ("te ++size=2 ++size=3 x", "`++size=` is given twice"),
+        (
+            "te ++bold x",
+            "unknown option `++bold`: `:text` and `:math` take `++size=N`",
+        ),
+        (
+            "ma ++size=2 ++font=x y",
+            "unknown option `++font=x`: `:text` and `:math` take `++size=N`",
+        ),
+        (
+            "te ++Size=2 x",
+            "unknown option `++Size=2`: `:text` and `:math` take `++size=N`",
+        ),
+    ];
+    assert_messages(&cases);
+}
+
+#[test]
+fn size_takes_one_number_or_a_change() {
+    assert_eq!(parsed("si 2"), Command::Size(SizeChange::To(2.0)));
+    assert_eq!(parsed("size .25"), Command::Size(SizeChange::To(0.25)));
+    assert_eq!(parsed("si 16"), Command::Size(SizeChange::To(16.0)));
+    assert_eq!(parsed("si +1"), Command::Size(SizeChange::By(1.0)));
+    assert_eq!(parsed("si -0.5"), Command::Size(SizeChange::By(-0.5)));
+    // A change of any size reads: the sizes it makes are checked when it runs.
+    assert_eq!(parsed("si +100"), Command::Size(SizeChange::By(100.0)));
+    assert_eq!(parsed("si   3  "), Command::Size(SizeChange::To(3.0)));
+    let cases = [
+        ("si", "missing a number: `:si[ze] N`, `:si +N` or `:si -N`"),
+        (
+            "si 1 2",
+            "too many numbers: `:si[ze] N`, `:si +N` or `:si -N`",
+        ),
+        ("si x", "`x` is not a number"),
+        ("si 1e2", "`1e2` is not a number"),
+        ("si! 2", "`:size` takes no `!`"),
+        ("si 0", "size 0 is out of range: sizes go from 0.25 to 16"),
+        (
+            "si 16.5",
+            "size 16.5 is out of range: sizes go from 0.25 to 16",
+        ),
+        ("si2", "unknown command `:si2`"),
+        ("s 2", "unknown command `:s`"),
+    ];
+    assert_messages(&cases);
 }
 
 #[test]
@@ -504,7 +597,7 @@ fn keys_alone_show_mappings_and_unmap_takes_keys() {
 
 #[test]
 fn set_takes_options() {
-    use OptionName::{Escape as EscapeOption, Leader, TimeoutLen};
+    use OptionName::{Escape as EscapeOption, Leader, Size, TimeoutLen};
     let set = |line: &str| match parsed(line) {
         Command::Set(args) => args,
         other => panic!("{other:?}"),
@@ -540,6 +633,18 @@ fn set_takes_options() {
             SetArg::Show(TimeoutLen),
             SetArg::Show(Leader),
             SetArg::Reset(EscapeOption),
+        ]
+    );
+    // Sizes in hundredths: two decimals at most, from 0.25 to 16.
+    assert_eq!(
+        set("set size=1.5 size=.25 size=16 size=+2 size? size&"),
+        vec![
+            SetArg::Assign(OptionValue::Size(150)),
+            SetArg::Assign(OptionValue::Size(25)),
+            SetArg::Assign(OptionValue::Size(1600)),
+            SetArg::Assign(OptionValue::Size(200)),
+            SetArg::Show(Size),
+            SetArg::Reset(Size),
         ]
     );
 }
@@ -670,6 +775,27 @@ fn set_errors_say_what_is_wrong() {
         ),
     ];
     assert_messages(&cases);
+    // Sizes out of range, with more than two decimals, or not numbers.
+    for value in [
+        "0.2",
+        "16.01",
+        "0",
+        "-1",
+        "1.234",
+        "1e1",
+        "big",
+        "",
+        "99999999999",
+    ] {
+        assert_eq!(
+            error(&format!("set size={value}")),
+            format!(
+                "bad value `{value}` for `size`: it takes a size from 0.25 to 16, with at most two \
+                 decimals"
+            ),
+            "{value}"
+        );
+    }
 }
 
 /// Each line fails to parse with its message.

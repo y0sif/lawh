@@ -8,6 +8,7 @@ use super::motion::{Direction, ObjectMotion, Origin, path};
 use super::ops::Target;
 use super::place::Side;
 use super::repeat::Context;
+use super::size::Grow;
 use super::text::Entry;
 use super::work::{LOOK_WORK, ORDER_WORK};
 use super::{Cursor, Effect, Engine, MAX_COUNT, Measure, Mode};
@@ -94,6 +95,8 @@ enum Normal {
     CommandLine,
     /// `i a I A o O <CR>`: into a text block.
     Text(Entry),
+    /// `<C-a>` (larger), `<C-x>` (smaller): the size of a text or math block.
+    Size(Grow),
 }
 
 /// Normal-mode commands by the keys that run them, after any count.
@@ -114,6 +117,8 @@ const NORMAL: &[(&[Key], Normal)] = &[
     (&[Key::char('o')], Normal::Text(Entry::Open(Side::Below))),
     (&[Key::char('O')], Normal::Text(Entry::Open(Side::Above))),
     (&[Key::named(KeyCode::Enter)], Normal::Text(Entry::Block)),
+    (&[Key::ctrl('a')], Normal::Size(Grow::Larger)),
+    (&[Key::ctrl('x')], Normal::Size(Grow::Smaller)),
 ];
 
 /// What some keys make in a key table.
@@ -366,6 +371,11 @@ impl Engine {
             Normal::CommandLine => self.open_command_line(),
             // The Insert session finishes the change for `.` when it ends.
             Normal::Text(entry) => self.enter_text(entry, count, measure),
+            Normal::Size(grow) => {
+                if self.size_key(grow, n) {
+                    self.repeat.finish(count);
+                }
+            }
         }
         Vec::new()
     }

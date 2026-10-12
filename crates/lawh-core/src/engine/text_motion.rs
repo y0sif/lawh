@@ -383,7 +383,8 @@ pub(super) fn last_of_line(text: &str, byte: usize, count: u32) -> usize {
 }
 
 /// A grapheme's class for word motions, as Vim's `cls()`: blanks separate words; a word is a
-/// run of letters, digits and `_`, or a run of other characters.
+/// run of letters, digits and `_`, or a run of other characters. For WORD motions (`W B E`) every
+/// grapheme that is not blank is of one class, so a WORD is a run of non-blank graphemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Class {
     Blank,
@@ -418,6 +419,9 @@ enum Step {
 /// line's end (where Vim's cursor stands on the line's NUL), which counts as blank.
 struct Walk<'a> {
     text: &'a str,
+    /// WORDs (`W B E`): punctuation is of the same class as letters, as Vim's `cls()` has it
+    /// with `cls_bigword`.
+    big: bool,
     /// The line the walk is on.
     line: Line,
     byte: usize,
@@ -428,10 +432,11 @@ struct Walk<'a> {
 }
 
 impl<'a> Walk<'a> {
-    fn new(text: &'a str, byte: usize) -> Self {
+    fn new(text: &'a str, byte: usize, big: bool) -> Self {
         let byte = floor_boundary(text, byte);
         Self {
             text,
+            big,
             line: line_at(text, byte),
             byte,
             starts: None,
@@ -504,10 +509,15 @@ impl<'a> Walk<'a> {
         if self.byte >= self.current().end {
             return Class::Blank;
         }
-        self.text
+        let class = self
+            .text
             .get(self.byte..)
             .and_then(|rest| rest.graphemes(true).next())
-            .map_or(Class::Blank, class)
+            .map_or(Class::Blank, class);
+        match class {
+            Class::Punctuation if self.big => Class::Word,
+            other => other,
+        }
     }
 
     /// On an empty line, which word motions stop at as Vim's do.
@@ -517,9 +527,10 @@ impl<'a> Walk<'a> {
 }
 
 /// `w`, `count` times: the start of the next word, crossing lines and stopping on empty lines.
-/// At the last word it goes to the text's last grapheme. Vim's `fwd_word()`.
-pub(super) fn word_forward(text: &str, byte: usize, count: u32) -> usize {
-    let mut walk = Walk::new(text, byte);
+/// At the last word it goes to the text's last grapheme. Vim's `fwd_word()`. With `big`, `W`:
+/// WORDs, runs of graphemes that are not blank.
+pub(super) fn word_forward(text: &str, byte: usize, count: u32, big: bool) -> usize {
+    let mut walk = Walk::new(text, byte, big);
     'count: for _ in 0..count {
         let start = walk.class();
         let last_line = walk.on_last_line();
@@ -548,9 +559,9 @@ pub(super) fn word_forward(text: &str, byte: usize, count: u32) -> usize {
 }
 
 /// `b`, `count` times: the start of this word or the one before, crossing lines and stopping
-/// on empty lines. Vim's `bck_word()`.
-pub(super) fn word_backward(text: &str, byte: usize, count: u32) -> usize {
-    let mut walk = Walk::new(text, byte);
+/// on empty lines. Vim's `bck_word()`. With `big`, `B`: WORDs, as [`word_forward`].
+pub(super) fn word_backward(text: &str, byte: usize, count: u32, big: bool) -> usize {
+    let mut walk = Walk::new(text, byte, big);
     'count: for _ in 0..count {
         if walk.dec() == Step::Stuck {
             break;
@@ -580,8 +591,9 @@ pub(super) fn word_backward(text: &str, byte: usize, count: u32) -> usize {
 }
 
 /// `e`, `count` times: the end of this word or the next, crossing lines. Vim's `end_word()`.
-pub(super) fn word_end(text: &str, byte: usize, count: u32) -> usize {
-    let mut walk = Walk::new(text, byte);
+/// With `big`, `E`: WORDs, as [`word_forward`].
+pub(super) fn word_end(text: &str, byte: usize, count: u32, big: bool) -> usize {
+    let mut walk = Walk::new(text, byte, big);
     'count: for _ in 0..count {
         let start = walk.class();
         if walk.inc() == Step::Stuck {
@@ -735,21 +747,57 @@ mod tests {
         // Positions:   0123456789012345
         let text = "foo.bar  baz\n\n  q_1";
         assert_eq!(
-            walk(text, 0, |t, b| word_forward(t, b, 1), 6),
+            walk(text, 0, |t, b| word_forward(t, b, 1, false), 6),
             [3, 4, 9, 13, 16, 18]
         );
         assert_eq!(
-            walk(text, 18, |t, b| word_backward(t, b, 1), 6),
+            walk(text, 18, |t, b| word_backward(t, b, 1, false), 6),
             [16, 13, 9, 4, 3, 0]
         );
         assert_eq!(
-            walk(text, 0, |t, b| word_end(t, b, 1), 5),
+            walk(text, 0, |t, b| word_end(t, b, 1, false), 5),
             [2, 3, 6, 11, 18]
         );
-        assert_eq!(word_forward(text, 0, 4), 13);
-        assert_eq!(word_backward(text, 0, 1), 0);
+        assert_eq!(word_forward(text, 0, 4, false), 13);
+        assert_eq!(word_backward(text, 0, 1, false), 0);
         // Blanks at the end: `w` stops on the last grapheme.
-        assert_eq!(word_forward("ab  ", 0, 1), 3);
+        assert_eq!(word_forward("ab  ", 0, 1, false), 3);
+    }
+
+    #[test]
+    fn big_words_follow_vim() {
+        // `foo.bar` is one WORD: `W B E` step over the punctuation that `w b e` stop at.
+        // Positions:   0123456789012345
+        let text = "foo.bar  baz\n\n  q_1";
+        assert_eq!(
+            walk(text, 0, |t, b| word_forward(t, b, 1, true), 5),
+            [9, 13, 16, 18, 18]
+        );
+        assert_eq!(
+            walk(text, 18, |t, b| word_backward(t, b, 1, true), 5),
+            [16, 13, 9, 0, 0]
+        );
+        assert_eq!(
+            walk(text, 0, |t, b| word_end(t, b, 1, true), 4),
+            [6, 11, 18, 18]
+        );
+        assert_eq!(word_forward(text, 0, 3, true), 16);
+        // Runs of punctuation and of spaces: `a.b,,c` is one WORD, `(x)` another.
+        // Positions:   0123456789012
+        let text = "a.b,,c   (x)";
+        assert_eq!(
+            walk(text, 0, |t, b| word_forward(t, b, 1, true), 2),
+            [9, 11]
+        );
+        assert_eq!(
+            walk(text, 0, |t, b| word_forward(t, b, 1, false), 4),
+            [1, 2, 3, 5]
+        );
+        assert_eq!(
+            walk(text, 11, |t, b| word_backward(t, b, 1, true), 2),
+            [9, 0]
+        );
+        assert_eq!(walk(text, 0, |t, b| word_end(t, b, 1, true), 2), [5, 11]);
     }
 
     /// Texts with every kind of line break, combining marks, joined emoji and flags.
@@ -818,7 +866,7 @@ mod tests {
         for text in TRICKY {
             for byte in boundaries(text) {
                 let line = line_at(text, byte);
-                let mut walk = Walk::new(text, byte);
+                let mut walk = Walk::new(text, byte, false);
                 // Back to the line's start, the line split once.
                 let mut at = byte;
                 while at > line.start {
@@ -843,7 +891,7 @@ mod tests {
             assert_eq!(left(&text, text.len(), 10_000), 0);
         }
         for _ in 0..20 {
-            assert_eq!(word_backward(&text, text.len(), 1), 0);
+            assert_eq!(word_backward(&text, text.len(), 1, false), 0);
         }
         let elapsed = started.elapsed();
         assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");

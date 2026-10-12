@@ -186,6 +186,29 @@ fn word_motions_cross_punctuation_and_lines() {
 }
 
 #[test]
+fn word_motions_over_words_take_runs_of_non_blanks() {
+    // `a.b,,c` (0..6), three spaces, `(x)` (9..12), `y` (13); then `  --  z` (15..22). `W B E`
+    // step over punctuation and runs of spaces, across lines, with counts.
+    let b = one_text("a.b,,c   (x) y\\n  --  z");
+    assert_snapshot!(trace(b, "w<CR>WWWWWBBBBBBEEEEE2W3B2E"));
+    // `w` stops at each run of punctuation where `W` does not.
+    let r = run(one_text("a.b,,c   (x)"), "w<CR>4w");
+    assert_eq!(r.engine.text_cursor().map(|c| c.byte), Some(5));
+    let r = run(one_text("a.b,,c   (x)"), "w<CR>W");
+    assert_eq!(r.engine.text_cursor().map(|c| c.byte), Some(9));
+}
+
+#[test]
+fn word_motions_over_words_are_not_bound_on_the_board() {
+    for script in ["wW", "wB", "wE", "wvW"] {
+        let r = run(one_text("a b"), script);
+        assert_eq!(r.engine.cursor(), &Cursor::Object(id("t1")), "{script}");
+        assert_eq!(r.engine.board(), &one_text("a b"));
+        assert_eq!(r.engine.message(), None);
+    }
+}
+
+#[test]
 fn x_takes_a_count_within_the_line() {
     let mut r = run(one_text("abcdefgh\\nij"), "w<CR>3l2x");
     assert_eq!(text(&r, "t1"), "abcfgh\nij");

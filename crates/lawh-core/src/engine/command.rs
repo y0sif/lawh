@@ -8,7 +8,13 @@
 //! sign, digits and an optional fraction (`-2.5`, `3`, `.5`, `2.`); no exponent, `inf` or `nan`.
 //!
 //! `:text` and `:math` take everything after the first space as it is typed, with no escapes,
-//! comments or `|` between commands.
+//! comments or `|` between commands. Options may come first, as Vim's `++opt` words: words that
+//! start with `++` and a letter right after the space, each followed by one space. `++size=N`
+//! is the only one (`:te ++size=2 Title`); any other is an error. A word such as `size=2`, or one
+//! after the text has started, is text.
+//!
+//! `:si[ze]` takes one number: `N` sets the size of text and math, `+N` and `-N` add to it or
+//! take from it.
 //!
 //! The mapping commands take Vim's: `:map`, `:noremap`, `:unmap` and `:mapclear` with a mode
 //! letter in front (`:nnoremap`, `:iunmap`) or `!` after (`:map!` for Insert and command-line
@@ -20,7 +26,7 @@
 
 use super::keymap::{IC, MAX_MAP_KEYS, MapKey, MapMode, NVO};
 use super::settings::{SetArg, parse_set_arg};
-use crate::board::MAX_SIZE;
+use crate::board::{MAX_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, is_valid_text_size};
 use crate::key::{KeyParseError, parse_keys};
 
 /// A parsed `:` command. Shape coordinates the user left out are `None`: the engine fills them
@@ -51,10 +57,15 @@ pub enum Command {
     Line(Segment),
     /// `:ar[row] DX DY`, with `x1= y1= x2= y2=`.
     Arrow(Segment),
-    /// `:te[xt] <text>`: a text block of everything after the first space.
-    Text(String),
-    /// `:ma[th] <formula>`: a formula of everything after the first space.
-    Math(String),
+    /// `:te[xt] <text>`: a text block of everything after the first space and any options.
+    /// `size` is from `++size=N`; without it the block takes `:set size`.
+    Text { text: String, size: Option<f64> },
+    /// `:ma[th] <formula>`: a formula of everything after the first space and any options, as
+    /// [`Command::Text`].
+    Math { src: String, size: Option<f64> },
+    /// `:si[ze] N`, `:si +N`, `:si -N`: the size of the current text or math object, or of the
+    /// text and math in the selection when `:` was typed in Visual mode.
+    Size(SizeChange),
     /// `:w[rite] [file]` and `:w! [file]`.
     Write { file: Option<String> },
     /// `:q[uit]`; `:q!` (`force`) quits even when the board has changes.
@@ -94,6 +105,16 @@ pub enum Command {
     MapClear { modes: &'static [MapMode] },
     /// `:se[t]` and its arguments; none shows every option.
     Set(Vec<SetArg>),
+}
+
+/// What `:si[ze]` does to a size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SizeChange {
+    /// `:si N`: make it `N`, from [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`].
+    To(f64),
+    /// `:si +N`, `:si -N`: add `N` (taken away when negative). The sizes it makes must be in
+    /// range, which only the engine can tell.
+    By(f64),
 }
 
 /// The ends of a line or an arrow. The start is (`x1`, `y1`), the cursor point where left out.
@@ -156,9 +177,20 @@ pub enum CommandError {
     /// A line or an arrow without a way to find its end; the field names the kind.
     #[error("{0} needs two numbers, or `x2=` and `y2=`")]
     MissingEnd(&'static str),
-    /// `:text` or `:math` with nothing (or only spaces) after the name.
+    /// `:text` or `:math` with nothing (or only spaces) after the name and its options.
     #[error("missing {0}")]
     MissingBody(&'static str),
+    /// A size of text or math (`:si N`, `++size=N`) outside [`MIN_TEXT_SIZE`] to
+    /// [`MAX_TEXT_SIZE`]; the field is the size as typed.
+    #[error(
+        "size {0} is out of range: sizes go from {min} to {max}",
+        min = MIN_TEXT_SIZE,
+        max = MAX_TEXT_SIZE
+    )]
+    TextSizeOutOfRange(String),
+    /// A `++` option of `:text` or `:math` other than `++size=N`; the field is the word as typed.
+    #[error("unknown option `{0}`: `:text` and `:math` take `++size=N`")]
+    UnknownTextOption(String),
     /// `:w !cmd` or `:w >>file`, which Vim reads as a shell command or an append; `command` is
     /// the command as typed, with its `!` (`w`, `x`, `wq!`).
     #[error("writing to a command or appending to a file is not supported: `:{command} {file}`")]
@@ -342,6 +374,11 @@ const COMMANDS: &[Row] = &[
         name: "set",
         min: 2,
         parse: set,
+    },
+    Row {
+        name: "size",
+        min: 2,
+        parse: size_command,
     },
     Row {
         name: "text",
@@ -569,21 +606,71 @@ fn size(v: Option<f64>, what: &'static str, usage: &'static str) -> Result<f64, 
 }
 
 fn text(args: Args<'_>) -> Result<Command, CommandError> {
-    body(args, "the text: `:te[xt] <text>`").map(Command::Text)
+    let (size, text) = body(args, "the text: `:te[xt] <text>`")?;
+    Ok(Command::Text { text, size })
 }
 
 fn math(args: Args<'_>) -> Result<Command, CommandError> {
-    body(args, "the formula: `:ma[th] <formula>`").map(Command::Math)
+    let (size, src) = body(args, "the formula: `:ma[th] <formula>`")?;
+    Ok(Command::Math { src, size })
 }
 
-/// Everything after the name and the first space, verbatim: spaces at either end, `|`, `"`
-/// and `\` stay as typed. Nothing but spaces is missing.
-fn body(args: Args<'_>, missing: &'static str) -> Result<String, CommandError> {
+/// The options at the start (`++size=N`, see the module doc), then everything after them,
+/// verbatim: spaces at either end, `|`, `"` and `\` stay as typed. Nothing but spaces is
+/// missing.
+fn body(args: Args<'_>, missing: &'static str) -> Result<(Option<f64>, String), CommandError> {
     args.no_bang()?;
-    if args.rest.trim().is_empty() {
+    let mut rest = args.rest;
+    let mut size = None;
+    while let Some(option) = rest
+        .strip_prefix("++")
+        .filter(|after| after.starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
+        let (word, after) = option
+            .split_once(char::is_whitespace)
+            .unwrap_or((option, ""));
+        match word.split_once('=') {
+            Some(("size", value)) if size.is_none() => {
+                size = Some(text_size(value)?);
+            }
+            Some(("size", _)) => return Err(CommandError::RepeatedKey("++size".to_owned())),
+            None if word == "size" => {
+                return Err(CommandError::MissingNumber("`++size=N`"));
+            }
+            _ => return Err(CommandError::UnknownTextOption(format!("++{word}"))),
+        }
+        rest = after;
+    }
+    if rest.trim().is_empty() {
         Err(CommandError::MissingBody(missing))
     } else {
-        Ok(args.rest.to_owned())
+        Ok((size, rest.to_owned()))
+    }
+}
+
+/// A size of text or math, from [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`].
+fn text_size(word: &str) -> Result<f64, CommandError> {
+    let size = number(word)?;
+    if is_valid_text_size(size) {
+        Ok(size)
+    } else {
+        Err(CommandError::TextSizeOutOfRange(word.to_owned()))
+    }
+}
+
+/// `:si[ze] N`, `:si +N`, `:si -N`: one number, a sign making it a change.
+fn size_command(args: Args<'_>) -> Result<Command, CommandError> {
+    const USAGE: &str = "`:si[ze] N`, `:si +N` or `:si -N`";
+    args.no_bang()?;
+    let mut words = args.rest.split_whitespace();
+    let word = words.next().ok_or(CommandError::MissingNumber(USAGE))?;
+    if words.next().is_some() {
+        return Err(CommandError::TooManyNumbers(USAGE));
+    }
+    if word.starts_with(['+', '-']) {
+        Ok(Command::Size(SizeChange::By(number(word)?)))
+    } else {
+        Ok(Command::Size(SizeChange::To(text_size(word)?)))
     }
 }
 

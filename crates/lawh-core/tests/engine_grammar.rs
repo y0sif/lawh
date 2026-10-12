@@ -469,10 +469,26 @@ fn leaving_visual_mode() {
         assert_eq!(r.engine.visual_rect(&mut FixedMeasure), None);
         assert_eq!(r.engine.board(), &rows());
     }
-    // `:` leaves Visual mode for the command line.
-    let r = run(rows(), "v3j:");
-    assert_eq!(r.engine.mode(), Mode::CommandLine);
+    // `:` leaves Visual mode for the command line, which keeps the selection for `:si` (and
+    // shows it) until it closes, run or cancelled.
+    for close in ["<Esc>", "<CR>", "<BS>", ":ci 1<CR>"] {
+        let mut r = run(rows(), "v3j7l:");
+        assert_eq!(r.engine.mode(), Mode::CommandLine);
+        assert_eq!(r.engine.selection(), [id("r1"), id("c1"), id("l1")]);
+        assert_eq!(r.engine.visual_rect(&mut FixedMeasure), None);
+        r.feed(close);
+        assert_eq!(r.engine.mode(), Mode::Normal, "{close}");
+        assert_eq!(r.engine.selection(), [], "{close}");
+    }
+    // A click closes it too.
+    let mut r = run(rows(), "v3j7l:si 2");
+    r.click(0.0, 0.0, None);
     assert_eq!(r.engine.selection(), []);
+    r.feed(":si 2<CR>");
+    assert_eq!(
+        r.engine.message().map(|m| m.text.as_str()),
+        Some("no object under the cursor")
+    );
     // An empty selection deletes nothing.
     let r = run(rows(), "9k9kvjd");
     assert_snapshot!(r.header());
@@ -645,6 +661,42 @@ fn write_to_another_file_is_a_copy() {
     r.write_done("copy.lawh", Ok(()));
     assert_eq!(r.engine.file_name(), Some("main.lawh"));
     assert!(r.engine.is_modified());
+}
+
+#[test]
+fn a_write_the_app_finds_is_the_boards_own_file_saves_it() {
+    // `link.lawh` names `main.lawh` through a link, say: its text alone says nothing of it, so
+    // without the app's word the write is a copy.
+    let named = || Engine::new(Board::new()).with_file_name(Some("main.lawh".to_owned()));
+    let mut r = run_engine(named(), ":ci 1<CR>:w link.lawh<CR>");
+    r.write_done_same_file("link.lawh", Ok(()));
+    assert_eq!(r.engine.file_name(), Some("main.lawh"));
+    assert!(!r.engine.is_modified());
+    assert_snapshot!(r.header());
+    // `:wq` to it quits; as a copy it would not.
+    let mut r = run_engine(named(), ":ci 1<CR>:wq link.lawh<CR>");
+    r.write_done_same_file("link.lawh", Ok(()));
+    assert_eq!(r.effects.last(), Some(&Effect::Quit));
+    let mut r = run_engine(named(), ":ci 1<CR>:wq link.lawh<CR>");
+    r.write_done("link.lawh", Ok(()));
+    assert_ne!(r.effects.last(), Some(&Effect::Quit));
+    assert!(r.engine.is_modified());
+    // The board changed since the write was asked for: not saved, no quit.
+    let mut r = run_engine(named(), ":ci 1<CR>:w link.lawh<CR>l:ci 2<CR>");
+    r.write_done_same_file("link.lawh", Ok(()));
+    assert!(r.engine.is_modified());
+    // A failed write saves nothing, and a write the engine did not ask for neither.
+    let mut r = run_engine(named(), ":ci 1<CR>:wq link.lawh<CR>");
+    r.write_done_same_file("link.lawh", Err("disk full"));
+    assert!(r.engine.is_modified());
+    assert_eq!(r.effects.len(), 1);
+    let mut r = run_engine(named(), ":ci 1<CR>");
+    r.write_done_same_file("main.lawh", Ok(()));
+    assert!(r.engine.is_modified());
+    // The lexical rule still holds without the app's word.
+    let mut r = run_engine(named(), ":ci 1<CR>:w ./main.lawh<CR>");
+    r.write_done("./main.lawh", Ok(()));
+    assert!(!r.engine.is_modified());
 }
 
 #[test]

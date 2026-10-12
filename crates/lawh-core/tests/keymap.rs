@@ -590,7 +590,7 @@ fn set_shows_and_changes_options() {
     r.feed(":set<CR>");
     assert_eq!(
         message(&r),
-        Some("escape=board  leader=<Bslash>  timeoutlen=1000")
+        Some("escape=board  leader=<Bslash>  size=1  timeoutlen=1000")
     );
     r.feed(":se tm=300 leader=<lt>Space> escape=block<CR>:set tm leader? escape<CR>");
     assert_eq!(

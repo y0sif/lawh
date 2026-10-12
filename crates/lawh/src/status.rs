@@ -184,7 +184,7 @@ mod tests {
             "the app's is newer"
         );
         feed(&mut e, ":w<CR>");
-        e.write_done("a.lawh", Ok(()));
+        e.write_done("a.lawh", Ok(()), false);
         assert_eq!(
             status(&e, None),
             line("\"a.lawh\" written", "a.lawh   0,0", false)

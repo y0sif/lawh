@@ -3,11 +3,12 @@
 //! `:se[t]` takes options as Vim does: `{option}={value}` (or `:`) sets one, `{option}?` or
 //! `{option}` alone shows its value, `{option}&` puts back its default, and `:set` alone shows
 //! them all. Several may follow one `:set`; a word starting with `"` ends the line (a comment).
-//! The options are `escape` (`board` or `block`), `leader` (one key in Vim notation) and
-//! `timeoutlen` (`tm`, milliseconds).
+//! The options are `escape` (`board` or `block`), `leader` (one key in Vim notation), `size`
+//! (the size of new text and math blocks) and `timeoutlen` (`tm`, milliseconds).
 
 use super::Engine;
 use super::command::CommandError;
+use crate::board::{MAX_TEXT_SIZE, MIN_TEXT_SIZE, is_valid_text_size};
 use crate::key::{Key, parse_keys};
 
 /// Longest `timeoutlen`, in milliseconds (10 s).
@@ -49,7 +50,24 @@ pub struct Settings {
     /// [`Effect::ArmTimer`](super::Effect::ArmTimer)): 1000 by default, at most
     /// [`MAX_TIMEOUTLEN`].
     pub timeoutlen: u64,
+    /// The size of new text and math blocks (`:set size`), in hundredths: 100 is size 1 (see
+    /// [`DEFAULT_TEXT_SIZE`](crate::board::DEFAULT_TEXT_SIZE)), 150 is 1.5. Hundredths keep
+    /// [`OptionValue`] `Eq`, which a float would not be; [`Settings::size`] gives the size. A
+    /// value outside [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`], which only this field can hold
+    /// (`:set` refuses one), makes the board refuse new blocks, with a message.
+    pub size_hundredths: u32,
 }
+
+impl Settings {
+    /// The size of new text and math blocks: [`Settings::size_hundredths`] as a size.
+    pub fn size(&self) -> f64 {
+        f64::from(self.size_hundredths) / 100.0
+    }
+}
+
+/// [`DEFAULT_TEXT_SIZE`](crate::board::DEFAULT_TEXT_SIZE) in hundredths, the default of
+/// `:set size`.
+const DEFAULT_SIZE_HUNDREDTHS: u32 = 100;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -57,6 +75,7 @@ impl Default for Settings {
             escape: Escape::Board,
             leader: Key::char('\\'),
             timeoutlen: 1000,
+            size_hundredths: DEFAULT_SIZE_HUNDREDTHS,
         }
     }
 }
@@ -66,18 +85,20 @@ impl Default for Settings {
 pub enum OptionName {
     Escape,
     Leader,
+    Size,
     TimeoutLen,
 }
 
 impl OptionName {
     /// Every option, in the order `:set` alone shows them.
-    const ALL: [Self; 3] = [Self::Escape, Self::Leader, Self::TimeoutLen];
+    const ALL: [Self; 4] = [Self::Escape, Self::Leader, Self::Size, Self::TimeoutLen];
 
     /// The option's name in `:set`.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Escape => "escape",
             Self::Leader => "leader",
+            Self::Size => "size",
             Self::TimeoutLen => "timeoutlen",
         }
     }
@@ -87,6 +108,7 @@ impl OptionName {
         match name {
             "escape" => Some(Self::Escape),
             "leader" => Some(Self::Leader),
+            "size" => Some(Self::Size),
             "timeoutlen" | "tm" => Some(Self::TimeoutLen),
             _ => None,
         }
@@ -98,6 +120,8 @@ impl OptionName {
 pub enum OptionValue {
     Escape(Escape),
     Leader(Key),
+    /// The size of new blocks in hundredths (see [`Settings::size_hundredths`]).
+    Size(u32),
     TimeoutLen(u64),
 }
 
@@ -144,6 +168,16 @@ pub(super) fn parse_set_arg(word: &str) -> Result<SetArg, CommandError> {
             Ok([key]) => OptionValue::Leader(*key),
             _ => return Err(bad("one key, such as `<Space>` or `,`".to_owned())),
         },
+        OptionName::Size => {
+            match hundredths(value).filter(|h| is_valid_text_size(hundredths_size(*h))) {
+                Some(h) => OptionValue::Size(h),
+                None => {
+                    return Err(bad(format!(
+                        "a size from {MIN_TEXT_SIZE} to {MAX_TEXT_SIZE}, with at most two decimals"
+                    )));
+                }
+            }
+        }
         OptionName::TimeoutLen => {
             let ms = Some(value)
                 .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
@@ -158,12 +192,45 @@ pub(super) fn parse_set_arg(word: &str) -> Result<SetArg, CommandError> {
     Ok(SetArg::Assign(value))
 }
 
+/// A size in hundredths as a size: 150 is 1.5.
+fn hundredths_size(h: u32) -> f64 {
+    f64::from(h) / 100.0
+}
+
+/// A number with at most two decimals (`1`, `1.5`, `.25`, `+2`), in hundredths, read from its
+/// digits so that no float rounding comes in: `None` for anything else, or past `u32`.
+fn hundredths(value: &str) -> Option<u32> {
+    let unsigned = value.strip_prefix('+').unwrap_or(value);
+    let (whole, fraction) = unsigned.split_once('.').unwrap_or((unsigned, ""));
+    let digits = |part: &str| part.bytes().all(|b| b.is_ascii_digit());
+    if (whole.is_empty() && fraction.is_empty())
+        || fraction.len() > 2
+        || !digits(whole)
+        || !digits(fraction)
+    {
+        return None;
+    }
+    let whole: u32 = if whole.is_empty() {
+        0
+    } else {
+        whole.parse().ok()?
+    };
+    let fraction: u32 = format!("{fraction:0<2}").parse().ok()?;
+    whole.checked_mul(100)?.checked_add(fraction)
+}
+
+/// A size in hundredths as `:set` shows it: `1`, `1.5`, `0.25`.
+fn show_hundredths(h: u32) -> String {
+    hundredths_size(h).to_string()
+}
+
 impl Settings {
     /// `option` and its value as `:set` takes them: `timeoutlen=1000`, `leader=<Space>`.
     fn show(&self, option: OptionName) -> String {
         let value = match option {
             OptionName::Escape => self.escape.name().to_owned(),
             OptionName::Leader => self.leader.to_string(),
+            OptionName::Size => show_hundredths(self.size_hundredths),
             OptionName::TimeoutLen => self.timeoutlen.to_string(),
         };
         format!("{}={value}", option.name())
@@ -174,6 +241,7 @@ impl Settings {
         match option {
             OptionName::Escape => self.escape = default.escape,
             OptionName::Leader => self.leader = default.leader,
+            OptionName::Size => self.size_hundredths = default.size_hundredths,
             OptionName::TimeoutLen => self.timeoutlen = default.timeoutlen,
         }
     }
@@ -182,6 +250,7 @@ impl Settings {
         match value {
             OptionValue::Escape(escape) => self.escape = escape,
             OptionValue::Leader(key) => self.leader = key,
+            OptionValue::Size(h) => self.size_hundredths = h,
             OptionValue::TimeoutLen(ms) => self.timeoutlen = ms,
         }
     }
@@ -207,5 +276,49 @@ impl Engine {
             shown
         };
         (!shown.is_empty()).then(|| shown.join("  "))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::DEFAULT_TEXT_SIZE;
+
+    #[test]
+    fn sizes_are_read_in_hundredths_from_their_digits() {
+        for (typed, h) in [
+            ("1", 100),
+            ("1.5", 150),
+            ("1.50", 150),
+            (".25", 25),
+            ("0.29", 29),
+            ("+2", 200),
+            ("16.", 1600),
+            ("007", 700),
+        ] {
+            assert_eq!(hundredths(typed), Some(h), "{typed}");
+        }
+        for bad in [
+            "",
+            ".",
+            "+",
+            "-1",
+            "1.234",
+            "1e2",
+            "x",
+            "1.2.3",
+            "99999999999",
+        ] {
+            assert_eq!(hundredths(bad), None, "{bad}");
+        }
+        assert_eq!(show_hundredths(25), "0.25");
+        assert_eq!(show_hundredths(100), "1");
+        assert_eq!(show_hundredths(1600), "16");
+        assert_eq!(Settings::default().size(), DEFAULT_TEXT_SIZE);
+        assert_eq!(
+            hundredths_size(DEFAULT_SIZE_HUNDREDTHS),
+            DEFAULT_TEXT_SIZE,
+            "the default is the board's"
+        );
     }
 }

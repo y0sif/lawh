@@ -12,7 +12,7 @@ use super::register::{Register, id_prefix};
 use super::undo::Edit;
 use super::work::{ORDER_WORK, PLACE_WORK, PUT_WORK, TAKE_WORK};
 use super::{Cursor, Engine, Measure, anchor, bounds, exec};
-use crate::board::{Change, DEFAULT_TEXT_SIZE, MAX_OBJECTS, Object, ObjectId, Shape};
+use crate::board::{Change, MAX_OBJECTS, Object, ObjectId, Shape};
 
 /// What an operator acts on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,6 +192,7 @@ impl Engine {
         if !self.charge(work) {
             return false;
         }
+        // Text deleted in a block puts as a new block, at the `size` option's size.
         let group = match &self.register {
             None => Vec::new(),
             Some(Register::Objects(objects)) => objects.clone(),
@@ -200,7 +201,7 @@ impl Engine {
                 Shape::Text {
                     at: Point::ZERO,
                     text: text.clone(),
-                    size: DEFAULT_TEXT_SIZE,
+                    size: self.settings.size(),
                 },
             )],
         };

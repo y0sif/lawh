@@ -2,11 +2,12 @@
 //!
 //! The cursor sits on a grapheme, never past the last one of its line (on an empty line, at
 //! its start). `h l` move by graphemes within the line, `j k` by lines keeping the column, `0`
-//! and `$` to the line's ends, `w b e` by Vim's words across lines, all with counts. `x`
-//! deletes graphemes into the unnamed register. `i a I A` enter Insert mode, `<Esc>` goes back
-//! to the board with the block as the current object. `u`, `<C-r>`, `.` and `:` work as on the
-//! board; the command line comes back here unless its command moved the cursor off the block.
-//! Other keys do nothing.
+//! and `$` to the line's ends, `w b e` by Vim's words and `W B E` by its WORDs (runs of
+//! graphemes that are not blank) across lines, all with counts. `x` deletes graphemes into the
+//! unnamed register. `i a I A` enter Insert mode, `<Esc>` goes back to the board with the block
+//! as the current object. `u`, `<C-r>`, `.` and `:` work as on the board; the command line comes
+//! back here unless its command moved the cursor off the block. Other keys do nothing (the size
+//! keys `<C-a>` and `<C-x>` too).
 
 use super::normal::{Lookup, Pending, lookup};
 use super::register::Register;
@@ -41,9 +42,18 @@ enum BlockCommand {
     Up,
     LineStart,
     LineEnd,
-    WordNext,
-    WordBack,
-    WordEnd,
+    /// `w`, or `W` for WORDs (`big`).
+    WordNext {
+        big: bool,
+    },
+    /// `b`, or `B`.
+    WordBack {
+        big: bool,
+    },
+    /// `e`, or `E`.
+    WordEnd {
+        big: bool,
+    },
     /// `x`.
     Delete,
     Insert(InsertAt),
@@ -64,9 +74,12 @@ const BLOCK: &[(&[Key], BlockCommand)] = &[
     (&[Key::char('k')], BlockCommand::Up),
     (&[Key::char('0')], BlockCommand::LineStart),
     (&[Key::char('$')], BlockCommand::LineEnd),
-    (&[Key::char('w')], BlockCommand::WordNext),
-    (&[Key::char('b')], BlockCommand::WordBack),
-    (&[Key::char('e')], BlockCommand::WordEnd),
+    (&[Key::char('w')], BlockCommand::WordNext { big: false }),
+    (&[Key::char('b')], BlockCommand::WordBack { big: false }),
+    (&[Key::char('e')], BlockCommand::WordEnd { big: false }),
+    (&[Key::char('W')], BlockCommand::WordNext { big: true }),
+    (&[Key::char('B')], BlockCommand::WordBack { big: true }),
+    (&[Key::char('E')], BlockCommand::WordEnd { big: true }),
     (&[Key::char('x')], BlockCommand::Delete),
     (&[Key::char('i')], BlockCommand::Insert(InsertAt::Cursor)),
     (&[Key::char('a')], BlockCommand::Insert(InsertAt::After)),
@@ -134,8 +147,11 @@ impl Engine {
         let (steps, split) = match command {
             BlockCommand::Left if count.unwrap_or(1) <= 1 => (moved, 0),
             BlockCommand::Left => (0, before.byte - before.line.start),
-            BlockCommand::Right | BlockCommand::WordNext => (moved, 0),
-            BlockCommand::WordBack | BlockCommand::WordEnd => (moved, lines.saturating_add(moved)),
+            // `W B E` walk as `w b e` do, only with fewer classes.
+            BlockCommand::Right | BlockCommand::WordNext { .. } => (moved, 0),
+            BlockCommand::WordBack { .. } | BlockCommand::WordEnd { .. } => {
+                (moved, lines.saturating_add(moved))
+            }
             BlockCommand::Down | BlockCommand::Up => (0, lines),
             BlockCommand::Delete => {
                 let deleted = after.map_or(0, |a| a.len.abs_diff(before.len));
@@ -168,9 +184,9 @@ impl Engine {
                     block.want = Some(usize::MAX);
                 }
             }
-            BlockCommand::WordNext => self.block_move(|t, b| word_forward(t, b, n)),
-            BlockCommand::WordBack => self.block_move(|t, b| word_backward(t, b, n)),
-            BlockCommand::WordEnd => self.block_move(|t, b| word_end(t, b, n)),
+            BlockCommand::WordNext { big } => self.block_move(|t, b| word_forward(t, b, n, big)),
+            BlockCommand::WordBack { big } => self.block_move(|t, b| word_backward(t, b, n, big)),
+            BlockCommand::WordEnd { big } => self.block_move(|t, b| word_end(t, b, n, big)),
             BlockCommand::Delete => {
                 if self.delete_graphemes(n) {
                     self.repeat.finish(count);

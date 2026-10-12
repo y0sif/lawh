@@ -1,5 +1,6 @@
 //! Running `:` commands: the command line's keys, shapes, text and math at the cursor, writing
-//! and quitting. Mapping commands and `:set` run in `keymap.rs` and `settings.rs`.
+//! and quitting. Mapping commands and `:set` run in `keymap.rs` and `settings.rs`, `:si` in
+//! `size.rs`.
 
 use std::path::{Component, Path};
 
@@ -8,12 +9,13 @@ use kurbo::Point;
 use super::cmdline::Outcome;
 use super::command::{Command, CommandError, Segment, parse_command};
 use super::register::id_prefix;
+use super::size;
 use super::undo::Edit;
 use super::work::PARSE_WORK;
 use super::{Cursor, Effect, Engine, MAX_COMMAND_LINE_CHARS, Mode};
 use crate::board::{
-    BoardError, DEFAULT_TEXT_SIZE, MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE,
-    MAX_TEXT_CHARS, MAX_TEXT_LINES, Object, Shape,
+    BoardError, MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
+    MAX_TEXT_LINES, Object, Shape,
 };
 use crate::key::Key;
 
@@ -76,11 +78,13 @@ impl Engine {
     /// mapping), the first reported to have gone well does, and the others are copies.
     ///
     /// A good write to the board's own file makes the board unmodified, unless it changed after
-    /// the write was asked for. The file is the board's own when the two names are the same
-    /// path once `.` and `..` are worked out, without asking the file system (`./a.lawh` and
-    /// `dir/../a.lawh` are `a.lawh`). A write to another file (a copy, `:w other` on a named
-    /// board) leaves the board as it was, as in Vim, so `:wq other` on a modified board writes
-    /// the copy and does not quit, unless forced with `:wq!`.
+    /// the write was asked for. The file is the board's own when `same_file` says so (the app
+    /// found, after the write, that `path` is the board's file under another name, such as
+    /// through a link), or when the two names are the same path once `.` and `..` are worked
+    /// out, without asking the file system (`./a.lawh` and `dir/../a.lawh` are `a.lawh`). A
+    /// write to another file (a copy, `:w other` on a named board) leaves the board as it was,
+    /// as in Vim, so `:wq other` on a modified board writes the copy and does not quit, unless
+    /// forced with `:wq!`.
     ///
     /// Several writes may wait at once (`:w<CR>:w copy.lawh<CR>` in a mapping): each report is
     /// matched to the oldest write asked for with the same path. A report that matches none
@@ -92,7 +96,12 @@ impl Engine {
     /// asking too many writes.
     ///
     /// [`Message`]: super::Message
-    pub fn write_done(&mut self, path: &str, result: Result<(), String>) -> Vec<Effect> {
+    pub fn write_done(
+        &mut self,
+        path: &str,
+        result: Result<(), String>,
+        same_file: bool,
+    ) -> Vec<Effect> {
         let asked = self
             .pending_writes
             .iter()
@@ -106,10 +115,11 @@ impl Engine {
         if self.file_name.is_none() && asked.is_some() {
             self.file_name = Some(path.to_owned());
         }
-        let own = self
-            .file_name
-            .as_deref()
-            .is_some_and(|name| same_file(name, path));
+        let own = same_file
+            || self
+                .file_name
+                .as_deref()
+                .is_some_and(|name| same_path(name, path));
         if current && own {
             self.history.mark_saved();
         }
@@ -148,8 +158,12 @@ impl Engine {
     }
 
     /// Back from the command line: to block-Normal mode when it was opened there and the
-    /// cursor is still on the block, else to Normal mode.
+    /// cursor is still on the block, else to Normal mode. A selection kept from Visual mode is
+    /// dropped.
     fn leave_command_line(&mut self) {
+        if self.visual_command {
+            self.leave_visual();
+        }
         self.mode = if self.block.is_some() {
             Mode::BlockNormal
         } else {
@@ -182,6 +196,7 @@ impl Engine {
 
     fn run_command(&mut self, command: &Command) -> Vec<Effect> {
         let at = self.cursor_point();
+        let new_size = self.settings.size();
         let or_at =
             |x: Option<f64>, y: Option<f64>| Point::new(x.unwrap_or(at.x), y.unwrap_or(at.y));
         match command {
@@ -208,16 +223,17 @@ impl Engine {
                 let (a, b) = ends(segment, at);
                 self.add_shape(Shape::Arrow { a, b });
             }
-            Command::Text(text) => self.add_shape(Shape::Text {
+            Command::Text { text, size } => self.add_shape(Shape::Text {
                 at,
                 text: text.clone(),
-                size: DEFAULT_TEXT_SIZE,
+                size: size.unwrap_or(new_size),
             }),
-            Command::Math(src) => self.add_shape(Shape::Math {
+            Command::Math { src, size } => self.add_shape(Shape::Math {
                 at,
                 src: src.clone(),
-                size: DEFAULT_TEXT_SIZE,
+                size: size.unwrap_or(new_size),
             }),
+            Command::Size(change) => self.size_command(*change),
             Command::Write { file } => return self.write(file.as_deref(), None),
             Command::WriteQuit { file, force } => return self.write(file.as_deref(), Some(*force)),
             Command::Exit { file, force } => {
@@ -314,7 +330,7 @@ impl Engine {
 /// are dropped and each `..` takes back the part before it. The file system is not asked, so
 /// links are not followed (`link/../a` is `a`). Parts are split as the platform splits paths:
 /// on `/`, and on Windows on `\` too.
-fn same_file(a: &str, b: &str) -> bool {
+fn same_path(a: &str, b: &str) -> bool {
     lexical_parts(a) == lexical_parts(b)
 }
 
@@ -371,6 +387,7 @@ pub(super) fn refusal(error: &BoardError) -> String {
         BoardError::CoordinateOutOfRange(_) => coordinates_message(),
         BoardError::NonFinite(_) => "every number must be finite".to_owned(),
         BoardError::InvalidSize(_) => format!("sizes must be above 0 and at most {MAX_SIZE}"),
+        BoardError::TextSizeOutOfRange(_) => size::range_message(),
         other => other.to_string(),
     }
 }
@@ -390,8 +407,8 @@ mod tests {
             ("/a.lawh", "/../a.lawh"),
             ("../a.lawh", "./../a.lawh"),
         ] {
-            assert!(same_file(a, b), "{a} {b}");
-            assert!(same_file(b, a), "{b} {a}");
+            assert!(same_path(a, b), "{a} {b}");
+            assert!(same_path(b, a), "{b} {a}");
         }
         for (a, b) in [
             ("a.lawh", "../a.lawh"),
@@ -400,7 +417,7 @@ mod tests {
             ("a.lawh", "a.lawh/.."),
             ("a.lawh", "A.lawh"),
         ] {
-            assert!(!same_file(a, b), "{a} {b}");
+            assert!(!same_path(a, b), "{a} {b}");
         }
     }
 }

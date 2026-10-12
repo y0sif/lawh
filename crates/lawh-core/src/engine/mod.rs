@@ -9,8 +9,8 @@
 //! The cursor is a grid point or an object (see [`Cursor`]). Normal mode has grid motions
 //! (`h j k l`), object motions (`w b`, `H J K L`, `gg G`), the operators `d` and `y` with `dd`,
 //! `yy` and `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`,
-//! `<C-r>`), all with counts, and `:` for the command line (shapes, text, math, write and
-//! quit).
+//! `<C-r>`), the size keys (`<C-a>`, `<C-x>`), all with counts, and `:` for the command line
+//! (shapes, text, math, sizes, write and quit).
 //!
 //! Text and math objects are text blocks: `i a I A o O` type into one in Insert mode, `<CR>`
 //! enters one in block-Normal mode, Vim's Normal mode inside the text (see
@@ -43,6 +43,7 @@ mod rc;
 mod register;
 mod repeat;
 mod settings;
+mod size;
 mod text;
 mod text_motion;
 mod undo;
@@ -54,7 +55,7 @@ use std::collections::VecDeque;
 use kurbo::{Point, Rect};
 
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
-pub use command::{Command, CommandError, End, Segment, parse_command};
+pub use command::{Command, CommandError, End, Segment, SizeChange, parse_command};
 pub use cursor::{Cursor, anchor, round3};
 pub use exec::{MAX_PENDING_WRITES, MAX_WRITES_PER_KEY};
 pub use keymap::{
@@ -66,6 +67,7 @@ pub use place::PLACE_GAP;
 pub use rc::{MAX_RC_BYTES, MAX_RC_WARNINGS, RcWarning};
 pub use repeat::MAX_REPEAT_KEYS;
 pub use settings::{Escape, MAX_TIMEOUTLEN, OptionName, OptionValue, SetArg, Settings};
+pub use size::SIZE_STEPS;
 pub use text::TextCursor;
 pub use undo::{MAX_UNDO_BYTES, MAX_UNDO_STEPS};
 pub use work::MAX_KEY_WORK;
@@ -162,8 +164,12 @@ pub struct Engine {
     last_command_line: Option<String>,
     /// In Visual mode, where `v` was pressed: a point or an object's bounds.
     visual: Option<Rect>,
-    /// In Visual mode, the objects inside the rectangle, in z-order.
+    /// In Visual mode, the objects inside the rectangle, in z-order. Kept on a command line
+    /// opened from Visual mode (see `visual_command`).
     selection: Vec<ObjectId>,
+    /// The command line was opened from Visual mode: `selection` is still the selection, for
+    /// `:si` (as Vim's `:'<,'>`), until the command line closes.
+    visual_command: bool,
     /// Counts every change to the board, undo and redo included, so a write can tell whether
     /// the board is still the one it wrote. Every change to the board bumps it (see
     /// [`Engine::changed`]).
@@ -201,6 +207,7 @@ impl Engine {
             last_command_line: None,
             visual: None,
             selection: Vec::new(),
+            visual_command: false,
             version: 0,
             pending_writes: VecDeque::new(),
             block: None,

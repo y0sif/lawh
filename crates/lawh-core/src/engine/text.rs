@@ -5,6 +5,9 @@
 //! place rule. On a text or math object, `i` and `I` insert at the start of its text, `a` and
 //! `A` at the end, and `<CR>` enters block-Normal mode at the start. Other kinds have no text.
 //!
+//! A new block takes the `size` option (`:set size`), except that `o` and `O` from a text or
+//! math block take that block's size, as do the further blocks a count on them makes.
+//!
 //! A new block goes on the board, empty, as soon as Insert mode starts, so the board always
 //! shows the live text and the renderer can draw the cursor in it. Every edit replaces the
 //! block on the board, which checks the caps on text. An Insert session, from entering Insert
@@ -24,7 +27,7 @@ use super::text_motion::{after_insert, content, on_grapheme};
 use super::undo::Edit;
 use super::work::PLACE_WORK;
 use super::{Cursor, Engine, Measure, Mode, bounds, exec};
-use crate::board::{DEFAULT_TEXT_SIZE, Object, ObjectId, Shape};
+use crate::board::{Object, ObjectId, Shape};
 use crate::key::{Key, KeyCode};
 
 /// The cursor inside a text block, for drawing it.
@@ -142,7 +145,8 @@ impl Engine {
                     return self.error("no text under the cursor: <CR> enters text and math");
                 }
                 let at = *at;
-                return self.new_block(at, None, count);
+                let size = self.settings.size();
+                return self.new_block(at, size, None, count);
             }
             Cursor::Object(id) => id.clone(),
         };
@@ -177,20 +181,31 @@ impl Engine {
         });
     }
 
-    /// `o` and `O`: a new text block in Insert mode on `side` of the current object.
+    /// `o` and `O`: a new text block in Insert mode on `side` of the current object, at the
+    /// current object's size when it is a text or math block, else at the `size` option's.
     fn open_block(&mut self, side: Side, count: Option<u32>, measure: &mut dyn Measure) {
-        match self.open_position(side, measure) {
-            Some(at) => self.new_block(at, Some(side), count),
+        let block_size = match &self.cursor {
+            Cursor::Object(id) => self.board.get(id).and_then(|o| o.shape.size()),
+            Cursor::Grid(_) => None,
+        }
+        .unwrap_or_else(|| self.settings.size());
+        match self.open_position(side, block_size, measure) {
+            Some(at) => self.new_block(at, block_size, Some(side), count),
             None if self.out_of_work() => {}
             None => self.error("no room for a new text block"),
         }
     }
 
-    /// Where a new text block goes on `side` of the current object, by the place rule. With a
-    /// grid cursor, the grid point is the object, of no size. `None` when there is no room, or
-    /// when the key runs out of work measuring the board or placing the block (see
-    /// [`MAX_KEY_WORK`](super::MAX_KEY_WORK)).
-    fn open_position(&mut self, side: Side, measure: &mut dyn Measure) -> Option<Point> {
+    /// Where a new text block of size `block_size` goes on `side` of the current object, by the
+    /// place rule. With a grid cursor, the grid point is the object, of no size. `None` when
+    /// there is no room, or when the key runs out of work measuring the board or placing the
+    /// block (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)).
+    fn open_position(
+        &mut self,
+        side: Side,
+        block_size: f64,
+        measure: &mut dyn Measure,
+    ) -> Option<Point> {
         if !self.charge(self.layout_work().saturating_add(self.id_work())) {
             return None;
         }
@@ -201,7 +216,10 @@ impl Engine {
             Cursor::Object(id) => self.index_of(id).and_then(|i| obstacles.get(i).copied()),
         }
         .unwrap_or_else(|| Rect::from_points(point, point));
-        let empty = Object::new(self.board.fresh_id("t"), empty_text(Point::ZERO));
+        let empty = Object::new(
+            self.board.fresh_id("t"),
+            empty_text(Point::ZERO, block_size),
+        );
         let mut looked = 0;
         let at = place(
             reference,
@@ -217,9 +235,10 @@ impl Engine {
         }
     }
 
-    /// Puts an empty text block at `at` on top of the board and starts Insert mode in it.
-    fn new_block(&mut self, at: Point, open: Option<Side>, count: Option<u32>) {
-        if let Some(id) = self.add_empty_block(at) {
+    /// Puts an empty text block of size `size` at `at` on top of the board and starts Insert
+    /// mode in it.
+    fn new_block(&mut self, at: Point, size: f64, open: Option<Side>, count: Option<u32>) {
+        if let Some(id) = self.add_empty_block(at, size) {
             self.start_session(Start {
                 id,
                 byte: 0,
@@ -232,14 +251,17 @@ impl Engine {
         }
     }
 
-    /// Puts an empty text block at `at` on top of the board: its id, or `None` with a message
-    /// when the board refuses it.
-    fn add_empty_block(&mut self, at: Point) -> Option<ObjectId> {
+    /// Puts an empty text block of size `size` at `at` on top of the board: its id, or `None`
+    /// with a message when the board refuses it.
+    fn add_empty_block(&mut self, at: Point, size: f64) -> Option<ObjectId> {
         if !self.charge(self.id_work()) {
             return None;
         }
         let id = self.board.fresh_id("t");
-        match self.board.insert(Object::new(id.clone(), empty_text(at))) {
+        match self
+            .board
+            .insert(Object::new(id.clone(), empty_text(at, size)))
+        {
             Ok(()) => {
                 // The board shows the block from now on: a write asked for earlier lacks it.
                 self.changed();
@@ -475,7 +497,8 @@ impl Engine {
     }
 
     /// For a count on `o` or `O`: finishes the current block and starts the next on `side` of
-    /// it. False, leaving the current block as it is, when it is empty or there is no room.
+    /// it, at its size. False, leaving the current block as it is, when it is empty or there is
+    /// no room.
     fn open_another(&mut self, side: Side, measure: &mut dyn Measure) -> bool {
         let Some(block) = self.block.clone() else {
             return false;
@@ -489,13 +512,14 @@ impl Engine {
         if content(&object.shape).is_none_or(str::is_empty) {
             return false;
         }
-        let Some(at) = self.open_position(side, measure) else {
+        let block_size = object.shape.size().unwrap_or_else(|| self.settings.size());
+        let Some(at) = self.open_position(side, block_size, measure) else {
             if !self.out_of_work() {
                 self.error("no room for a new text block");
             }
             return false;
         };
-        let Some(id) = self.add_empty_block(at) else {
+        let Some(id) = self.add_empty_block(at, block_size) else {
             return false;
         };
         if let Some(session) = &mut self.session {
@@ -538,11 +562,11 @@ impl Engine {
     }
 }
 
-/// An empty text at `at`: a new block before its first character.
-fn empty_text(at: Point) -> Shape {
+/// An empty text of size `size` at `at`: a new block before its first character.
+fn empty_text(at: Point, size: f64) -> Shape {
     Shape::Text {
         at,
         text: String::new(),
-        size: DEFAULT_TEXT_SIZE,
+        size,
     }
 }

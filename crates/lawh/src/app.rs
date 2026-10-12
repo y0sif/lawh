@@ -707,7 +707,7 @@ fn do_writes(
             Effect::Write { path, .. } => {
                 let board = engine.board();
                 let result = batch.write(target(&path), || to_lawh(board), &mut write);
-                queue.extend(engine.write_done(&path, result));
+                queue.extend(engine.write_done(&path, result, false));
             }
             Effect::Quit => {
                 after.quit = true;

@@ -100,6 +100,27 @@ fn words() -> Board {
     board(&format!("text id=t1 x=0 y=0 \"{}\"\n", "ab ".repeat(1666)))
 }
 
+/// One text of one character.
+fn one_text() -> Board {
+    board("text id=t1 x=0 y=0 \"a\"\n")
+}
+
+/// The size of text `name`.
+fn size(r: &Run, name: &str) -> f64 {
+    r.engine
+        .board()
+        .get(&id(name))
+        .unwrap()
+        .shape
+        .size()
+        .unwrap()
+}
+
+/// The sizes of the texts of [`texts`], `t0` to `t499`.
+fn sizes(r: &Run) -> Vec<f64> {
+    (0..500).map(|i| size(r, &format!("t{i}"))).collect()
+}
+
 /// One text of two lines of 2,499 characters.
 fn two_lines() -> Board {
     let line = "x".repeat(2499);
@@ -184,6 +205,20 @@ fn cases() -> Vec<Case> {
                 let mut r = run_with_rc("", flags(), "gg10000A<Left><Right>");
                 let started = Instant::now();
                 r.feed("<Esc>");
+                (r, started.elapsed())
+            }),
+        ),
+        (
+            "<C-a><C-x> x127, one text",
+            Box::new(|| timed(&rc_repeating("<C-a><C-x>", 127), one_text(), "ggQ")),
+        ),
+        (
+            "<C-a><C-x> x127 in Visual, 500 texts",
+            Box::new(|| {
+                let rc = format!("xmap Q {}Q\n", "<C-a><C-x>".repeat(127));
+                let mut r = run_with_rc(&rc, texts(), "ggvG");
+                let started = Instant::now();
+                r.feed("Q");
                 (r, started.elapsed())
             }),
         ),
@@ -291,6 +326,25 @@ fn a_mapping_of_w_over_a_full_board_stops_within_the_work_budget() {
     };
     let n: usize = at.as_str()[1..].parse().unwrap();
     assert!((50..250).contains(&n), "{at}");
+    assert_stopped(&mut r, elapsed);
+}
+
+#[test]
+fn a_mapping_of_size_keys_stops_within_the_work_budget() {
+    // Before they counted the undo step, 30,000 `<C-a><C-x>` on one text took 308 ms in debug.
+    let (mut r, elapsed) = timed(&rc_repeating("<C-a><C-x>", 127), one_text(), "ggQ");
+    assert!([1.0, 1.25].contains(&size(&r, "t1")));
+    assert_stopped(&mut r, elapsed);
+    // Over a whole board of text in Visual mode: each key resizes every text or none.
+    let rc = format!("xmap Q {}Q\n", "<C-a><C-x>".repeat(127));
+    let mut r = run_with_rc(&rc, texts(), "ggvG");
+    let started = Instant::now();
+    r.feed("Q");
+    let elapsed = started.elapsed();
+    let first = size(&r, "t0");
+    assert!([1.0, 1.25].contains(&first));
+    assert_eq!(sizes(&r), vec![first; 500]);
+    assert_eq!(r.engine.mode(), lawh_core::Mode::Visual);
     assert_stopped(&mut r, elapsed);
 }
 
@@ -418,6 +472,19 @@ fn the_costliest_single_commands_fit_in_the_work_budget() {
     r.feed(".");
     check(&r);
     assert_eq!(text(&r, "t2"), "b".repeat(5000));
+    // A whole board of text resized in Visual mode, as far as it goes, and undone.
+    let mut r = run(texts(), "ggvG10000<C-a>");
+    assert_eq!(message(&r), Some("16 is the largest size"));
+    assert!(r.engine.key_work() <= MAX_KEY_WORK);
+    assert_eq!(sizes(&r), vec![16.0; 500]);
+    r.feed("<Esc>u");
+    check(&r);
+    assert_eq!(r.engine.board(), &texts());
+    // The same with `:si` from Visual mode.
+    let mut r = run(texts(), "ggvG:si 0.25");
+    r.feed("<CR>");
+    check(&r);
+    assert_eq!(sizes(&r), vec![0.25; 500]);
 }
 
 #[test]
@@ -654,6 +721,49 @@ fn work_unit_costs() {
             Board::new(),
             format!(":te {}<CR>", "x".repeat(5000)),
             "@:",
+        ),
+        (
+            "10000<C-a> in Visual over 500 texts",
+            texts(),
+            "ggvG".into(),
+            "10000<C-a>",
+        ),
+        (
+            ":si 2 from Visual over 500 texts",
+            texts(),
+            "ggvG:si 2".into(),
+            "<CR>",
+        ),
+        ("<C-a> on one of 500 texts", texts(), "gg".into(), "<C-a>"),
+        (
+            "<C-a> on a text of 5000 characters",
+            words(),
+            "gg".into(),
+            "<C-a>",
+        ),
+        (
+            "u of a resize of 500 texts",
+            texts(),
+            "ggvG<C-a><Esc>".into(),
+            "u",
+        ),
+        (
+            "10000W along 5000 characters of words",
+            words(),
+            "gg<CR>".into(),
+            "10000W",
+        ),
+        (
+            "10000B back along 5000 characters of words",
+            words(),
+            "gg<CR>$".into(),
+            "10000B",
+        ),
+        (
+            "10000E along 5000 characters of words",
+            words(),
+            "gg<CR>".into(),
+            "10000E",
         ),
     ];
     let ls = rc_repeating("l", 255);
