@@ -1,5 +1,6 @@
 //! Math for lawh: compiles Typst math snippets to vector paths the renderer
-//! can draw. Symbol search for `:sym` is planned.
+//! can draw, and lists the symbols Typst math knows by name ([`symbols`]),
+//! for `:sym`.
 //!
 //! Typst runs in a sandbox (see `SECURITY.md`): the only file it can see is
 //! the formula itself, fonts come from [`fonts`], there is no clock and no
@@ -29,6 +30,7 @@ mod fonts;
 mod layout;
 mod process;
 mod protocol;
+mod symbols;
 mod worker;
 mod world;
 
@@ -39,6 +41,7 @@ pub use engine::{
 };
 pub use fonts::{FontAsset, fonts};
 pub use process::WorkerCommand;
+pub use symbols::{SymbolInfo, symbols};
 pub use worker::{WORKER_MEMORY_LIMIT_BYTES, worker_main};
 
 /// Font size of math, in Typst pt. [`MathLayout`] coordinates are at this

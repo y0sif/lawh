@@ -33,6 +33,11 @@ pub(crate) const TEXT_FAMILY: &str = "Inter";
 /// Typst family name of the math font (index 1 in [`fonts`]).
 pub(crate) const MATH_FAMILY: &str = "Libertinus Math";
 
+/// Index of the text font, [`TEXT_FAMILY`], in [`fonts`].
+pub(crate) const TEXT_INDEX: usize = 0;
+/// Index of the math font, [`MATH_FAMILY`], in [`fonts`].
+pub(crate) const MATH_INDEX: usize = 1;
+
 static FONTS: [FontAsset; 2] = [
     FontAsset {
         family: TEXT_FAMILY,
@@ -93,7 +98,8 @@ fn faces() -> &'static [Option<ttf_parser::Face<'static>>] {
     })
 }
 
-fn face(index: usize) -> Option<&'static ttf_parser::Face<'static>> {
+/// The bundled font at `index` into [`fonts`], parsed by ttf-parser.
+pub(crate) fn face(index: usize) -> Option<&'static ttf_parser::Face<'static>> {
     faces().get(index)?.as_ref()
 }
 
@@ -136,6 +142,8 @@ mod tests {
             assert!(glyph_count(i).is_some_and(|n| n > 0));
         }
         assert_eq!(glyph_count(fonts().len()), None);
+        assert_eq!(fonts()[TEXT_INDEX].family, TEXT_FAMILY);
+        assert_eq!(fonts()[MATH_INDEX].family, MATH_FAMILY);
     }
 
     #[test]

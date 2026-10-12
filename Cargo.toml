@@ -34,6 +34,9 @@ nucleo-matcher = "=0.3.1"
 # Typst is pinned exactly: lawh-math walks its frame types, which change between releases.
 typst = "=0.15.1"
 typst-layout = "=0.15.1"
+# Typst's symbol names (`sym`), for `:sym`: pinned to the version Typst 0.15.1 takes them from,
+# so the list matches what the math worker compiles. Only the tables: Typst turns on the rest.
+codex = { version = "=0.3.0", default-features = false }
 # Same version Typst uses; only for the glyph outline trait.
 ttf-parser = { version = "0.25.1", default-features = false }
 # Caps the math worker process's address space on Unix (lawh-math worker_main).
