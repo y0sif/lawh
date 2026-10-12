@@ -576,9 +576,11 @@ fn write_names_an_unnamed_board_then_reports() {
             quit_after: false
         }]
     );
-    assert_eq!(r.engine.file_name(), Some("a.lawh"));
+    // The name sticks once the write went well.
+    assert_eq!(r.engine.file_name(), None);
     assert!(r.engine.is_modified());
     r.write_done("a.lawh", Ok(()));
+    assert_eq!(r.engine.file_name(), Some("a.lawh"));
     assert!(!r.engine.is_modified());
     assert_eq!(r.effects.len(), 1);
     assert_snapshot!(r.header());
@@ -587,6 +589,53 @@ fn write_names_an_unnamed_board_then_reports() {
     r.write_done("a.lawh", Err("permission denied"));
     assert!(r.engine.is_modified());
     assert_snapshot!(r.header());
+}
+
+#[test]
+fn a_failed_first_write_leaves_the_board_unnamed() {
+    // As `:w ~/a.lawh` once failed: the board must not take a name every later `:w` fails on.
+    let bad = "no-such-dir/a.lawh";
+    let not_found = "No such file or directory (os error 2)";
+    let mut r = run(Board::new(), &format!(":ci 1<CR>:w {bad}<CR>"));
+    r.write_done(bad, Err(not_found));
+    assert_eq!(r.engine.file_name(), None);
+    assert!(r.engine.is_modified());
+    let shown = r.engine.message().unwrap();
+    assert!(shown.error, "{shown:?}");
+    assert_eq!(shown.text, format!("cannot write \"{bad}\": {not_found}"));
+    // Still no file for `:w` alone, and nothing waits: the failed write's file is not used.
+    r.feed(":w<CR>");
+    let shown = r.engine.message().unwrap();
+    assert_eq!(shown.text, "no file name: :w <file> names the board");
+    assert_eq!(r.effects.len(), 1);
+    // A good write names it.
+    r.feed(":w a.lawh<CR>");
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(r.engine.file_name(), Some("a.lawh"));
+    assert!(!r.engine.is_modified());
+    assert_eq!(r.engine.message().unwrap().text, "\"a.lawh\" written");
+    // A report the engine did not ask for names nothing.
+    let mut r = run(Board::new(), ":ci 1<CR>");
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(r.engine.file_name(), None);
+    assert!(r.engine.is_modified());
+}
+
+#[test]
+fn wq_names_an_unnamed_board_only_when_its_write_goes_well() {
+    let mut r = run(Board::new(), ":ci 1<CR>:wq no-such-dir/a.lawh<CR>");
+    r.write_done("no-such-dir/a.lawh", Err("not found"));
+    assert_eq!(r.effects.len(), 1, "no quit: {:?}", r.effects);
+    assert_eq!(r.engine.file_name(), None);
+    assert!(r.engine.is_modified());
+    // `:wq` alone has no file to write; `:wq name` writes, names and quits.
+    r.feed(":wq<CR>");
+    assert_eq!(r.effects.len(), 1);
+    r.feed(":wq a.lawh<CR>");
+    r.write_done("a.lawh", Ok(()));
+    assert_eq!(r.effects.last(), Some(&Effect::Quit));
+    assert_eq!(r.engine.file_name(), Some("a.lawh"));
+    assert!(!r.engine.is_modified());
 }
 
 #[test]

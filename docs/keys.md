@@ -198,7 +198,7 @@ coordinates within -1,000,000 and 1,000,000. A board holds at most 500 objects.
 | Command | Does |
 |---|---|
 | `:w[rite]` | Write the board to its file |
-| `:w <file>` | Write to `<file>`. An unnamed board takes the name; a named board writes a copy and keeps its name |
+| `:w <file>` | Write to `<file>`. An unnamed board takes the name once the write succeeds; a named board writes a copy and keeps its name |
 | `:w! [file]` | As `:w` |
 | `:q[uit]` | Quit, unless the board has unwritten changes |
 | `:q!` | Quit, dropping unwritten changes |
@@ -208,7 +208,8 @@ coordinates within -1,000,000 and 1,000,000. A board holds at most 500 objects.
 | `:x! [file]` | With unwritten changes, as `:wq!`; without, quit without writing |
 
 Writes are atomic: the file is always either the old board or the new one. A relative path is
-taken from the directory lawh was started in. `:w !cmd` and `:w >>file` are refused.
+taken from the directory lawh was started in, and a leading `~` (`~` alone, `~/`, and `~\` on
+Windows) is your home directory; `~user` is not expanded. `:w !cmd` and `:w >>file` are refused.
 
 ### Undo and settings
 
@@ -317,7 +318,7 @@ cp examples/lawhrc ~/.config/lawh/lawhrc
 | Pan | Drag with the left or middle mouse button |
 | Zoom | Mouse wheel or touchpad scroll, at the pointer, from 0.1 to 20 |
 | Select | Click an object to make it the current object, or empty space to put the cursor on the nearest grid point. A click ends Insert, block-Normal and Visual mode and the command line, and drops keys waiting for a mapping |
-| Close | The window's close button (Cmd+Q on macOS). With unwritten changes the first close only warns; close again to quit |
+| Close | The window's close button (Cmd+Q on macOS). With unwritten changes the first close only warns; close again while the warning shows to quit (a key or click drops it) |
 
 The view follows the cursor as you type.
 

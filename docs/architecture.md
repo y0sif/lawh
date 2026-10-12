@@ -482,9 +482,16 @@ each report to the oldest write it asked for with that path.
   the write was asked for (later keys of the same mapping).
 - A write to another file is a copy: the board keeps its name and its unwritten changes. So
   `:wq other` on a changed board writes the copy and doesn't quit unless forced, while on an
-  unchanged board it writes the copy and quits. `:w name` on an unnamed board names it.
+  unchanged board it writes the copy and quits.
+- `:w name` on an unnamed board names it when `write_done` reports the write went well, so a
+  failed write (a missing directory) leaves the board unnamed. Until the report, `:w` alone in
+  the same key writes to that name (`:w a.lawh<CR>:wq<CR>` in a mapping). Of several writes that
+  would name it, the first to go well does.
 - `:x` on a board with no unwritten changes quits at once, without writing.
-- A relative path is taken from the directory lawh started in.
+- A relative path is taken from the directory lawh started in, and a leading `~` (alone, `~/`,
+  and `~\` on Windows) from the home directory (`files::write_target`, etcetera's `home_dir`).
+  `~user` stays as typed, as does the path of the file lawh opened (the shell expanded any `~`
+  in it). The engine and the status line keep the name as typed (`"~/a.lawh" written`).
 
 **Atomic writes** (`files::write_atomic`). An atomic write leaves the file either the old board
 or the new one, never half written:
@@ -501,8 +508,9 @@ or the new one, never half written:
 
 **Closing.** The window's close button, the desktop's close shortcut and Cmd+Q on macOS close at
 once when the board has no unwritten changes. Otherwise the first request shows
-`unsaved changes: :w to save, :q! to discard, or close again`, and a second one with no key
-between closes.
+`unsaved changes: :w to save, :q! to discard, or close again`, and a second one closes while that
+warning shows. A key, a click on the board or a mapping timeout drops the warning, and with it the
+armed close, so the next close warns again.
 
 ## The engine
 

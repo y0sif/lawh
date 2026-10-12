@@ -47,8 +47,8 @@ pub const MAX_WRITES_PER_KEY: usize = 4;
 /// forgotten to make room. Reports are still matched oldest first, so when another write
 /// waiting has the forgotten one's path, the forgotten write's report takes that one, and it is
 /// the newest report for the path that finds no write waiting. A report that finds none reads
-/// as a write the engine did not ask for, which neither marks the board saved nor quits, the
-/// safe side.
+/// as a write the engine did not ask for, which neither names the board, nor marks it saved,
+/// nor quits, the safe side.
 pub const MAX_PENDING_WRITES: usize = MAX_WRITES_PER_KEY;
 
 /// A write the engine asked the app for, until the app reports back.
@@ -70,6 +70,11 @@ impl Engine {
     /// `result`'s error. Returns [`Effect::Quit`] when the write was asked for by `:wq` or `:x`,
     /// went well, the board has not changed since, and nothing is left unsaved.
     ///
+    /// An unnamed board takes `path` as its name when the write went well (`:w a.lawh`), so a
+    /// write that failed (a typo in a directory) leaves it unnamed and the next `:w name` can
+    /// name it. When several writes of one key would name it (`:w a.lawh<CR>:w b.lawh<CR>` in a
+    /// mapping), the first reported to have gone well does, and the others are copies.
+    ///
     /// A good write to the board's own file makes the board unmodified, unless it changed after
     /// the write was asked for. The file is the board's own when the two names are the same
     /// path once `.` and `..` are worked out, without asking the file system (`./a.lawh` and
@@ -78,7 +83,8 @@ impl Engine {
     /// the copy and does not quit, unless forced with `:wq!`.
     ///
     /// Several writes may wait at once (`:w<CR>:w copy.lawh<CR>` in a mapping): each report is
-    /// matched to the oldest write asked for with the same path.
+    /// matched to the oldest write asked for with the same path. A report that matches none
+    /// neither names the board, nor marks it saved, nor quits.
     ///
     /// The report becomes the message as the key's own messages do (see [`Message`]): a failure
     /// is an error and replaces any message, while `"a.lawh" written` does not replace an error
@@ -96,6 +102,9 @@ impl Engine {
         if let Err(error) = result {
             self.error(format!("cannot write \"{path}\": {error}"));
             return Vec::new();
+        }
+        if self.file_name.is_none() && asked.is_some() {
+            self.file_name = Some(path.to_owned());
         }
         let own = self
             .file_name
@@ -237,22 +246,20 @@ impl Engine {
         Vec::new()
     }
 
-    /// Asks the app to write the board to `file`, or to the board's own file. An unnamed board
-    /// takes `file` as its name; a named board writes a copy to it. `quit`: quit after the
-    /// write, forced (`Some(true)`) or not.
+    /// Asks the app to write the board to `file`, or to the board's own file
+    /// ([`Engine::write_name`]). An unnamed board takes `file` as its name once the write goes
+    /// well (see [`Engine::write_done`]); a named board writes a copy to it. `quit`: quit after
+    /// the write, forced (`Some(true)`) or not.
     ///
     /// The key's writes are counted: past [`MAX_WRITES_PER_KEY`] the write is refused (the
     /// board keeps its name, or lack of one) and the key stops.
     fn write(&mut self, file: Option<&str>, quit: Option<bool>) -> Vec<Effect> {
-        let Some(path) = file.or(self.file_name.as_deref()).map(str::to_owned) else {
+        let Some(path) = file.or_else(|| self.write_name()).map(str::to_owned) else {
             self.error("no file name: :w <file> names the board");
             return Vec::new();
         };
         if !self.charge_write() {
             return Vec::new();
-        }
-        if self.file_name.is_none() {
-            self.file_name = Some(path.clone());
         }
         let quit_after = quit.is_some();
         if self.pending_writes.len() >= MAX_PENDING_WRITES {
@@ -265,6 +272,17 @@ impl Engine {
             version: self.version,
         });
         vec![Effect::Write { path, quit_after }]
+    }
+
+    /// The file `:w` with no name writes: the board's own. An unnamed board has none, unless
+    /// writes that would name it wait for their reports: then the oldest one's file, so that a
+    /// mapping such as `:w a.lawh<CR>:wq<CR>` writes `a.lawh` and quits, as if the first write
+    /// had named the board at once. Every write waiting on an unnamed board would name it, as a
+    /// board never loses its name.
+    fn write_name(&self) -> Option<&str> {
+        self.file_name
+            .as_deref()
+            .or_else(|| self.pending_writes.front().map(|w| w.path.as_str()))
     }
 
     /// Puts a new object on top of the board, with a fresh id for its kind (`c1`, `t2`), as one

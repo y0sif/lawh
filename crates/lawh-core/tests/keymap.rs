@@ -668,6 +668,57 @@ fn every_write_of_a_mapping_is_matched_to_its_report() {
 }
 
 #[test]
+fn the_first_good_write_of_a_mapping_names_an_unnamed_board() {
+    let unnamed = |rc: &str| {
+        let mut engine = Engine::new(Board::new());
+        assert_eq!(engine.source(rc), []);
+        let mut r = run_engine(engine, ":ci 1<CR>Q");
+        assert_eq!(r.engine.file_name(), None, "named before any report");
+        r.effects.clear();
+        r
+    };
+    // Two files: the first written names the board, the other is a copy.
+    let rc = "nnoremap Q :w a.lawh<CR>:w b.lawh<CR>\n";
+    let mut r = unnamed(rc);
+    r.write_done("a.lawh", Ok(())).write_done("b.lawh", Ok(()));
+    assert_eq!(r.engine.file_name(), Some("a.lawh"));
+    assert!(!r.engine.is_modified());
+    let mut r = unnamed(rc);
+    r.write_done("a.lawh", Err("disk full"))
+        .write_done("b.lawh", Ok(()));
+    assert_eq!(r.engine.file_name(), Some("b.lawh"));
+    assert!(!r.engine.is_modified());
+    assert_eq!(error(&r), "cannot write \"a.lawh\": disk full");
+    let mut r = unnamed(rc);
+    r.write_done("a.lawh", Err("disk full"))
+        .write_done("b.lawh", Err("disk full"));
+    assert_eq!(r.engine.file_name(), None);
+    assert!(r.engine.is_modified());
+
+    // `:w name` then `:wq`: the `:wq` writes the file the first write would name, and quits
+    // once both went well.
+    let rc = "nnoremap Q :w a.lawh<CR>:wq<CR>\n";
+    let mut engine = Engine::new(Board::new());
+    assert_eq!(engine.source(rc), []);
+    let r = run_engine(engine, ":ci 1<CR>Q");
+    let write = |quit_after| Effect::Write {
+        path: "a.lawh".to_owned(),
+        quit_after,
+    };
+    assert_eq!(r.effects, [write(false), write(true)]);
+    let mut r = unnamed(rc);
+    r.write_done("a.lawh", Ok(())).write_done("a.lawh", Ok(()));
+    assert_eq!(r.effects, [Effect::Quit]);
+    assert_eq!(r.engine.file_name(), Some("a.lawh"));
+    // Failed, it neither names the board nor quits.
+    let mut r = unnamed(rc);
+    r.write_done("a.lawh", Err("disk full"))
+        .write_done("a.lawh", Err("disk full"));
+    assert_eq!(r.effects, []);
+    assert_eq!(r.engine.file_name(), None);
+}
+
+#[test]
 fn at_most_max_pending_writes_wait_for_their_reports() {
     // The board's own write, then MAX_PENDING_WRITES copies: the own write is forgotten, so
     // its report does not mark the board saved (the safe side).

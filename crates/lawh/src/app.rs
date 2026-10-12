@@ -39,7 +39,8 @@ const CLICK_SLOP_PX: f64 = 4.0;
 const HIT_TOLERANCE_PX: f64 = 4.0;
 
 /// The status line on a close request while the board has unwritten changes. A second close
-/// request, with no key between, closes.
+/// request closes while this still shows: a key, a click or a mapping timeout between drops
+/// it, and the next close warns again.
 const CLOSE_MODIFIED: &str = "unsaved changes: :w to save, :q! to discard, or close again";
 
 /// Sent to the event loop by the math engine's waker when a formula finishes compiling.
@@ -47,10 +48,6 @@ const CLOSE_MODIFIED: &str = "unsaved changes: :w to save, :q! to discard, or cl
 pub struct MathReady;
 
 /// The open board and its window.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "independent facts about the window: a button held, the view kept, a close refused, quitting"
-)]
 pub struct App {
     engine: Engine,
     /// The file the board was opened from, as the engine names it and as the system does (the
@@ -58,6 +55,8 @@ pub struct App {
     file: Option<(String, PathBuf)>,
     /// The directory lawh started in: `:w` takes a relative path from here.
     launch_dir: Option<PathBuf>,
+    /// The user's home directory: `:w ~/a.lawh` writes `a.lawh` in it.
+    home: Option<PathBuf>,
     /// The window title, kept to set it only when it changes.
     title: String,
     /// Draws the board and measures it for the engine; its math engine never blocks a frame,
@@ -80,10 +79,9 @@ pub struct App {
     /// The engine's timer for keys waiting for a longer mapping.
     timer: Timer,
     /// The app's own message for the status line (a lawhrc warning, a refused close), until
-    /// the next key, click or timeout.
+    /// the next key, click or timeout. While it is [`CLOSE_MODIFIED`], a close request closes
+    /// ([`App::close_or_warn`]).
     message: Option<String>,
-    /// Closing while the board has unwritten changes was refused once, and no key came since.
-    close_refused: bool,
     /// The engine asked to quit: keys still queued are dropped.
     quitting: bool,
     /// When lawh started, for the first-frame log.
@@ -139,8 +137,9 @@ impl Timer {
 }
 
 impl App {
-    /// The app for `engine`, whose board was opened from `file` (see
-    /// [`files::write_target`]), with `message` on the status line until the first key.
+    /// The app for `engine`, whose board was opened from `file`, with relative `:w` paths taken
+    /// from `launch_dir` and `~` from the user's home directory (see [`files::write_target`]),
+    /// and `message` on the status line until the first key.
     ///
     /// The cursor starts on the board's first object in reading order ([`Engine::go_first`];
     /// an empty board keeps the grid's origin), which the opening view shows
@@ -160,6 +159,7 @@ impl App {
             engine,
             file,
             launch_dir,
+            home: files::home_dir(),
             renderer,
             gfx: None,
             viewport: None,
@@ -170,7 +170,6 @@ impl App {
             modifiers: ModifiersState::empty(),
             timer: Timer::default(),
             message,
-            close_refused: false,
             quitting: false,
             started,
             frames: 0,
@@ -228,7 +227,6 @@ impl App {
         }
         self.timer.cancel();
         self.message = None;
-        self.close_refused = false;
         self.keep_view = true;
         for key in translated.keys {
             let effects = self.engine.feed(key, &mut self.renderer);
@@ -240,7 +238,8 @@ impl App {
         self.after_input();
     }
 
-    /// The engine's timer went off: keys waiting for a longer mapping run now.
+    /// The engine's timer went off: keys waiting for a longer mapping run now. As a key does, it
+    /// drops the app's message, a close warning too.
     fn timeout(&mut self, event_loop: &ActiveEventLoop) {
         self.message = None;
         let effects = self.engine.timeout(&mut self.renderer);
@@ -258,10 +257,11 @@ impl App {
             .as_ref()
             .map(|(name, real)| (name.as_str(), real.as_path()));
         let launch_dir = self.launch_dir.as_deref();
+        let home = self.home.as_deref();
         let after = do_writes(
             &mut self.engine,
             effects,
-            |path| files::write_target(path, opened, launch_dir),
+            |path| files::write_target(path, opened, launch_dir, home),
             write_board,
         );
         if after.quit {
@@ -298,13 +298,26 @@ impl App {
     /// The window's close button, the system's close shortcut, or Cmd+Q on macOS
     /// ([`keys::is_close_request`]).
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
-        if close_now(self.engine.is_modified(), self.close_refused) {
+        if self.close_or_warn() {
             event_loop.exit();
-            return;
+        } else {
+            self.request_redraw();
         }
-        self.close_refused = true;
+    }
+
+    /// A close request: true when the window closes now ([`close_now`]), else the status line
+    /// warns of the unwritten changes ([`CLOSE_MODIFIED`]).
+    ///
+    /// The close is armed only while that warning shows, so whatever drops it (a key, a click
+    /// on the board, a mapping timeout) disarms it too: after anything else, a close warns
+    /// first, and only two closes in a row close.
+    fn close_or_warn(&mut self) -> bool {
+        let warned = self.message.as_deref() == Some(CLOSE_MODIFIED);
+        if close_now(self.engine.is_modified(), warned) {
+            return true;
+        }
         self.message = Some(CLOSE_MODIFIED.to_owned());
-        self.request_redraw();
+        false
     }
 
     fn pointer_moved(&mut self, to: Point) {
@@ -372,7 +385,8 @@ impl App {
             .renderer
             .hit_test(self.engine.board(), point, tolerance);
         tracing::debug!(?point, ?hit, "click");
-        // The click drops keys waiting for a mapping, and with them their timer.
+        // The click drops keys waiting for a mapping, and with them their timer, and the app's
+        // message: a close warning too, so the next close warns again.
         self.timer.cancel();
         self.message = None;
         // A formula finishing must not move the board from under what was just clicked.
@@ -636,9 +650,9 @@ fn click_point(vp: &Viewport, at: Point) -> Option<(Point, f64)> {
 }
 
 /// A close request closes the window when the board has no unwritten changes, or when one was
-/// refused already with no key since.
-fn close_now(modified: bool, refused_before: bool) -> bool {
-    !modified || refused_before
+/// refused already and its warning still shows.
+fn close_now(modified: bool, warned: bool) -> bool {
+    !modified || warned
 }
 
 /// The pointer moved far enough from where the left button went down (physical pixels, at
@@ -969,15 +983,55 @@ mod tests {
     }
 
     fn app_for(board: lawh_core::Board) -> App {
-        let engine = Engine::new(board);
+        app_with(Engine::new(board), None)
+    }
+
+    fn app_with(engine: Engine, message: Option<String>) -> App {
         App::new(
             engine,
             None,
             None,
             Renderer::new_trusted(),
             Instant::now(),
-            None,
+            message,
         )
+    }
+
+    #[test]
+    fn a_close_after_a_click_or_another_message_warns_again() {
+        let modified = |message: Option<&str>| {
+            let mut engine = Engine::new(lawh_core::Board::new());
+            feed(&mut engine, ":ci 1<CR>");
+            assert!(engine.is_modified());
+            let mut app = app_with(engine, message.map(str::to_owned));
+            // 40 px a unit, the origin at the window's centre (400, 300).
+            app.viewport = Some(Viewport::new(Point::ZERO, 1.0, 800, 600, 1.0));
+            app
+        };
+        // Two closes in a row: the first warns, the second closes.
+        let mut app = modified(None);
+        assert!(!app.close_or_warn());
+        assert_eq!(app.message.as_deref(), Some(CLOSE_MODIFIED));
+        assert!(app.close_or_warn());
+        // A click on the board drops the warning, and the next close warns again.
+        let mut app = modified(None);
+        assert!(!app.close_or_warn());
+        app.click(Point::new(480.0, 300.0));
+        assert_eq!(app.message, None);
+        assert!(!app.close_or_warn());
+        assert!(app.close_or_warn());
+        // A click on the status bar does nothing: the warning stays, and so does the close.
+        let mut app = modified(None);
+        assert!(!app.close_or_warn());
+        app.click(Point::new(10.0, 599.0));
+        assert_eq!(app.message.as_deref(), Some(CLOSE_MODIFIED));
+        assert!(app.close_or_warn());
+        // Another message of the app's (a lawhrc warning) is no close warning.
+        let mut app = modified(Some("lawhrc line 2: nope"));
+        assert!(!app.close_or_warn());
+        assert!(app.close_or_warn());
+        // Without changes, a close closes at once.
+        assert!(app_for(lawh_core::Board::new()).close_or_warn());
     }
 
     #[test]

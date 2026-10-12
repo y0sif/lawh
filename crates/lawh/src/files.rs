@@ -89,21 +89,48 @@ pub fn engine_name(path: &Path) -> String {
 }
 
 /// The file a `:w` of `path` (as the engine names it) writes: the opened file when `path` is
-/// its engine name (`opened` pairs the two), else `path` itself. A relative path is taken from
-/// `launch_dir`, the directory lawh was started in, when there is one.
+/// its engine name (`opened` pairs the two), else `path` itself, a leading `~` taken as the
+/// home directory `home` ([`expand_home`]). A relative path is taken from `launch_dir`, the
+/// directory lawh was started in, when there is one.
+///
+/// The opened file is written where it was read, `~` or not: the shell expands `~` in
+/// `lawh ~/a.lawh` already, so a `~` left in it was quoted, and names a directory `~`.
 pub fn write_target(
     path: &str,
     opened: Option<(&str, &Path)>,
     launch_dir: Option<&Path>,
+    home: Option<&Path>,
 ) -> PathBuf {
     let path = match opened {
         Some((name, real)) if name == path => real.to_owned(),
-        _ => PathBuf::from(path),
+        _ => expand_home(path, home),
     };
     match launch_dir {
         Some(dir) => dir.join(path),
         None => path,
     }
+}
+
+/// `path` with a leading `~` taken as the home directory `home`, as a shell does for `:w`
+/// paths: `~` alone, or followed by a separator (`~/boards/a.lawh`, and on Windows
+/// `~\boards\a.lawh` too). `~user`, a `~` anywhere else, and every path when there is no home
+/// directory stay as typed.
+fn expand_home(path: &str, home: Option<&Path>) -> PathBuf {
+    match (home, path.strip_prefix('~')) {
+        (Some(home), Some("")) => home.to_owned(),
+        (Some(home), Some(rest)) if rest.starts_with(std::path::is_separator) => {
+            // Joining `/boards` would replace the home directory, not go into it.
+            home.join(rest.trim_start_matches(std::path::is_separator))
+        }
+        _ => PathBuf::from(path),
+    }
+}
+
+/// The user's home directory, for `~` in `:w` paths; `None` when the system has none.
+pub fn home_dir() -> Option<PathBuf> {
+    etcetera::home_dir()
+        .inspect_err(|err| tracing::warn!(%err, "no home directory; ~ in :w paths stays as typed"))
+        .ok()
 }
 
 /// The writes of one batch of the engine's effects: those one key or timeout asked for.
@@ -339,17 +366,68 @@ mod tests {
         let real = Path::new("boards").join("a.lawh");
         let opened = Some(("boards/a.lawh", real.as_path()));
         assert_eq!(
-            write_target("boards/a.lawh", opened, Some(launch)),
+            write_target("boards/a.lawh", opened, Some(launch), None),
             launch.join(&real)
         );
         assert_eq!(
-            write_target("b.lawh", opened, Some(launch)),
+            write_target("b.lawh", opened, Some(launch), None),
             launch.join("b.lawh")
         );
-        assert_eq!(write_target("b.lawh", None, None), Path::new("b.lawh"));
+        assert_eq!(
+            write_target("b.lawh", None, None, None),
+            Path::new("b.lawh")
+        );
         let absolute = std::env::temp_dir().join("c.lawh");
         let absolute_name = absolute.to_str().unwrap();
-        assert_eq!(write_target(absolute_name, None, Some(launch)), absolute);
+        assert_eq!(
+            write_target(absolute_name, None, Some(launch), None),
+            absolute
+        );
+    }
+
+    #[test]
+    fn a_leading_tilde_in_a_write_path_is_the_home_directory() {
+        // An absolute home, so the launch directory does not apply to it.
+        let home = std::env::temp_dir().join("home");
+        let launch = Path::new("work");
+        let write = |path: &str| write_target(path, None, Some(launch), Some(&home));
+        assert_eq!(write("~/test.lawh"), home.join("test.lawh"));
+        assert_eq!(write("~/boards/a.lawh"), home.join("boards").join("a.lawh"));
+        assert_eq!(write("~//test.lawh"), home.join("test.lawh"));
+        assert_eq!(write("~"), home);
+        // Windows takes `\` as a separator too; elsewhere `~\a.lawh` is one name.
+        let backslash = if cfg!(windows) {
+            home.join("a.lawh")
+        } else {
+            launch.join("~\\a.lawh")
+        };
+        assert_eq!(write("~\\a.lawh"), backslash);
+        // Only a leading `~` alone, and not `~user`.
+        for typed in [
+            "~user/a.lawh",
+            "~a.lawh",
+            "a/~/b.lawh",
+            "x~/a.lawh",
+            "./~/a.lawh",
+        ] {
+            assert_eq!(write(typed), launch.join(typed), "{typed}");
+        }
+        // No home directory: as typed.
+        assert_eq!(
+            write_target("~/test.lawh", None, Some(launch), None),
+            launch.join("~/test.lawh")
+        );
+        // The opened file is written where it was read, even with a `~` in its name.
+        let quoted = Path::new("~").join("a.lawh");
+        let opened = Some(("~/a.lawh", quoted.as_path()));
+        assert_eq!(
+            write_target("~/a.lawh", opened, Some(launch), Some(&home)),
+            launch.join(&quoted)
+        );
+        assert_eq!(
+            write_target("~/b.lawh", opened, Some(launch), Some(&home)),
+            home.join("b.lawh")
+        );
     }
 
     #[cfg(unix)]
@@ -359,7 +437,7 @@ mod tests {
         let real = PathBuf::from(OsString::from_vec(vec![b'b', 0xFF, b'.', b'l']));
         let name = engine_name(&real);
         assert_ne!(Path::new(&name), real);
-        assert_eq!(write_target(&name, Some((&name, &real)), None), real);
+        assert_eq!(write_target(&name, Some((&name, &real)), None, None), real);
     }
 
     #[test]
