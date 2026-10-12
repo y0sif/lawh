@@ -1,6 +1,6 @@
 # Tech stack
 
-Why each dependency, and what it beat. Versions are the ones in `Cargo.lock` on 2026-10-11, and
+Why each dependency, and what it beat. Versions are the ones in `Cargo.lock` on 2026-10-12, and
 licences and minimum Rust versions come from each crate's own `Cargo.toml`. Every new crate goes
 here and must pass `cargo deny check` (see [deny.toml](../deny.toml)).
 
@@ -10,6 +10,7 @@ here and must pass `cargo deny check` (see [deny.toml](../deny.toml)).
 |---|---|---|---|---|---|
 | Geometry | `kurbo` | 0.13.1 | Apache-2.0 OR MIT | core, math, render | Points, rectangles, Bézier paths and transforms. Must stay the version `vello_cpu` re-exports. |
 | Library errors | `thiserror` | 2.0.21 | MIT OR Apache-2.0 | core, math, render | Typed error enums callers can match on. |
+| Graphemes | `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 | core | Splits a block's text into graphemes (what a reader sees as one character), so the cursor moves and `x` deletes `é` with a combining accent, or a family emoji, as one. Its `GraphemeCursor` finds the boundary next to a byte without splitting the whole text. Already in the tree through Typst and winit. |
 | Logging | `tracing` | 0.1.44 | MIT | math, render, app | Structured logs, the Rust standard. |
 | Log output | `tracing-subscriber` (`env-filter`) | 0.3.23 | MIT | app | Prints logs to stderr, filtered by `RUST_LOG`. |
 | App errors | `anyhow` | 1.0.104 | MIT OR Apache-2.0 | app | Context chaining at the top level. |
@@ -24,6 +25,7 @@ here and must pass `cargo deny check` (see [deny.toml](../deny.toml)).
 | Byte casts | `bytemuck` | 1.25.2 | Zlib OR Apache-2.0 OR MIT | render | Casts parley's font variation coordinates to the `i16` slice `vello_cpu` takes. |
 | Window, input | `winit` (default features) | 0.30.13 | Apache-2.0 | app | The standard Rust windowing crate: X11, Wayland, macOS and Windows. X11 and Wayland libraries are loaded at run time, so building needs no system packages. |
 | Show CPU-drawn frames | `softbuffer` | 0.4.8 | MIT OR Apache-2.0 | app | Puts a pixel buffer in a winit window on every platform, no GPU needed. |
+| Config directory | `etcetera` | 0.11.0 | MIT OR Apache-2.0 | app | Where the lawhrc lives: `choose_app_strategy` gives XDG on Linux and macOS (`~/.config/lawh`, `XDG_CONFIG_HOME` honoured) and the roaming AppData folder on Windows. Small: its only dependencies are `cfg-if` and `windows-sys`, both already in the tree. |
 
 `peniko` (brushes, font data) and `fontique` (font collections) are used through the re-exports in
 `vello_cpu` and `parley`, not as direct dependencies.
@@ -88,12 +90,11 @@ checked on crates.io on 2026-10-10.
 
 | Job | Crate | Version | Licence | Why |
 |---|---|---|---|---|
-| Spatial index for motions | `rstar` | 0.13.0 | MIT OR Apache-2.0 | Nearest-object queries for "jump to the shape on the right". |
+| Spatial index for motions | `rstar` | 0.13.0 | MIT OR Apache-2.0 | Nearest-object queries for `H J K L`, if scanning the board's 500 objects (how motions work today, bounded by `MAX_KEY_WORK`) gets too slow. |
 | Symbol search | `nucleo` | 0.5.0 | MPL-2.0 | Helix's fuzzy matcher for `:sym integral`. |
 | PDF export | `krilla` | 0.8.2 | MIT OR Apache-2.0 | The PDF library Typst itself uses. |
 | Clipboard | `arboard` | 3.6.1 | MIT OR Apache-2.0 | Cross-platform, Wayland support behind a feature. |
 | Live reload | `notify` | 8.2.0 | CC0-1.0 | Reload a board when it changes on disk (hand edits, agents). |
-| Config and cache dirs | `etcetera` | 0.11.0 | MIT OR Apache-2.0 | XDG on Linux, native folders on macOS and Windows. |
 | Accessibility | `accesskit` | 0.25.1 | MIT OR Apache-2.0 | Screen-reader tree for winit apps. |
 
 `vello_gpu` (0.3.0) is the upgrade path if the CPU renderer gets too slow; a release frame of

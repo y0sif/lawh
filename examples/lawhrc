@@ -1,23 +1,39 @@
-" lawh reads this file at start. Same syntax as the : line; lines starting
-" with a double quote are comments.
+" A sample lawhrc for the lawh whiteboard. It mirrors its author's Neovim:
+" jkl; to move instead of hjkl. To use it, copy it to ~/.config/lawh/lawhrc
+" (Linux and macOS) or %APPDATA%\y0sif\lawh\config\lawhrc (Windows).
+"
+" lawh reads this file at start. One : command a line, the : optional; only
+" :set and the mapping commands are allowed. Lines starting with a double
+" quote are comments. Every key and command: docs/keys.md.
 
-" <Leader> stands for this key in the mappings below.
+" <Leader> stands for this key in the mappings below (the default is \).
 set leader=<Space>
 
 " Move with jkl; instead of hjkl, on the board, in Visual mode, after d or y,
-" and inside text blocks.
+" and inside text blocks. noremap covers those three modes; Insert mode keeps
+" its keys. With noremap, h j k l below run the built-in moves, not each other.
 noremap j h
 noremap k j
 noremap l k
 noremap ; l
 
-" Object jumps: Shift+; types :, so the jump right moves to H.
+" Jumps to the nearest object follow the same layout: J left, K down, L up,
+" and H right (Shift+; types :, which stays the command line).
 noremap J H
 noremap K J
 noremap L K
 noremap H L
 
+" ' takes the place ; has in Vim (repeat the last f or t). lawh has no such
+" command yet, so for now ' does nothing.
 nnoremap ' ;
+
+" U redoes, as Ctrl+R does.
 nnoremap U <C-r>
+
+" Typing j then k quickly in Insert mode leaves it, as <Esc> does. After j,
+" lawh waits timeoutlen (1000 ms by default) for the k before typing the j.
 inoremap jk <Esc>
+
+" Space then s writes the board.
 nnoremap <Leader>s :w<CR>

@@ -1,10 +1,14 @@
 # Architecture
 
-Status: milestone 1 ("see a board") is built. `lawh file.lawh` reads a board, opens a window and
+Status: milestone 1 ("see a board") is built: `lawh file.lawh` reads a board, opens a window and
 draws text, Typst math, circles, ellipses, rectangles, lines and arrows, with mouse pan and zoom.
-The Vim engine, editing, saving and export come in milestone 2 and later. Sections marked
-**planned** describe that design; sections marked **open** are decisions still to make. Measured
-numbers are in [research/m1-measurements.md](research/m1-measurements.md).
+Milestone 2 (the Vim engine) is built and waiting for the maintainer's test: keys move the cursor,
+make and edit objects, select, undo and repeat, `:w` saves, and key maps and settings load from a
+lawhrc. Export and the rest come later. Sections marked **planned** describe design not built
+yet; **open** marks decisions still to make. Measured numbers are in
+[research/m1-measurements.md](research/m1-measurements.md) and
+[research/m2-measurements.md](research/m2-measurements.md). The keys themselves are listed in
+[keys.md](keys.md).
 
 ## Crates and dependency rules
 
@@ -19,10 +23,10 @@ lawh-core and lawh-math depend on no other lawh crate.
 
 | Crate | Owns today | Planned | Depends on |
 |---|---|---|---|
-| `lawh-core` | Board model and its limits, `.lawh` reader (own parser) and writer | Vim engine, `:` command parser, undo, spatial index | kurbo, thiserror. No rendering, windowing or Typst, ever. |
+| `lawh-core` | Board model and its limits, `.lawh` reader (own parser) and writer, Vim key notation, the Vim engine: modes, board grammar, text editing in blocks, `:` command parser, undo, `.`, key maps, settings, lawhrc parsing | Spatial index | kurbo, thiserror, unicode-segmentation. No rendering, windowing or Typst, ever. |
 | `lawh-math` | Typst sandbox, math worker process and its protocol, layout to vector paths, caches, recompile limits, bundled fonts | Symbol name search for `:sym` | typst, typst-layout, ttf-parser, rlimit (Unix) |
-| `lawh-render` | Board to pixels with `vello_cpu`, text layout with parley, the frame budget, PNG encoding of a frame | SVG and PDF export | lawh-core, lawh-math, vello_cpu, parley |
-| `lawh` | Command line, window and event loop (winit), presenting frames (softbuffer), mouse pan and zoom, the hidden `--math-worker` mode | Keys, status line, command line, config, file watching | everything above |
+| `lawh-render` | Board to pixels with `vello_cpu`, text layout with parley, the frame budget, PNG encoding of a frame, the editing overlay (cursor, Visual selection, caret, status and command line), caret geometry, hit tests, and measuring text and math for the engine (`impl Measure for Renderer`) | SVG and PDF export | lawh-core, lawh-math, vello_cpu, parley |
+| `lawh` | Command line, window and event loop (winit), presenting frames (softbuffer), winit keys to engine keys, the engine's effects (atomic writes, quitting, the mapping timer), the status line's text, the lawhrc from the config directory, mouse pan, zoom and click to select, the hidden `--math-worker` mode | App shortcuts, file watching, clipboard | everything above, etcetera |
 
 `lawh-core` stays light so `cargo test -p lawh-core` never compiles Typst or the renderer.
 [tech-stack.md](tech-stack.md) lists every dependency with its version and licence.
@@ -31,21 +35,25 @@ lawh-core and lawh-math depend on no other lawh crate.
 
 ```text
 lawh file.lawh
- └─► lawh: refuse files over 1 MiB, read the file
+ └─► lawh: refuse files over 1 MiB, read the file (a missing file opens as an empty board)
       └─► lawh-core from_lawh: parser ─► reader ─► Board          (stops at the first problem)
-           └─► lawh: open a window (winit), fit the board to it
-                └─► lawh-render Renderer::render(board, viewport), once per frame
-                     ├─ text: laid out with parley, cached
-                     ├─ math: MathEngine::request, never blocks ─► worker process (Typst)
-                     ├─ budget: estimate each object, draw it or its outline
-                     └─ vello_cpu ─► RGBA pixels
-                          └─► lawh: copy into the softbuffer surface, present
+           └─► lawh-core Engine::new(board); lawh reads the lawhrc into it (Engine::source)
+                └─► lawh: open a window (winit), cursor on the first object, fit the board
+                     └─► lawh-render Renderer::render_with(board, viewport, overlay), per frame
+                          ├─ text: laid out with parley, cached
+                          ├─ math: MathEngine::request, never blocks ─► worker process (Typst)
+                          ├─ budget: estimate each object, draw it or its outline
+                          ├─ overlay: cursor, selection, caret, status bar (outside the budget)
+                          └─ vello_cpu ─► RGBA pixels
+                               └─► lawh: copy into the softbuffer surface, present
 ```
 
-Math runs beside this loop. A formula the renderer asks for is queued; the engine's queue thread
-sends it to the worker process, caches the result and calls a waker. The app's waker posts an
-event to the winit event loop, which draws another frame. Until the user pans or zooms, the app
-also fits the view to the board again, since a formula's real size replaces its placeholder's.
+Math runs beside this loop. A formula the renderer asks for is queued; the math engine's queue
+thread sends it to the worker process, caches the result and calls a waker. The app's waker posts
+an event to the winit event loop, which draws another frame. Until the user pans, zooms, clicks or
+types a key, the app also fits the view to the board again, since a formula's real size replaces its placeholder's.
+After a key, the view pans as little as it can to keep the cursor, the current object or the
+caret `FOLLOW_MARGIN_PX` (48 logical pixels) inside the window.
 
 A frame that ran out of budget for laying out text asks for the next frame itself
 (`FrameStats::incomplete`). Otherwise the window waits for input or the math waker
@@ -146,11 +154,18 @@ or U+0000 unescaped, which its own parser then rejects.
 - Numbers are written as Rust prints them (`3`, `-0.5`), `-0` as `0`, and in exponent form at
   1e38 and up or below 1e-6, so every `f64` reads back exactly.
 - Comments and spacing of a hand-edited file are **not** kept: writing prints the fixed shape.
-  The app doesn't save yet.
+  `:w` writes it atomically (see [Data flow for one key press](#data-flow-for-one-key-press)).
 
 The largest board the caps allow writes 415,551 bytes, well under the 1 MiB read limit.
 
-### Limits
+## Limits
+
+Every cap on what a file, a board, a key or a frame may cost is a named constant, documented where
+it is defined with its reason, and measurements where a cost was measured. A cap refuses with a
+message; it never panics. `CLAUDE.md` has the short list by file; the math caps are under
+[Math](#math), the frame budget's under [The frame budget](#the-frame-budget).
+
+### File and board
 
 | Limit | Value | Constant | Defined in |
 |---|---|---|---|
@@ -166,8 +181,43 @@ The largest board the caps allow writes 415,551 bytes, well under the 1 MiB read
 | Characters of text and math on a board | 40,000 | `MAX_BOARD_TEXT_CHARS` | same |
 | Characters in an id | 64 | `MAX_ID_CHARS` | same |
 
-Each constant is documented where it is defined, most with their reason, and measurements where a
-cost was measured.
+### Engine, overlay and app
+
+Paths are under `crates/`. "Measured" numbers are release builds unless they say debug (see
+[research/m2-measurements.md](research/m2-measurements.md)); "derived" ones are worked out from
+the caps.
+
+| Limit | Value | Constant, file | Why |
+|---|---|---|---|
+| Count before a command | 10,000 | `MAX_COUNT`, `lawh-core/src/engine/mod.rs` | No motion, undo or put needs more (a board holds 500 objects); saturating keeps `999999999p` cheap to refuse. |
+| Undo steps kept | 1,000 | `MAX_UNDO_STEPS`, `engine/undo.rs` | Vim's default `undolevels`. |
+| Undo memory | 16 MiB, estimated | `MAX_UNDO_BYTES`, same | A step holds whole objects: 1,000 edits of a 5,000-character text would hold 40 MB (derived). Keeps at least 40 steps that change a whole board (about 0.4 MB each, derived). |
+| Keys one change keeps for `.` | 10,000 | `MAX_REPEAT_KEYS`, `engine/repeat.rs` | The longest text worth typing in one go (5,000 characters), and as much again for moving and correcting. |
+| Characters on the command line | 5,064 (`MAX_TEXT_CHARS` + 64) | `MAX_COMMAND_LINE_CHARS`, `engine/cmdline.rs` | `:text` with a full text, plus room for the name. |
+| Mappings per mode | 1,000 | `MAX_MAPS`, `engine/keymap.rs` | A lawhrc holds tens. Bounds what mappings hold (about 6 MB a mode, derived). The worst lawhrc it allows loads in 676 ms (measured). |
+| Keys on each side of a mapping | 256 | `MAX_MAP_KEYS`, same | Vim takes 50 bytes; a long `:te` or `:ma` line still fits on the right side. |
+| Mapping expansions per typed key | 1,000 | `MAX_MAP_DEPTH`, same | Vim's `maxmapdepth`. Stops `:nmap a b` with `:nmap b a`, and `:map x yx`, which runs commands as it loops. |
+| Keys one typed key sets off | 30,000 | `MAX_EXPANDED_KEYS`, same | Bounds the lookups behind one key: before it, one key took 82 s (measured). Leaves room for `.` of the longest change with a count. |
+| Keys waiting in the typeahead | 10,000 | `MAX_PENDING_KEYS`, same | Stops a mapping that feeds itself more keys than it takes, within 40 expansions. |
+| `timeoutlen` | at most 10,000 ms | `MAX_TIMEOUTLEN`, `engine/settings.rs` | Nobody pauses 10 s inside a mapping; a typo would leave keys stuck on the status line. |
+| lawhrc size | 1 MiB | `MAX_RC_BYTES`, `engine/rc.rs` | A real lawhrc is a few kilobytes; a wrong file (a log, a binary) is refused cheaply. |
+| lawhrc warnings listed | 100, then one that counts the rest | `MAX_RC_WARNINGS`, same | A wrong file can fail on every line; nobody reads past the first few. |
+| Work per typed key | 100,000,000 units (about 1 ns each in debug) | `MAX_KEY_WORK`, `engine/work.rs` | A key that runs out takes about 0.1 s in debug, 10 ms in release (measured); the costliest single command fits. See [What one key may cost](#what-one-key-may-cost). |
+| Writes per typed key | 4 | `MAX_WRITES_PER_KEY`, `engine/exec.rs` | One write costs the app 2.76 ms (measured, on an SSD); 4 take about 11 ms and leave room for a mapping that writes the board and a copy. |
+| Writes waiting for their report | 4 (= `MAX_WRITES_PER_KEY`) | `MAX_PENDING_WRITES`, same | The app reports right after the key, so only one key's writes wait together. |
+| Visual highlights per frame | 3 ms of estimated work | `HIGHLIGHT_BUDGET_NS`, `lawh-render/src/budget.rs` | A full board selected, every object crossing the screen, would take tens of milliseconds; past it the rectangle still shows the selection. |
+| Characters of a status string drawn | 256 | `STATUS_WINDOW_CHARS`, `lawh-render/src/status.rs` | About 1,800 logical pixels, wider than most windows; lays out in at most about 0.5 ms. |
+| Status strings kept laid out | 8 | `STATUS_CACHE_ENTRIES`, same | Left, right and the command line, with room for the ones shown a moment ago. |
+| Status bar height | 24 logical pixels | `STATUS_BAR_PX`, `lawh-render/src/overlay.rs` | One line of 13-pixel text with room above and below. |
+| Pointer travel that is still a click | 4 logical pixels | `CLICK_SLOP_PX`, `lawh/src/app.rs` | A hand never holds a mouse perfectly still; past it the press pans. |
+| Distance at which a click still hits | 4 logical pixels | `HIT_TOLERANCE_PX`, same | Thin lines stay easy to click. |
+| Room the view keeps around the cursor | 48 logical pixels | `FOLLOW_MARGIN_PX`, `lawh/src/view.rs` | A little more than a grid unit at zoom 1, so what is next to the cursor stays in view. |
+| Temporary file names tried per write | 100 | `TEMP_NAME_TRIES`, `lawh/src/files.rs` | A crash may leave a temporary file behind, or another lawh may write the same file. |
+| Symbolic links followed per write | 40 | `MAX_LINK_HOPS`, same | Linux follows at most 40 (`MAXSYMLINKS`); longer chains loop. |
+
+Two design constants shape the grammar without capping anything: `ROW_TOLERANCE` (0.5 units,
+`engine/motion.rs`, see [Reading order](#reading-order)) and `PLACE_GAP` (0.5 units,
+`engine/place.rs`, see [Put and the place rule](#put-and-the-place-rule)).
 
 ## Math
 
@@ -215,10 +265,9 @@ binary instead.
   once on a new one. A new worker must announce itself within 5 s; after 3 failed starts in a row
   a formula gets `Unavailable`, and each later formula tries once more.
 - If the app goes away mid-compile, the worker exits on its own 1 s past the timeout.
-- **Known limitation:** the worker's logs are dropped. `main` hands over to the worker before it
-  sets up logging, so the worker's panic hook and its `warn!` lines go nowhere, even though the
-  worker's stderr is the app's. Planned fix: set up logging in worker mode (on stderr; stdout
-  stays the protocol's).
+- **Logs:** in worker mode `main` sets up logging on stderr before it hands over to the worker, so
+  the worker's panic hook and its `warn!` lines reach the app's stderr; stdout stays the
+  protocol's (`math_worker_logs_go_to_stderr_only` in `lawh/tests/cli.rs`).
 
 The engine also has an in-process mode (`MathEngine::new`, `Renderer::new_trusted`) for trusted
 input only: tests, goldens and formulas lawh writes itself.
@@ -363,49 +412,361 @@ joins and caps.
 Typst's default black is drawn in lawh's ink colour. Glyphs with an em over 100,000 pixels and
 strokes wider than that are skipped.
 
-## Data flow for one key press (planned, milestone 2)
+### The overlay
+
+`Renderer::render_with` draws the board as `render` does, then the overlay over it: the cursor (a
+cross on a grid point, an outline around the current object), the Visual rectangle and an
+outline around each selected object, the caret (a bar in Insert mode and on the command line, a
+block in block-Normal mode) and the status bar along the bottom. Its sizes are in logical pixels
+times the scale factor, so it stays readable at any zoom.
+
+The overlay isn't charged to the frame budget: its cost is bounded by the image, not the board.
+Selection outlines have their own 3 ms budget (`HIGHLIGHT_BUDGET_NS`). Only 256 characters of each
+status string are laid out, and only when the string changes. Measured in release at 1920x1080:
+an everyday overlay adds 0.09 ms to a frame, the worst (a full board selected, a Visual rectangle
+over the whole view, the longest command line changing every frame) 1.88 ms.
+
+## Data flow for one key press
 
 ```text
-winit KeyEvent
-  └─► lawh: map to a logical key (typed character + modifiers)
-        └─► lawh-core Engine::feed(key)
-              ├─ pending: wait for more keys (count, operator, motion)
-              └─ complete: apply Ops to the Board, push one undo step
-                    └─► lawh-render: redraw
-                          └─► lawh-math: compile changed math blocks (cached by source)
+winit KeyEvent (presses and repeats; releases and synthetic presses are dropped)
+  └─► lawh keys::translate: the typed character with Ctrl or Cmd, or a named key ─► Vec<Key>
+        │  (on macOS, Cmd+Q is taken here as a close request)
+        └─► lawh: drop the armed mapping timer, then for each key:
+              └─► lawh-core Engine::feed(key, &mut dyn Measure) -> Vec<Effect>
+              │     ├─ key maps: the key joins the typeahead, which expands or waits
+              │     ├─ the mode's dispatcher runs whole commands from its key table
+              │     └─ a command that changes the Board makes one undo step
+              └─► lawh: do the effects, in order
+                    ├─ Write { path, quit_after }: one files::WriteBatch, then Engine::write_done
+                    ├─ Quit: leave the event loop
+                    └─ ArmTimer { ms }: call Engine::timeout after ms, unless a key comes first
+  └─► lawh: window title, the view follows the cursor (FOLLOW_MARGIN_PX), redraw
+        └─► lawh-render Renderer::render_with(board, viewport, overlay)
+              └─► lawh-math: compile changed math blocks (cached by source)
 ```
 
-The engine is a pure state machine: `(state, board, key) → (state, board changes, effects)`.
-Effects are things only the app can do (write a file, quit, export, open the system clipboard).
-That keeps the engine testable without a window.
+The engine is a state machine with no I/O: `(state, board, key) → (state, board changes,
+effects)`. Effects are what only the app can do (write a file, quit, run a timer). The engine
+never blocks, prints or logs, so tests type the same keys and read the board without a window.
 
-## The canvas cursor (open)
+**Logical keys.** The app takes winit's logical key: the character the keyboard layout makes,
+with Shift, AltGr and Option already applied, so `:` is `:` on every layout. Alt with a
+character is that character (Linux never reports AltGr as Alt, Windows reports it as Ctrl+Alt,
+and macOS Option types characters). Only Ctrl and Cmd make chords (`<C-r>`, `<D-s>`). A dead
+key composes in Insert mode and on the command line, and is a key of its own elsewhere
+(`crates/lawh/src/keys.rs`).
 
-Vim motions are defined on a stream of text. A canvas is 2D, so the core design question is what
-the cursor is. The current plan has two layers:
+**Measuring.** The app passes its `Renderer` as the engine's `Measure`, so object motions,
+Visual mode and the place rule see text and math at the size they are drawn. Tests use
+`FixedMeasure`: 0.3 units a character, 0.6 a line.
 
-1. **Grid cursor**: a point on the grid, moved with `hjkl` and counts. New objects appear here.
-2. **Object motions**: jump to the nearest object in a direction (like tldraw's
-   `getNearestAdjacentShape`), or to any object by a short jump label (like flash.nvim).
+**The mapping timer.** When typed keys only start a longer mapping, `feed` returns
+`ArmTimer { ms: timeoutlen }`. The app drops its timer on every key press that makes engine
+keys, before `feed`, and arms the new one. When it fires, the app calls `Engine::timeout`,
+which runs the waiting keys and never returns `ArmTimer`. A click drops the waiting keys and the
+timer.
 
-Still open: what `w`, `b`, `e`, text objects (`ic` for "inside circle"?) and operators like
-`d{motion}` mean on objects, and how "place below" picks a gap.
+**Writing.** A key asks for at most `MAX_WRITES_PER_KEY` (4) writes, and the board doesn't
+change while the app does them. So the app runs a key's effects through one
+`files::WriteBatch`: the board is turned into text once (`to_lawh`), each file is written once,
+and every `Write` effect still gets its own `write_done` report, in order. The engine matches
+each report to the oldest write it asked for with that path.
 
-## Text editing inside blocks (planned)
+- `write_done` marks the board saved when the write went to the board's own file (the same path
+  once `.` and `..` are worked out, without asking the file system) and the board hasn't changed
+  since. It returns `Quit` for `:wq` and `:x` only then.
+- A write to another file is a copy: the board keeps its name and stays modified, so `:wq other`
+  writes the copy and doesn't quit, unless forced with `:wq!`. `:w name` on an unnamed board
+  names it.
+- A relative path is taken from the directory lawh started in.
 
-Insert mode inside a text or math block reuses Vim text editing on that block's string.
-parley's `PlainEditor` handles layout, cursor and selection geometry, and the engine drives it.
-One glyph per character (above) keeps the cursor on what is typed. Right-to-left text is out of
-scope for v1, and the bundled Inter has no Arabic glyphs.
+**Atomic writes** (`files::write_atomic`). An atomic write leaves the file either the old board
+or the new one, never half written:
+
+- The board goes to a new file in the same directory (`.area.lawh.<pid>-<n>.tmp`, up to
+  `TEMP_NAME_TRIES` names, in case a crash left one behind), is flushed to disk, then renamed
+  over the target. On Unix the directory is flushed too, so the rename survives a power cut.
+- On Unix the temporary file is created with the old file's permissions, so the board is never
+  more readable than it was.
+- A symbolic link is written through: up to `MAX_LINK_HOPS` (40, as Linux) links at the end of
+  the path are followed, the file they point at is replaced, and the link stays.
+- On an error the temporary file is removed and the target is untouched. The status line says
+  `cannot write "<path>": <error>`.
+
+**Closing.** The window's close button, the desktop's close shortcut and Cmd+Q on macOS close at
+once when the board has no unwritten changes. Otherwise the first request shows
+`unsaved changes: :w to save, :q! to discard, or close again`, and a second one with no key
+between closes.
+
+## The engine
+
+`lawh-core/src/engine/` holds one `Engine` per board. Its module docs are the detailed
+reference; this is the map.
+
+### Modes
+
+| Mode | What | Keys from |
+|---|---|---|
+| `Normal` | The board: motions, operators, puts, undo | `normal.rs` (`MOTIONS`, `OPERATORS`, `NORMAL`) |
+| `Visual` | Selecting objects with a rectangle | `visual.rs` (`VISUAL`, plus `MOTIONS`) |
+| `CommandLine` | Typing a `:` command | `cmdline.rs` (editing), `command.rs` (`COMMANDS`) |
+| `Insert` | Typing into a text block | `insert.rs` |
+| `BlockNormal` | Vim's Normal mode inside a text block (status line `-- TEXT --`) | `block.rs` (`BLOCK`) |
+
+In Normal and Visual mode, keys gather in a pending buffer (a count, an operator and its count,
+then the command's keys) until they make a whole command or none can. Counts stop at
+`MAX_COUNT` (10,000). An operator's count and its motion's multiply, as in Vim (`2d3w` is
+`d6w`). The status line shows the pending keys (`Engine::pending`).
+
+### The key queue and remaps
+
+Keys from `feed` go into a **typeahead** before the grammar sees them: the queue of keys not yet
+run, as in Vim. A **remap** (a key mapping) replaces keys typed in one mode with others, such as
+`:nnoremap U <C-r>`. Each of Vim's map modes has its own mappings: `n` (Normal, on the board and
+in block-Normal mode), `x` (Visual; `v` means the same in lawh), `o` (operator-pending: `d` or
+`y` waiting for a motion), `i` (Insert) and `c` (command line). A key is looked up in the mode
+the engine is in when its turn comes, so `inoremap jk <Esc>` works right after `i`.
+
+- When the typeahead's first keys are a mapping's keys, they are replaced by what they map to.
+  Keys from `:noremap` and its family aren't mapped again. Keys from `:map` are, except the
+  first when the right side starts with the left (Vim's rule: `:nmap l lw` moves right, then
+  onto the next object).
+- Keys that only start a longer mapping wait for the next key, or for the **mapping timeout**:
+  `timeoutlen` milliseconds (1,000 by default, at most `MAX_TIMEOUTLEN`, 10 s). On a timeout
+  they take the longest mapping they make, or run as typed. A mapping made with `<nowait>` runs
+  at once, without waiting for longer ones.
+- `<Leader>` in a mapping is replaced by the `leader` setting at the time the mapping is made
+  (`\` by default).
+- Each mode's mappings are sorted by their keys, and a lookup narrows them one typed key at a
+  time with binary searches: its cost grows with the keys looked at, not with the number of
+  mappings. Before that, one crafted key took 82 s in release (measured; see
+  [research/m2-measurements.md](research/m2-measurements.md)).
+- As in Vim, a `0` that goes on a count and the key after `@` aren't mapped, and `.` replays
+  keys after mapping, without mapping them again.
+
+### lawhrc
+
+A lawhrc is a file of `:` commands, one a line, the `:` optional, read once at start by
+`Engine::source`, as Vim reads its vimrc. Only `:set` and the mapping commands are allowed. Blank
+lines and lines starting with `"` are comments. A line that fails is skipped with an
+`RcWarning { line, message }` and the rest load; keys mapped again in a mode warn, and the later
+line wins. `source` never emits effects or sets the engine's message: the app shows the first
+warning on the status line and logs all of them. Where the file lives and what it may hold:
+[keys.md](keys.md#lawhrc).
+
+### Undo
+
+Undo is built from the edits each command makes, not from snapshots of the board:
+
+- A `Step` holds the command's edits in order (`Insert` or `Remove` of a whole object at a
+  z-order position, `Replace` of an object's shape) and the cursor before and after. A step made
+  inside a text block also keeps the text cursor's byte, so undo puts it back.
+- Undo applies a step's edits backwards as one batch (`Board::apply`: all or nothing, the
+  board's id index rebuilt once), redo forwards. Undo restores the cursor from before the
+  change, redo the one after.
+- One step per Normal command, per Insert session (from entering Insert mode to leaving it) and
+  per `:` command. A new block still empty when Insert ends leaves no step.
+- The history is a straight line, not Vim's undo tree. It keeps `MAX_UNDO_STEPS` (1,000, Vim's
+  `undolevels`) and about `MAX_UNDO_BYTES` (16 MiB, estimated from the objects held); past
+  either the oldest steps go, never the newest.
+- The board is modified when the undo position differs from the saved one, so undoing back to
+  the last write makes it unmodified again.
+
+### `.` and `@:`
+
+`.` repeats the last change by replaying the keys that made it: board `d`, `x`, `p`, `P`, `o`,
+`O` and `i a I A` with what was typed, block-Normal `x` and inserts in a block. A count typed
+before `.` replaces the change's own. Board changes repeat only on the board, block `x` only in
+a block, and inserts from `i a I A` in either. A change keeps at most `MAX_REPEAT_KEYS` (10,000)
+keys; a longer insert session can't be repeated. Visual changes aren't repeatable. `@:` runs the
+last `:` line again; `:` commands don't go through `.`.
+
+### What one key may cost
+
+Mappings, `.` and counts let one typed key run a great many commands. Four caps bound it, each
+counted from the typed key (or timeout, or click) and reset at the next:
+
+- **`MAX_MAP_DEPTH`** (1,000 mapping expansions, Vim's `maxmapdepth`): past it the typeahead is
+  dropped and the message says "recursive mapping". It counts until the next typed key, not until
+  a command runs, because `:map x yx` runs a command and maps `x` again forever.
+- **`MAX_EXPANDED_KEYS`** (30,000 keys set off by mappings, `.` and counts on inserts) and
+  `MAX_PENDING_KEYS` (10,000 keys in the typeahead).
+- **`MAX_KEY_WORK`** (100,000,000 weighted units, in `work.rs`): commands count their work as
+  they go, each kind of work at its own weight (the `*_WORK` constants): objects measured, put
+  in reading order, looked at by `H J K L` and the place rule, taken, put and edited by undo,
+  fresh ids looked for, bytes of `:` lines run, and bytes of a block's text copied, scanned,
+  split into graphemes or walked. A unit is about a nanosecond of work in a debug build: each
+  weight was measured with `work_unit_costs` in `tests/engine_cost.rs`. A key that runs out
+  takes about 0.1 s in debug and 10 ms in release (50 ms if it was typing), and the costliest
+  single commands fit whole (`10000J` down a column of 500 objects is 62.5 million units).
+- **`MAX_WRITES_PER_KEY`** (4): writes are counted apart, since the app does them and one costs
+  it 2.76 ms (measured, mostly the flush to disk).
+
+When a key runs out of work or asks for a fifth write, the command under way stops where the
+board is consistent: a motion stops on the last object it reached, an operator or a put does
+nothing, an undo with a count stops between steps, and an Insert session that `.` was typing ends
+as `<Esc>` would (one undo step). Nothing more runs for that key: the typeahead is dropped and the
+message says `that key did too much work; the rest of it was dropped` or `that key asked for more
+than 4 writes; the rest of it was dropped`. A `:wq` or `:x` refused this way doesn't quit.
+
+Counts never multiply a command that makes no progress: motions stop where they can't go on,
+undo stops at the ends of the history, and a put that doesn't fit is refused whole before the
+register is copied.
+
+### Messages
+
+Messages are plain English on the status line, never `E123:` numbers. A message lasts until the
+next typed key or click; a timeout runs the waiting keys and keeps what they left. Within one
+key, information never replaces an error, while a later error replaces any message, so the
+status line says why a key was cut short.
+
+## The canvas cursor
+
+The cursor is either a grid point or an object, never both: `Cursor::Grid(Point)` or
+`Cursor::Object(id)`. The object is the **current object**.
+
+- **Anchor:** the point where the cursor stands on an object, where motions start from it and
+  where new objects go next to it. Text, math and rectangles: the top-left corner. Ellipses: the
+  centre. Lines and arrows: the first end (`x1,y1`).
+- **Grid motions** `h j k l` move a grid point 1 unit a step, with counts. From an object they
+  start at its anchor, and the cursor becomes a grid point. Every coordinate the engine makes is
+  rounded to 0.001 unit (`round3`), so files never show float noise (`0.30000000000000004`), and
+  kept within `MAX_COORDINATE`.
+- **Object motions** land on an object: `w` and `b` the next and previous in reading order, `gg`
+  and `G` the first and last (with a count, the count-th), `H J K L` the nearest object to the
+  left, below, above and to the right. From a grid point, the point takes part as an object of
+  no size. A motion that finds nothing leaves the cursor where it is.
+- **New objects** (the shape commands, `:text`, `:math`, `i a I A` on a grid point) appear at the
+  cursor point and become the current object.
+- **`e` and text objects** mean nothing on the board yet. Inside a text block `w`, `b` and `e`
+  are Vim's word motions.
+
+### Reading order
+
+`w`, `b`, `gg`, `G` and the operators walk objects in reading order: rows from top to bottom,
+left to right within a row. Objects are taken by the y of the centre of their bounds. One more
+than `ROW_TOLERANCE` (0.5 units) below the first object of the current row starts the next row.
+Things drawn side by side are rarely aligned exactly: half a unit keeps a label beside a circle
+in its row, while two lines of text 0.6 units apart still read as two rows. Within a row objects
+go by their left edge; ties go to the one earlier in the file.
+
+### The nearest object in a direction
+
+`H J K L` consider only objects whose centre lies strictly further in the direction than the
+cursor's. First come those whose bounds overlap the cursor's across the direction (sharing more
+than an edge), nearest by the gap between facing edges, then by the distance between centres. If
+there are none, an object must lie in a cone, its centre at most twice as far across the direction
+as along it, scored by the distance along plus twice the distance across. Each step lands
+strictly further on, so a count never comes back.
+
+### Operators on objects
+
+`d` (delete) and `y` (yank, copy) need an object cursor; on a grid point the message is "no
+object under the cursor".
+
+| Keys | Acts on |
+|---|---|
+| `dd`, `yy`, `x` | This object and the next count - 1 in reading order |
+| `dw`, `d3w` | Exclusive, as in Vim: `dw` is this object, `d3w` this one and the next two |
+| `db`, `d3b` | The previous object(s), not this one |
+| `dH`, `dJ`, `dK`, `dL` | Inclusive: this object and each object the motion lands on |
+| `dgg`, `dG` | This object, the target, and everything between them in reading order |
+
+Grid motions after an operator cancel it. Deleted and yanked objects go to the unnamed register,
+in reading order. After a delete the cursor is the grid point at the anchor of the first object
+deleted, so `dd` then `p` puts it back where it was. After a yank it is the first object yanked.
+
+### Put and the place rule
+
+`p` and `P` put the register's objects (a **group**). With an object cursor the group goes below
+(`p`) or above (`P`) the current object by the place rule. With a grid cursor it is moved so its
+first object's anchor is at the cursor. `{count}p` puts count copies, each below the one before.
+A put object keeps its id when that id is free, else gets a fresh one for its kind (`t` text,
+`m` math, `c` circle, `e` other ellipse, `r` rectangle, `l` line, `a` arrow). A put is all or
+nothing: copies past `MAX_OBJECTS` refuse the whole put. The cursor ends on the first object put.
+Text deleted inside a block with `x` puts on the board as a new text block.
+
+The **place rule** (`p`, `P`, `o`, `O`) finds where a group of size S goes next to a reference R,
+the current object's bounds (or a box of no size at a grid point):
+
+1. Below: `x = R.x0`, `y = R.y1 + PLACE_GAP` (0.5 units). Above: `y = R.y0 - PLACE_GAP - S.height`.
+2. While the candidate box overlaps other objects, move it past them: below, to `PLACE_GAP`
+   under the lowest bottom among them; above, the mirror image. Then try again.
+3. Each try rounds y outward, away from R, to a multiple of 0.1, so files show `y=4.3` and the box
+   never moves back into what it just cleared; x is rounded with `round3`. The box tested is the
+   box placed.
+
+Boxes that only touch don't overlap, unless one is flat (a level or upright line), so a group
+never ends up lying on a line. Half a unit reads as "next to" at any zoom where the objects are
+legible, and keeps their bounds apart so `w`, `J` and `K` still tell them apart. The rule ends
+within one try per object; past `MAX_COORDINATE` it fails with "no room".
+
+### Visual mode
+
+`v` starts Visual mode. Its anchor is the cursor's region when `v` was pressed (a point, or an
+object's bounds), and the rectangle is the bounding box of the anchor and the cursor's current
+region. Selected are the objects whose bounds lie fully inside it, edges included. Motions and
+counts move the cursor; `d`, `x` and `y` act on the selection and return to Normal mode; `v` or
+`<Esc>` leave; `:` leaves Visual mode and opens the command line.
+
+### Clicks
+
+A click puts the cursor on the object under the pointer, or on the nearest whole grid point. An
+object is hit where it is drawn, within `HIT_TOLERANCE_PX` (4 logical pixels): a line near its
+segment, an ellipse inside its shape, a text in its box. A text or formula wins over a shape, then
+the smallest area, then the topmost. A click ends an Insert session (one undo step), block-Normal
+mode, Visual mode and the command line, and drops pending keys. A press that moves more than
+`CLICK_SLOP_PX` (4 logical pixels) pans instead.
+
+Still open: jump labels to reach any object by a short label (like flash.nvim), text objects on
+the board (`ic` for "inside circle"?), and drawing shapes from a Visual rectangle.
+
+## Text editing inside blocks
+
+Text and math objects are text blocks. The engine edits their text itself (`engine/text.rs`,
+`insert.rs`, `block.rs`, `text_motion.rs`). The renderer only places the caret
+(`Renderer::caret_rect`, from parley's cursor geometry); parley's `PlainEditor` isn't used.
+
+- **Entering:** on a grid point, `i a I A` start a new text block there in Insert mode, and `o`
+  and `O` start one below or above the cursor by the place rule. On a text or math object, `i`
+  and `I` insert at the start, `a` and `A` at the end, and `<CR>` enters block-Normal mode at the
+  start; `o` and `O` start a new block below or above it. Other kinds have no text: "only text and
+  math have text to edit".
+- **Live board:** a new block is on the board, empty, from the moment Insert mode starts, and every
+  edit replaces the block on the board, which checks the caps on text. So the board always shows
+  the live text. A new block still empty when Insert ends is taken off again with no undo step.
+- **Graphemes:** a step is one grapheme (an extended grapheme cluster, what a reader sees as one
+  character), from `unicode-segmentation`. `é` typed as `e` and a combining accent, or a family
+  emoji joined with zero-width joiners, moves and deletes as one. Offsets stay on grapheme
+  boundaries, and `j` and `k` keep the column counted in graphemes. Motions look only around the
+  cursor; those that step back more than once split the line into graphemes once.
+- **Insert mode:** typed characters (Alt with a character types it), `<CR>` a line break, `<Tab>`
+  a tab, `<BS>` and `<Del>`, the arrows (left and right stay in the line), `<Home>` and `<End>`.
+  Ctrl and Cmd chords type nothing.
+- **Block-Normal mode:** `h l j k 0 $ w b e` with counts, `x` (into the unnamed register),
+  `i a I A`, `u`, `<C-r>`, `.` and `:`. `<Esc>` goes back to the board with the block as the
+  current object. The command line comes back to the block unless its command moved the cursor off
+  it.
+- **Where `<Esc>` goes** from Insert mode is the `escape` setting: `board` (the default) goes
+  back to where Insert mode was entered from, the board with the block as the current object or
+  block-Normal mode; `block` always goes to block-Normal mode, and `<Esc>` there goes on to the
+  board.
+- A math block being edited is drawn as its source. Once the caret leaves, it compiles again,
+  drawn as a grey placeholder until it is ready.
+- One glyph per character (above) keeps the cursor on what is typed. Right-to-left text is out of
+  scope for v1, and the bundled Inter has no Arabic glyphs.
 
 ## Portability rules
 
 Linux first, with releases for macOS and Windows from the same code:
 
-- Vim keys match the typed character. App shortcuts go through one modifier setting (Ctrl, or Cmd
-  on macOS). (Planned with the Vim engine.)
-- Platform config and cache directories via `etcetera`. No hard-coded `/` in paths. (Planned
-  with config.)
+- Vim keys match the typed character (see [logical keys](#data-flow-for-one-key-press)). App
+  shortcuts will go through one modifier setting (Ctrl, or Cmd on macOS); the only one today is
+  Cmd+Q on macOS, a close request. (Planned.)
+- The config directory comes from `etcetera` (`choose_app_strategy`): the lawhrc is
+  `~/.config/lawh/lawhrc` on Linux and macOS (XDG, `XDG_CONFIG_HOME` honoured) and
+  `%APPDATA%\y0sif\lawh\config\lawhrc` on Windows. No hard-coded `/` in paths.
 - The window scale factor is handled from the start (Wayland fractional scaling needs it on Linux).
 - `.lawh` files may use CRLF line endings; errors point at the same place as with LF.
 - The math worker's memory cap holds on Linux only so far (see [../SECURITY.md](../SECURITY.md)).

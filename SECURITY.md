@@ -13,23 +13,29 @@ someone else made.
 
 **In scope:**
 
-- A `.lawh` file that makes lawh read or write files, reach the network, or run code outside the
-  Typst sandbox when you open it.
+- A `.lawh` file that makes lawh read or write files, reach the network, run code outside the
+  Typst sandbox, or run keys or `:` commands when you open it.
 - Math blocks: Typst code inside a board must not escape the sandbox (no file system, no package
   downloads, bundled fonts only).
 - Parser bugs that crash lawh or corrupt a board on save.
 - A file that hangs or exhausts memory when opened (denial of service), past the limits below.
+- A key, mapping or lawhrc that freezes lawh past the per-key caps below.
+- A `:w` that leaves a board half written, or writes somewhere other than the path asked for.
 
 **Out of scope:**
 
 - Issues in dependencies that lawh doesn't expose. Report those upstream.
 - The OS warning on first launch: lawh releases are deliberately unsigned.
 - The memory cap on macOS and Windows, which is known not to be in place yet (see below).
+- What your own lawhrc mappings do when you type them: a mapping may run `:w` like any typed
+  command.
 
 ## Threat model
 
 Opening a board must be safe whoever wrote it. A board can attack lawh in two ways: through the
-file itself, and through the Typst code in its math blocks.
+file itself, and through the Typst code in its math blocks. Keys and the lawhrc come from the user,
+so they are trusted, but what one key may cost is still capped, so a mistake can't freeze the
+window.
 
 ### An untrusted `.lawh` file
 
@@ -94,3 +100,37 @@ t seconds. lawh stays responsive meanwhile:
 with the same permissions as lawh; what keeps Typst from your files and the network is the Typst
 world lawh gives it, which offers no file, network or clock access. Treat a way around that world
 as a vulnerability and report it.
+
+### Keys, commands and the lawhrc
+
+- **A board can't run commands.** A `.lawh` file is only ever read as a board: it has no
+  modelines (Vim's settings embedded in a file), and nothing in it reaches the engine as keys or
+  `:` commands. The app feeds the engine only keys typed in its window, and the lawhrc.
+- **The lawhrc is trusted, and capped.** It is your own file in your config directory, read once at
+  start, like a vimrc. It may only `:set` options and make mappings: shape, write and quit
+  commands are refused there, so it can't change a board or a file by itself. Caps: 1 MiB
+  (`MAX_RC_BYTES`; a larger file is refused from its size, unread), 1,000 mappings a mode
+  (`MAX_MAPS`), 256 keys on each side of a mapping (`MAX_MAP_KEYS`). The slowest lawhrc the caps
+  allow, 1 MiB of mappings made and dropped at the front of 999 others, loads in 676 ms in release
+  and 1.7 s in debug (measured).
+- **One key can't cause unbounded work.** Mappings, `.` and counts let one key run many commands,
+  so each typed key, mapping timeout or click has a budget, reset at the next:
+  - at most 1,000 mapping expansions (`MAX_MAP_DEPTH`) and 30,000 keys set off
+    (`MAX_EXPANDED_KEYS`);
+  - at most 100 million units of work (`MAX_KEY_WORK`), each kind of work weighted by what it
+    costs: spending it all takes about 0.1 s in debug and 10 ms in release (measured);
+  - at most 4 writes (`MAX_WRITES_PER_KEY`): about 11 ms, derived from 2.76 ms a write
+    (measured).
+
+  Past any of them the key stops with a message, its remaining keys are dropped, and the board is
+  left consistent, as after any command. Before these caps, crafted mappings froze the window for
+  1.8 s to 858 s in release (measured). In a fuzz of 4,000 random key scripts during review, the
+  slowest key took 35 ms in release (measured).
+- **Atomic writes.** `:w` writes a new file next to the board, flushes it to disk and renames it
+  over the board; on Unix it flushes the directory too. A crash or power cut leaves the old board
+  or the new one, never half of each. On Unix the new file has the old file's permissions from
+  the moment it is created, so a write never makes a board more readable.
+- **Links.** A symbolic link is written through: the file it points at is replaced and the link
+  stays. At most 40 links in a row are followed (`MAX_LINK_HOPS`); past that the write fails.
+- **Where writes go.** Only to the path typed after `:w` (or the board's own), a relative one taken
+  from the directory lawh started in. `:w !cmd` and `:w >>file` are refused: no shell runs.

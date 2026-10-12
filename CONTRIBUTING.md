@@ -25,18 +25,19 @@ All three must pass. CI runs the same commands.
 
 ## Where code goes
 
-- `lawh-core`: the board model and the `.lawh` reader and writer, then the Vim engine and `:`
-  commands. It must not depend on rendering, windowing or Typst. Engine changes should come with a
-  test that feeds keys and checks the resulting board.
+- `lawh-core`: the board model, the `.lawh` reader and writer, and the Vim engine (`:` commands,
+  undo, key maps, lawhrc parsing). It must not depend on rendering, windowing or Typst. Engine
+  changes should come with a test that feeds keys and checks the resulting board
+  (`tests/common/mod.rs`).
 - `lawh-math`: Typst math, compiled in a worker process. Keep the Typst world sandboxed: no file
   system, no network, no clock, bundled fonts only (see [SECURITY.md](SECURITY.md)).
-- `lawh-render`: drawing, the frame budget and export.
-- `lawh`: the app shell.
+- `lawh-render`: drawing, the frame budget, the editing overlay and export.
+- `lawh`: the app shell: window, keys, writing files, reading the lawhrc.
 
 Limits on what a board, a formula or a frame may cost are named constants, documented where they
-are defined (most with their reason, and measurements where a cost was measured). If you change one, or a cost in the frame
-budget, rerun the calibrations and benches in
-[docs/testing.md](docs/testing.md#calibrations-and-benches).
+are defined (most with their reason, and measurements where a cost was measured). If you change
+one, a cost in the frame budget or a work weight in `lawh-core/src/engine/work.rs`, rerun the
+calibrations and benches in [docs/testing.md](docs/testing.md#calibrations-and-benches).
 
 See [docs/architecture.md](docs/architecture.md) for the design and
 [docs/tech-stack.md](docs/tech-stack.md) before adding a dependency.

@@ -1,0 +1,320 @@
+# lawh whiteboard keys
+
+Every key and `:` command the lawh whiteboard takes today, from the code on `feat/m2-engine`.
+How they work inside is in [architecture.md](architecture.md#the-engine).
+
+Notation: `{count}` is a number typed first (`3w`). Keys are in Vim notation: `<CR>` is Enter,
+`<Esc>` Escape, `<BS>` Backspace, `<C-r>` Ctrl+R. Keys match the character typed, whatever the
+keyboard layout.
+
+## Modes
+
+| Mode | What it is for | Status line | Enter with | Leave with |
+|---|---|---|---|---|
+| Normal | Moving on the board, making and changing objects | (empty) | `<Esc>` from the others | |
+| Visual | Selecting objects with a rectangle | `-- VISUAL --` | `v` | `v`, `<Esc>`, `d`, `x`, `y`, `:` |
+| Insert | Typing into a text or math block | `-- INSERT --` | `i a I A o O` | `<Esc>` |
+| Block-Normal | Vim's Normal mode inside a text or math block | `-- TEXT --` | `<CR>` on a text or math object | `<Esc>` |
+| Command line | Typing a `:` command | the line itself | `:` | `<CR>` runs, `<Esc>` cancels |
+
+## The cursor
+
+The cursor is either a **grid point** or an **object** (the current object), never both. The
+status line shows its point as `x,y`, then the object's id when it is on one (`3,-2 c1`).
+
+An object's **anchor** is where the cursor stands on it and where new objects go: the top-left
+corner of text, math and rectangles, the centre of a circle or ellipse, the first end of a line or
+arrow. New objects appear at the cursor point and become the current object.
+
+## Normal mode
+
+### Counts
+
+Type a number before a command to repeat it: `5j`, `3w`, `2dd`. Counts stop at 10,000. An
+operator's count and its motion's multiply: `2d3w` is `d6w`.
+
+### Moving
+
+| Keys | Moves to |
+|---|---|
+| `h` `j` `k` `l` | One grid unit left, down, up, right. From an object, start at its anchor; the cursor becomes a grid point |
+| `w` | The next object in reading order (rows top to bottom, left to right within a row) |
+| `b` | The previous object in reading order |
+| `H` `J` `K` `L` | The nearest object to the left, below, above, to the right |
+| `gg` | The first object in reading order; `{count}gg` the count-th |
+| `G` | The last object in reading order; `{count}G` the count-th |
+
+An object motion that finds nothing leaves the cursor where it is. From a grid point, `w` and `b`
+start from that point.
+
+### Changing objects
+
+`d` deletes and `y` yanks (copies) objects into the unnamed register. They need the cursor on an
+object; on a grid point the status line says "no object under the cursor".
+
+| Keys | Acts on |
+|---|---|
+| `dd`, `yy` | This object; `{count}dd` this one and the next count - 1 in reading order |
+| `x` | As `dd` |
+| `dw`, `yw` | This object; `d3w` this one and the next two |
+| `db`, `yb` | The previous object; `d3b` the three before this one, not this one |
+| `dH` `dJ` `dK` `dL` | This object and the nearest one in that direction; with a count, each one reached |
+| `dgg`, `dG` | This object, the first (or last) object, and everything between in reading order |
+| `p` | Put the register below the current object, clear of others; on a grid point, with its first object's anchor at the cursor. `{count}p` puts count copies, each below the last |
+| `P` | Put the register above the current object; `{count}P` stacks copies upward |
+
+A grid motion after `d` or `y` cancels it. After a delete the cursor is the grid point where the
+first deleted object was, so `dd` then `p` puts it back. After a put the cursor is on the first
+object put. Text deleted inside a block with `x` puts as a new text block.
+
+**Where `p`, `P`, `o` and `O` put things** (the place rule): half a unit below (or above) the
+current object, left edges lined up, moved further down (or up) past any object in the way, with
+y rounded to a tenth of a unit.
+
+### Other Normal keys
+
+| Keys | Does |
+|---|---|
+| `i` `a` `I` `A` | On a grid point: a new text block there, in Insert mode. On a text or math object: Insert mode at the start (`i`, `I`) or the end (`a`, `A`) of its text |
+| `o` `O` | A new text block below or above the current object (or grid point), in Insert mode. `{count}o` makes count blocks |
+| `<CR>` | On a text or math object: block-Normal mode at the start of its text |
+| `v` | Visual mode |
+| `:` | The command line |
+| `u` | Undo; `{count}u` undoes count changes |
+| `<C-r>` | Redo; `{count}<C-r>` |
+| `.` | Repeat the last change; `{count}.` with a new count |
+| `@:` | Run the last `:` command again |
+
+`.` repeats `d`, `x`, `p`, `P`, `o`, `O` and `i a I A` with what was typed. Visual changes and `:`
+commands aren't repeated by `.`; use `@:` for commands. A count on an insert types it again:
+`3ia<Esc>` types `aaa`.
+
+Undo takes back one Normal command, one Insert session (from entering Insert mode to leaving it)
+or one `:` command at a time, and puts the cursor back where it was. The history keeps 1,000
+changes.
+
+## Visual mode
+
+`v` starts a rectangle at the cursor (a point, or the current object's bounds). Moving the cursor
+stretches it to the cursor's point or object. Objects fully inside the rectangle are selected.
+
+| Keys | Does |
+|---|---|
+| `h j k l`, `w b`, `H J K L`, `gg G`, with counts | Move the cursor |
+| `d`, `x` | Delete the selection, back to Normal mode |
+| `y` | Yank the selection, back to Normal mode |
+| `v`, `<Esc>` | Back to Normal mode |
+| `:` | Leave Visual mode and open the command line |
+
+## Text and math blocks
+
+Text and math objects are blocks of text you can edit. The cursor moves and deletes by
+grapheme (what you see as one character), so an accented letter or an emoji is one step.
+
+### Insert mode
+
+| Keys | Does |
+|---|---|
+| A character | Types it (also with Alt held, for layouts that type characters with AltGr or Option) |
+| `<CR>` | A line break |
+| `<Tab>` | A tab |
+| `<BS>`, `<Del>` | Delete the character before or after the cursor |
+| `<Left>` `<Right>` | One character, within the line |
+| `<Up>` `<Down>` | One line, keeping the column |
+| `<Home>` `<End>` | The start or end of the line |
+| `<Esc>` | Leave Insert mode (where to: the `escape` setting) |
+
+Ctrl and Cmd chords type nothing. A new block still empty when you leave Insert mode is removed.
+
+### Block-Normal mode
+
+| Keys | Does |
+|---|---|
+| `h` `l` | One character left or right, within the line |
+| `j` `k` | One line down or up, keeping the column |
+| `0` `$` | The start or end of the line |
+| `w` `b` `e` | Vim's word motions, across lines |
+| `x` | Delete the character under the cursor (into the register); `{count}x` |
+| `i` `a` | Insert mode before or after the character under the cursor |
+| `I` `A` | Insert mode at the first non-blank character, or the end, of the line |
+| `u` `<C-r>` `.` | Undo, redo, repeat (`.` repeats `x` and inserts) |
+| `:` | The command line; it comes back to the block unless the command moved the cursor off it |
+| `<Esc>` | Back to the board, the block as the current object |
+
+Motions, `x`, the inserts, `u`, `<C-r>` and `.` take counts. Other keys do nothing.
+
+### Where `<Esc>` goes
+
+| `escape` | `<Esc>` in Insert mode goes to |
+|---|---|
+| `board` (default) | Where Insert mode was entered from: the board (the block as the current object) or block-Normal mode |
+| `block` | Block-Normal mode; `<Esc>` there goes on to the board |
+
+A math block is drawn as its source while you edit it, and as math again once you leave.
+
+## The command line
+
+| Keys | Does |
+|---|---|
+| Characters | Type at the cursor (at most 5,064 characters) |
+| `<BS>` | Delete the character before the cursor; on an empty line, cancel |
+| `<Left>` `<Right>` `<Home>` `<End>` | Move the cursor |
+| `<CR>` | Run the command |
+| `<Esc>` | Cancel |
+
+## `:` commands
+
+A command may be cut short down to the letters in brackets: `:ci`, `:cir` ... `:circle`. Only
+`:w`, `:q`, `:x` and `:u` take one letter. Errors are plain English on the status line.
+
+### Shapes, text and math
+
+Shapes go at the cursor point: the grid point, or the current object's anchor. Positional numbers
+are relative to it. `key=value` uses the file's names, is absolute, and wins over a positional.
+
+| Command | Makes |
+|---|---|
+| `:ci[rcle] R` | A circle of radius R centred on the cursor. Keys: `x=` `y=` `r=` |
+| `:el[lipse] RX RY` | An ellipse centred on the cursor. Keys: `x=` `y=` `rx=` `ry=` |
+| `:re[ct] W H` | A rectangle with its top-left corner at the cursor. Keys: `x=` `y=` `w=` `h=` |
+| `:li[ne] DX DY` | A line from the cursor to the cursor + (DX, DY). Keys: `x1=` `y1=` `x2=` `y2=` |
+| `:ar[row] DX DY` | An arrow, the same way, its head at the end |
+| `:te[xt] <text>` | A text block of everything after the first space, as typed |
+| `:ma[th] <formula>` | A math block in [Typst](https://typst.app) math syntax: `:ma A = pi r^2` |
+
+Examples: `:ci 3`, `:circle r=3 x=0 y=0`, `:rect 4 2`, `:li 3 0`, `:ar 0 -2`.
+
+Numbers: an optional sign, digits and an optional fraction (`-2.5`, `3`, `.5`, `2.`); no
+exponent, `inf` or `nan`. Radii, widths and heights must be above 0 and at most 1,000,000;
+coordinates within -1,000,000 and 1,000,000. A board holds at most 500 objects.
+
+### Files and quitting
+
+| Command | Does |
+|---|---|
+| `:w[rite]` | Write the board to its file |
+| `:w <file>` | Write to `<file>`. An unnamed board takes the name; a named board writes a copy and keeps its name |
+| `:w! [file]` | As `:w` |
+| `:q[uit]` | Quit, unless the board has unwritten changes |
+| `:q!` | Quit, dropping unwritten changes |
+| `:wq [file]` | Write, then quit. A copy to another file doesn't quit while the board's own file lacks changes |
+| `:wq! [file]` | Write, then quit anyway |
+| `:x[it] [file]` | Write only if there are changes, then quit; `:x!` as `:wq!` |
+
+Writes are atomic: the file is always either the old board or the new one. A relative path is
+taken from the directory lawh was started in. `:w !cmd` and `:w >>file` are refused.
+
+### Undo and settings
+
+| Command | Does |
+|---|---|
+| `:u[ndo]` | Undo one change |
+| `:red[o]` | Redo one change |
+| `:se[t]` | Show every option |
+| `:set {option}={value}` | Set an option (`:` works as `=`) |
+| `:set {option}?`, `:set {option}` | Show an option |
+| `:set {option}&` | Put an option back to its default |
+
+Several options may follow one `:set`. A word starting with `"` ends the line.
+
+| Option | Values | Default | Does |
+|---|---|---|---|
+| `escape` | `board`, `block` | `board` | Where `<Esc>` goes from Insert mode (see above) |
+| `leader` | One key in Vim notation, such as `<Space>` or `,` | `\` | What `<Leader>` stands for in mappings made after it |
+| `timeoutlen` (`tm`) | 0 to 10,000 | 1000 | Milliseconds keys that start a longer mapping wait for the rest |
+
+## Key mappings
+
+A mapping makes keys typed in one mode run other keys, as in Vim: `:nnoremap U <C-r>` makes `U`
+redo on the board. `noremap` mappings run their keys as built in; `map` mappings run them through
+other mappings too.
+
+| Commands | Short forms | Modes |
+|---|---|---|
+| `:map` `:noremap` `:unmap` `:mapclear` | `:map` `:no` `:unm` `:mapc` | Normal, Visual, operator-pending |
+| `:map!` `:noremap!` `:unmap!` `:mapclear!` | `:map!` `:no!` `:unm!` `:mapc!` | Insert, command line |
+| `:nmap` `:nnoremap` `:nunmap` `:nmapclear` | `:nm` `:nn` `:nun` `:nmapc` | Normal (the board and block-Normal mode) |
+| `:xmap` `:xnoremap` `:xunmap` `:xmapclear` | `:xm` `:xn` `:xu` `:xmapc` | Visual |
+| `:vmap` `:vnoremap` `:vunmap` `:vmapclear` | `:vm` `:vn` `:vu` `:vmapc` | Visual (the same as `x` in lawh) |
+| `:omap` `:onoremap` `:ounmap` `:omapclear` | `:om` `:ono` `:ou` `:omapc` | Operator-pending: after `d` or `y` |
+| `:imap` `:inoremap` `:iunmap` `:imapclear` | `:im` `:ino` `:iu` `:imapc` | Insert |
+| `:cmap` `:cnoremap` `:cunmap` `:cmapclear` | `:cm` `:cno` `:cu` `:cmapc` | Command line |
+
+| Form | Does |
+|---|---|
+| `:nnoremap {keys} {to}` | Map `{keys}` (up to the first space) to `{to}` (the rest of the line, spaces at its ends dropped) |
+| `:nmap {keys}` | Show the mappings of `{keys}` |
+| `:map` | Count the mappings |
+| `:nunmap {keys}` | Remove a mapping |
+| `:nmapclear` | Remove every mapping of the mode |
+
+- Both sides are in Vim key notation (below), at most 256 keys each. `|` is a key, not a new
+  command.
+- `<Leader>` is the `leader` setting at the time the mapping is made. `<Nop>` maps to nothing.
+- `<nowait>` before the keys runs the mapping at once, without waiting to see whether a longer
+  mapping is being typed. `<silent>` and `<special>` are accepted and change nothing.
+- Not supported: `<buffer>`, `<expr>`, `<script>`, `<unique>`, `<Cmd>`, `<Plug>`, `<SID>`,
+  `<SNR>`, `<ScriptCmd>`, `<LocalLeader>`.
+- Keys that start a longer mapping wait `timeoutlen` milliseconds for the rest, shown on the
+  status line, then run the longest mapping they make, or run as typed.
+- At most 1,000 mappings a mode. One typed key may expand at most 1,000 mappings ("recursive
+  mapping" past that) and set off at most 30,000 keys.
+
+### Key notation
+
+| Write | For |
+|---|---|
+| `a`, `A`, `:` | The character itself |
+| `<Esc>` `<CR>` (or `<Enter>`, `<Return>`) `<Tab>` `<BS>` `<Del>` `<Space>` | Named keys |
+| `<lt>` `<Bar>` `<Bslash>` | `<`, `\|` and `\` |
+| `<Up>` `<Down>` `<Left>` `<Right>` `<Home>` `<End>` `<PageUp>` `<PageDown>` `<Insert>` | Named keys |
+| `<F1>` to `<F24>` | Function keys |
+| `<C-r>`, `<M-x>` (or `<A-x>`), `<S-Tab>`, `<D-s>` | Ctrl, Alt, Shift, Cmd; they stack: `<C-S-Tab>` |
+
+Names ignore case. `<C-R>` is `<C-r>`, `<C-[>` is `<Esc>`, `<S-a>` is `A`. A `<` that starts no
+name is a plain `<`.
+
+## lawhrc
+
+lawh reads settings and mappings at start from `lawhrc` in its config directory:
+
+| System | Path |
+|---|---|
+| Linux, macOS | `~/.config/lawh/lawhrc` (or `$XDG_CONFIG_HOME/lawh/lawhrc`) |
+| Windows | `%APPDATA%\y0sif\lawh\config\lawhrc` |
+
+- One `:` command a line; the `:` is optional. Only `:set` and the mapping commands are allowed.
+- Blank lines, and lines starting with `"`, are comments.
+- A line that fails is skipped and the rest still load. A line that maps keys mapped earlier in
+  the file replaces the earlier mapping, with a warning.
+- The first warning shows on the status line (`lawhrc line 5: ... (2 more warnings in the log)`);
+  all of them go to the log on stderr.
+- At most 1 MiB, UTF-8. A missing file is fine.
+
+To start from the sample, which moves with `jkl;` instead of `hjkl`:
+
+```bash
+mkdir -p ~/.config/lawh
+cp examples/lawhrc ~/.config/lawh/lawhrc
+```
+
+## Mouse and window
+
+| Action | How |
+|---|---|
+| Pan | Drag with the left or middle mouse button |
+| Zoom | Mouse wheel or touchpad scroll, at the pointer, from 0.1 to 20 |
+| Select | Click an object to make it the current object, or empty space to put the cursor on the nearest grid point. A click ends Insert, Visual and the command line |
+| Close | The window's close button (Cmd+Q on macOS). With unwritten changes the first close only warns; close again to quit |
+
+The view follows the cursor as you type.
+
+## Starting lawh
+
+```bash
+lawh                 # an empty board with no name: :w name.lawh names it
+lawh board.lawh      # open board.lawh; if it doesn't exist, an empty board that :w creates
+```
+
+Logs go to stderr. lawhrc warnings show at the default level; `RUST_LOG=info lawh board.lawh`
+logs more.
