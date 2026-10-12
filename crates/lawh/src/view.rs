@@ -54,6 +54,17 @@ pub fn opening(
     Viewport::new(center, fit.zoom, width, height, fit.scale_factor)
 }
 
+/// The part of the board `vp` shows above the bottom `bottom_px` physical pixels (the status
+/// bar), in grid units: where jump labels go (`Engine::set_view`). A window with no room above
+/// the bar shows only the line along its top.
+pub fn board_area(vp: &Viewport, bottom_px: f64) -> Rect {
+    let room = (f64::from(vp.height) - bottom_px.max(0.0)).max(0.0);
+    Rect::from_points(
+        vp.to_board(Point::ZERO),
+        vp.to_board(Point::new(f64::from(vp.width), room)),
+    )
+}
+
 /// Pans `vp` as little as possible to bring `focus` (grid units) into view, at least
 /// [`FOLLOW_MARGIN_PX`] inside the window's edges, above the bottom `bottom_px` physical pixels
 /// (the status bar). The zoom never changes.
@@ -308,6 +319,32 @@ mod tests {
 
     fn point(x: f64, y: f64) -> Rect {
         Rect::new(x, y, x, y)
+    }
+
+    fn assert_rect_near(a: Rect, b: Rect) {
+        assert_near(Point::new(a.x0, a.y0), Point::new(b.x0, b.y0));
+        assert_near(Point::new(a.x1, a.y1), Point::new(b.x1, b.y1));
+    }
+
+    #[test]
+    fn the_board_area_is_the_window_above_the_status_bar() {
+        // 40 px a unit: 20 by 15 units, less the bar's 0.6 at the bottom.
+        assert_rect_near(
+            board_area(&origin_view(), BAR),
+            Rect::new(-10.0, -7.5, 10.0, 6.9),
+        );
+        // Panned, zoomed in and at scale factor 2: 160 px a unit, the bar 48 px.
+        let vp = Viewport::new(Point::new(30.0, -4.0), 2.0, 800, 600, 2.0);
+        assert_rect_near(board_area(&vp, 48.0), Rect::new(27.5, -5.875, 32.5, -2.425));
+        // No room above the bar: the top line of the window.
+        assert_rect_near(
+            board_area(&origin_view(), 900.0),
+            Rect::new(-10.0, -7.5, 10.0, -7.5),
+        );
+        assert_rect_near(
+            board_area(&origin_view(), f64::NAN),
+            Rect::new(-10.0, -7.5, 10.0, 7.5),
+        );
     }
 
     #[test]

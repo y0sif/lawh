@@ -232,6 +232,38 @@ fn follow_links(path: &Path) -> io::Result<PathBuf> {
     )))
 }
 
+/// `a` and `b` name one file: each path with its symbolic links followed as [`write_atomic`]
+/// follows them ([`follow_links`]), then on Unix the same device and inode, elsewhere the same
+/// path once [`fs::canonicalize`] has made it absolute (the standard library has no stable file
+/// id on Windows). So `~/a.lawh`, an absolute path and `./a.lawh` of one file are one file, and
+/// so is a link to it. Asked after a write, it also sees that a hard link the write replaced with
+/// a new file no longer shares the other name's file.
+///
+/// False when either path can't be looked up (a file not written yet, a loop of links); the
+/// reason is logged at debug level.
+pub fn same_file(a: &Path, b: &Path) -> bool {
+    let compared = file_id(a).and_then(|id| Ok(id == file_id(b)?));
+    compared.unwrap_or_else(|err| {
+        tracing::debug!(a = %a.display(), b = %b.display(), %err, "could not compare two files");
+        false
+    })
+}
+
+/// What tells a file from any other (see [`same_file`]): its device and inode.
+#[cfg(unix)]
+fn file_id(path: &Path) -> io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = fs::metadata(follow_links(path)?)?;
+    Ok((meta.dev(), meta.ino()))
+}
+
+/// What tells a file from any other (see [`same_file`]): its absolute path, every link in it
+/// resolved.
+#[cfg(not(unix))]
+fn file_id(path: &Path) -> io::Result<PathBuf> {
+    fs::canonicalize(follow_links(path)?)
+}
+
 /// A new file in `dir` named after `name`, hidden on Unix: `.area.lawh.<pid>-<n>.tmp`. On Unix
 /// it is created with `old`'s permissions when given (those of the file it will replace).
 fn create_temp(
@@ -610,6 +642,45 @@ mod tests {
         let err = write_atomic(&dir.path("a"), b"new").unwrap_err();
         assert!(err.to_string().contains("symbolic links"), "{err}");
         assert_eq!(listing(dir.root()), ["a", "b"]);
+    }
+
+    #[test]
+    fn one_file_by_any_path_is_the_same_file() {
+        let dir = TestDir::new("same-file");
+        let a = dir.write("a.lawh", "a");
+        let b = dir.write("b.lawh", "a");
+        fs::create_dir(dir.path("sub")).unwrap();
+        assert!(same_file(&a, &a));
+        assert!(same_file(&a, &dir.root().join(".").join("a.lawh")));
+        assert!(same_file(&a, &dir.path("sub").join("..").join("a.lawh")));
+        assert!(!same_file(&a, &b), "the same contents in another file");
+        assert!(!same_file(&a, &dir.path("missing.lawh")));
+        assert!(!same_file(
+            &dir.path("missing.lawh"),
+            &dir.path("missing.lawh")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_the_file_it_points_at_and_a_replaced_hard_link_is_not() {
+        let dir = TestDir::new("same-file-links");
+        let real = dir.write("real.lawh", "old");
+        let link = dir.path("link.lawh");
+        std::os::unix::fs::symlink("real.lawh", &link).unwrap();
+        assert!(same_file(&link, &real));
+        assert!(same_file(&real, &link));
+
+        let hard = dir.path("hard.lawh");
+        fs::hard_link(&real, &hard).unwrap();
+        assert!(same_file(&hard, &real));
+        // An atomic write replaces the name it writes with a new file: the other keeps the old.
+        write_atomic(&hard, b"new").unwrap();
+        assert!(!same_file(&hard, &real));
+        assert_eq!(fs::read_to_string(&real).unwrap(), "old");
+
+        std::os::unix::fs::symlink("loop", dir.path("loop")).unwrap();
+        assert!(!same_file(&dir.path("loop"), &dir.path("loop")));
     }
 
     #[cfg(unix)]

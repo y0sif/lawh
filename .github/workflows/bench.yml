@@ -6,6 +6,11 @@ name: Bench
 # maintainer's laptop, so a slower or noisier runner can fail them: read the printed numbers
 # either way.
 #
+# Then what one key may cost in lawh-core (`engine_cost`): `key_costs` times the worst cases in
+# release, and `work_unit_costs` the nanoseconds a unit of work takes, in release and in debug
+# (the work weights are debug timings, so a unit should stay about a nanosecond there). Last,
+# how long lawh-math takes to build the `:sym` list. These assert no time: read the numbers.
+#
 # Run by hand only (`gh workflow run bench.yml`): the repo is private and Actions minutes are
 # limited.
 
@@ -24,7 +29,7 @@ env:
 
 jobs:
   bench:
-    name: Frame budget calibrations and benches
+    name: Calibrations and benches
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -32,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo test --release --locked -p lawh-render --no-run
+        run: cargo test --release --locked -p lawh-render -p lawh-core -p lawh-math --no-run
       # One test at a time, so timings don't share the CPU. Every step runs even when an
       # earlier one fails, so the whole picture is printed.
       - name: Calibrations
@@ -49,3 +54,13 @@ jobs:
       - name: Other benches
         if: ${{ !cancelled() }}
         run: cargo test --release --locked -p lawh-render --test bench -- --ignored --nocapture --test-threads=1 --skip frame_budget_worst_cases
+      - name: Key costs (release)
+        if: ${{ !cancelled() }}
+        run: cargo test --release --locked -p lawh-core --test engine_cost -- --ignored --nocapture --test-threads=1
+      # Builds lawh-core's tests in debug: no Typst or renderer, so it is quick.
+      - name: Work unit costs (debug)
+        if: ${{ !cancelled() }}
+        run: cargo test --locked -p lawh-core --test engine_cost -- --ignored --nocapture --test-threads=1 work_unit_costs
+      - name: Symbol list
+        if: ${{ !cancelled() }}
+        run: cargo test --release --locked -p lawh-math --test symbols -- --ignored --nocapture --test-threads=1 measure_symbol_list

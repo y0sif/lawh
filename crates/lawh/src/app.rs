@@ -2,8 +2,10 @@
 //!
 //! Keys go to the editing engine ([`Engine`]), which changes the board; the app does what the
 //! engine asks of it ([`Effect`]): it writes the board, quits, and times out keys waiting for a
-//! longer mapping. Each frame draws the board with the engine's cursor, selection, caret and
-//! status line over it. The mouse pans (drag), zooms (wheel) and selects (click).
+//! longer mapping. Before each key it tells the engine what part of the board the window shows,
+//! for jump labels. Each frame draws the board with the engine's cursor, selection, caret, jump
+//! labels, `:sym` rows and status line over it. The mouse pans (drag), zooms (wheel) and selects
+//! (click).
 
 use std::collections::VecDeque;
 use std::io;
@@ -13,7 +15,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use lawh_core::{Cursor, Effect, Engine, Mode, Point, Rect, to_lawh};
+use lawh_core::{Cursor, Effect, Engine, Key, Mode, Point, Rect, to_lawh};
 use lawh_render::{
     Caret, Overlay, OverlayCursor, Renderer, StatusLine, Viewport, status_bar_height_px,
 };
@@ -228,9 +230,19 @@ impl App {
         self.timer.cancel();
         self.message = None;
         self.keep_view = true;
-        for key in translated.keys {
+        self.feed(translated.keys);
+        if self.quitting {
+            event_loop.exit();
+        }
+    }
+
+    /// Types `keys` into the engine, one by one, doing what each asks for ([`App::apply`]),
+    /// then [`App::after_input`]. Keys left once the engine quits are dropped.
+    fn feed(&mut self, keys: Vec<Key>) {
+        self.sync_view();
+        for key in keys {
             let effects = self.engine.feed(key, &mut self.renderer);
-            self.apply(event_loop, effects);
+            self.apply(effects);
             if self.quitting {
                 return;
             }
@@ -240,18 +252,35 @@ impl App {
 
     /// The engine's timer went off: keys waiting for a longer mapping run now. As a key does, it
     /// drops the app's message, a close warning too.
-    fn timeout(&mut self, event_loop: &ActiveEventLoop) {
+    fn timeout(&mut self) {
         self.message = None;
+        self.sync_view();
         let effects = self.engine.timeout(&mut self.renderer);
-        self.apply(event_loop, effects);
+        self.apply(effects);
         if !self.quitting {
             self.after_input();
         }
     }
 
-    /// Does what the engine asked for: the writes (see [`do_writes`]), then quitting or arming
-    /// the timer.
-    fn apply(&mut self, event_loop: &ActiveEventLoop, effects: Vec<Effect>) {
+    /// Tells the engine which part of the board the window shows above the status bar
+    /// ([`view::board_area`]): `s` labels the objects there.
+    ///
+    /// Labels are made only while the engine takes a key or a timeout, so the app calls this
+    /// right before each, from the view as it is then: whatever panned, zoomed, resized or
+    /// followed the cursor since, the engine has the view the user sees. Labels already showing
+    /// stay on their objects when the view moves. Until the first frame, and after a formula
+    /// finishing fits the board to the window again, there is no view yet: the next frame shows
+    /// the whole board, so every object counts as in view (`None`).
+    fn sync_view(&mut self) {
+        let area = self
+            .viewport
+            .map(|vp| view::board_area(&vp, f64::from(status_bar_height_px(vp.scale_factor))));
+        self.engine.set_view(area);
+    }
+
+    /// Does what the engine asked for: the writes (see [`do_writes`]), then quitting
+    /// ([`App::quitting`], after which the caller leaves the event loop) or arming the timer.
+    fn apply(&mut self, effects: Vec<Effect>) {
         let opened = self
             .file
             .as_ref()
@@ -263,12 +292,12 @@ impl App {
             effects,
             |path| files::write_target(path, opened, launch_dir, home),
             write_board,
+            files::same_file,
         );
         if after.quit {
             tracing::info!("quitting");
             self.quitting = true;
             self.timer.cancel();
-            event_loop.exit();
         } else if let Some(ms) = after.timer_ms {
             self.timer.arm(Instant::now(), ms);
         }
@@ -546,7 +575,10 @@ impl Gfx {
 impl ApplicationHandler<MathReady> for App {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
         if self.timer.fire(Instant::now()) {
-            self.timeout(event_loop);
+            self.timeout();
+            if self.quitting {
+                event_loop.exit();
+            }
         }
     }
 
@@ -695,11 +727,18 @@ struct AfterWrites {
 /// it. The writes go through one [`files::WriteBatch`]: the board is turned into text once and
 /// each file is written once, but every write is reported, so the engine's writes waiting for
 /// their reports all get one. Stops at [`Effect::Quit`].
+///
+/// A good write is reported as one to the board's own file when `same_file` finds the file it
+/// wrote is the one `:w` alone writes (the target of the engine's file name), however the path
+/// was typed (`~/a.lawh`, an absolute path, a link): the engine then marks the board saved.
+/// Asked after the write, so it sees the files as the write left them. Not for a failed write,
+/// nor while the board has no file name yet (the write that names it is the board's own).
 fn do_writes(
     engine: &mut Engine,
     effects: Vec<Effect>,
     target: impl Fn(&str) -> PathBuf,
     mut write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+    same_file: impl Fn(&Path, &Path) -> bool,
 ) -> AfterWrites {
     let mut batch = files::WriteBatch::default();
     let mut after = AfterWrites::default();
@@ -708,8 +747,13 @@ fn do_writes(
         match effect {
             Effect::Write { path, .. } => {
                 let board = engine.board();
-                let result = batch.write(target(&path), || to_lawh(board), &mut write);
-                queue.extend(engine.write_done(&path, result, false));
+                let written = target(&path);
+                let result = batch.write(written.clone(), || to_lawh(board), &mut write);
+                let own = result.is_ok()
+                    && engine
+                        .file_name()
+                        .is_some_and(|name| same_file(&written, &target(name)));
+                queue.extend(engine.write_done(&path, result, own));
             }
             Effect::Quit => {
                 after.quit = true;
@@ -742,10 +786,14 @@ fn ms(d: Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::fs;
+
     use lawh_core::engine::MAX_WRITES_PER_KEY;
-    use lawh_core::{FixedMeasure, from_lawh, parse_keys};
+    use lawh_core::{FixedMeasure, KeyCode, from_lawh, parse_keys};
 
     use super::*;
+    use crate::test_dir::TestDir;
 
     #[test]
     fn pixels_become_0rgb() {
@@ -798,6 +846,11 @@ mod tests {
         PathBuf::from(path)
     }
 
+    /// No two paths name one file: only the engine's own comparison of names applies.
+    fn different(_: &Path, _: &Path) -> bool {
+        false
+    }
+
     /// Types `script` (Vim notation): the effects its keys ask for.
     fn type_keys(engine: &mut Engine, script: &str) -> Vec<Effect> {
         let mut effects = Vec::new();
@@ -817,10 +870,11 @@ mod tests {
         let effects = type_keys(&mut engine, "Q");
         assert_eq!(effects.len(), 4, "{effects:?}");
         let mut written = Vec::new();
-        let after = do_writes(&mut engine, effects, as_given, |target, bytes| {
+        let write = |target: &Path, bytes: &[u8]| {
             written.push((target.to_owned(), bytes.to_vec()));
             Ok(())
-        });
+        };
+        let after = do_writes(&mut engine, effects, as_given, write, different);
         let bytes = to_lawh(engine.board()).into_bytes();
         assert_eq!(
             written,
@@ -845,10 +899,11 @@ mod tests {
         type_keys(&mut engine, ":ci 2<CR>");
         let effects = type_keys(&mut engine, "Q");
         let mut tries = 0;
-        let after = do_writes(&mut engine, effects, as_given, |_, _| {
+        let write = |_: &Path, _: &[u8]| {
             tries += 1;
             Err(io::Error::other("disk full"))
-        });
+        };
+        let after = do_writes(&mut engine, effects, as_given, write, different);
         assert_eq!(tries, 1);
         assert_eq!(after, AfterWrites::default());
         assert!(engine.is_modified());
@@ -864,13 +919,14 @@ mod tests {
         let mut engine = named_with_q(&format!(":w {copy}<CR>:w<CR>"));
         type_keys(&mut engine, ":ci 2<CR>");
         let effects = type_keys(&mut engine, "Q");
-        let after = do_writes(&mut engine, effects, as_given, |target, _| {
+        let write = |target: &Path, _: &[u8]| {
             if target == Path::new(copy) {
                 Err(io::Error::other("no such directory"))
             } else {
                 Ok(())
             }
-        });
+        };
+        let after = do_writes(&mut engine, effects, as_given, write, different);
         assert_eq!(after, AfterWrites::default());
         assert!(!engine.is_modified());
         let shown = status::status(&engine, None);
@@ -884,7 +940,7 @@ mod tests {
         let mut engine = named_with_q(":w<CR>:w<CR>:w<CR>:w<CR>:wq<CR>");
         type_keys(&mut engine, ":ci 2<CR>");
         let effects = type_keys(&mut engine, "Q");
-        let after = do_writes(&mut engine, effects, as_given, |_, _| Ok(()));
+        let after = do_writes(&mut engine, effects, as_given, |_, _| Ok(()), different);
         assert_eq!(after, AfterWrites::default());
         assert!(!engine.is_modified());
         let shown = status::status(&engine, None);
@@ -896,6 +952,48 @@ mod tests {
                  dropped"
             )
         );
+    }
+
+    #[test]
+    fn a_good_write_is_compared_with_the_boards_own_file() {
+        // `same` takes `alias.lawh` for the board's file `a.lawh`, which the engine can't tell
+        // from the names. It is asked after each good write, not after the failed one.
+        let mut engine = named_with_q(":w b.lawh<CR>:w alias.lawh<CR>:w bad.lawh<CR>");
+        type_keys(&mut engine, ":ci 2<CR>");
+        let effects = type_keys(&mut engine, "Q");
+        let asked = RefCell::new(Vec::new());
+        let write = |target: &Path, _: &[u8]| {
+            if target == Path::new("bad.lawh") {
+                Err(io::Error::other("disk full"))
+            } else {
+                Ok(())
+            }
+        };
+        let same = |a: &Path, b: &Path| {
+            asked.borrow_mut().push((a.to_owned(), b.to_owned()));
+            a == Path::new("alias.lawh") && b == Path::new("a.lawh")
+        };
+        do_writes(&mut engine, effects, as_given, write, same);
+        let pair = |a: &str, b: &str| (PathBuf::from(a), PathBuf::from(b));
+        assert_eq!(
+            asked.take(),
+            [pair("b.lawh", "a.lawh"), pair("alias.lawh", "a.lawh")]
+        );
+        assert!(!engine.is_modified());
+
+        // An unnamed board: the write that names it is to its own file without asking.
+        let board = from_lawh("lawh version=1\ncircle id=c1 x=0 y=0 r=1\n").unwrap();
+        let mut engine = Engine::new(board);
+        assert_eq!(
+            engine.source("nnoremap Q :w a.lawh<CR>:w alias.lawh<CR>\n"),
+            []
+        );
+        type_keys(&mut engine, ":ci 2<CR>");
+        let effects = type_keys(&mut engine, "Q");
+        do_writes(&mut engine, effects, as_given, |_, _| Ok(()), same);
+        assert_eq!(asked.take(), [pair("alias.lawh", "a.lawh")]);
+        assert_eq!(engine.file_name(), Some("a.lawh"));
+        assert!(!engine.is_modified());
     }
 
     #[test]
@@ -1065,6 +1163,175 @@ mod tests {
         // An empty board keeps the grid's origin.
         let app = app_for(lawh_core::Board::new());
         assert_eq!(app.engine.cursor(), &Cursor::Grid(Point::ZERO));
+    }
+
+    fn keys(script: &str) -> Vec<Key> {
+        parse_keys(script).unwrap()
+    }
+
+    /// The ids of the objects with jump labels, in order of id.
+    fn labelled(app: &App) -> Vec<String> {
+        let (labels, _) = app.engine.jump_labels().unwrap();
+        let mut ids: Vec<_> = labels.iter().map(|l| l.id.as_str().to_owned()).collect();
+        ids.sort();
+        ids
+    }
+
+    /// Five small circles. The cursor starts on `a`. In an 800x600 window on the origin at zoom
+    /// 1 and scale factor 1, x from -10 to 10 units and y from -7.5 to 7.5: `b` and `c` show,
+    /// `d` is behind the status bar (its 24 px are the 0.6 units at the bottom) and `e` is
+    /// right of the window.
+    const SPREAD: &str = "lawh version=1\n\
+                          circle id=a x=0 y=-3 r=0.1\n\
+                          circle id=b x=5 y=0 r=0.1\n\
+                          circle id=c x=0 y=6.5 r=0.1\n\
+                          circle id=d x=0 y=7.2 r=0.1\n\
+                          circle id=e x=30 y=0 r=0.1\n";
+
+    fn origin_view() -> Viewport {
+        Viewport::new(Point::ZERO, 1.0, 800, 600, 1.0)
+    }
+
+    #[test]
+    fn s_labels_what_the_window_shows_above_the_status_bar_when_it_runs() {
+        let mut app = app_for(from_lawh(SPREAD).unwrap());
+        assert_eq!(
+            app.engine.cursor(),
+            &Cursor::Object(lawh_core::ObjectId::new("a").unwrap())
+        );
+        // Before the first frame there is no view: that frame will show the whole board.
+        app.feed(keys("s"));
+        assert_eq!(labelled(&app), ["b", "c", "d", "e"]);
+        app.feed(keys("<Esc>"));
+        assert!(app.engine.jump_labels().is_none());
+
+        app.viewport = Some(origin_view());
+        app.feed(keys("s"));
+        assert_eq!(labelled(&app), ["b", "c"]);
+        // Panned since: the next `s` labels what shows then.
+        app.viewport.as_mut().unwrap().center = Point::new(30.0, 0.0);
+        app.feed(keys("<Esc>s"));
+        assert_eq!(labelled(&app), ["e"]);
+        // Zoomed out, the window shows them all.
+        app.feed(keys("<Esc>"));
+        view::zoom_at(
+            app.viewport.as_mut().unwrap(),
+            Point::new(400.0, 300.0),
+            0.1,
+        );
+        app.feed(keys("s"));
+        assert_eq!(labelled(&app), ["b", "c", "d", "e"]);
+        // A resize: only the top half of the window at zoom 1 on the origin.
+        app.feed(keys("<Esc>"));
+        app.viewport = Some(Viewport::new(Point::ZERO, 1.0, 800, 300, 1.0));
+        app.feed(keys("s"));
+        assert_eq!(labelled(&app), ["b"]);
+        // A label typed: the cursor goes there.
+        let (labels, _) = app.engine.jump_labels().unwrap();
+        let label = labels[0].text.clone();
+        app.feed(keys(&label));
+        assert!(app.engine.jump_labels().is_none());
+        assert_eq!(
+            app.engine.cursor(),
+            &Cursor::Object(lawh_core::ObjectId::new("b").unwrap())
+        );
+    }
+
+    #[test]
+    fn s_run_by_the_mapping_timeout_labels_the_view_as_it_is_then() {
+        let mut engine = Engine::new(from_lawh(SPREAD).unwrap());
+        assert_eq!(engine.source("nnoremap sz l\n"), []);
+        let mut app = app_with(engine, None);
+        app.viewport = Some(origin_view());
+        app.feed(keys("s"));
+        assert!(app.engine.jump_labels().is_none(), "waiting for `sz`");
+        assert!(app.timer.deadline.is_some());
+        app.viewport.as_mut().unwrap().center = Point::new(30.0, 0.0);
+        app.timeout();
+        assert_eq!(labelled(&app), ["e"]);
+    }
+
+    /// An app for the board in `dir`'s file `name`, opened as `name` from `dir`, which is also
+    /// the home directory, with a change not written yet.
+    fn changed_app_in(dir: &Path, name: &str) -> App {
+        let src = fs::read_to_string(dir.join(name)).unwrap();
+        let engine = Engine::new(from_lawh(&src).unwrap()).with_file_name(Some(name.to_owned()));
+        let mut app = App::new(
+            engine,
+            Some(PathBuf::from(name)),
+            Some(dir.to_owned()),
+            Renderer::new_trusted(),
+            Instant::now(),
+            None,
+        );
+        app.home = Some(dir.to_owned());
+        app.feed(keys(":ci 2<CR>"));
+        assert!(app.engine.is_modified());
+        app
+    }
+
+    /// Types `:w path` and Enter, the path's characters as typed (a `<` or `\` in it is no key
+    /// notation).
+    fn write_as(app: &mut App, path: &str) {
+        let mut keys: Vec<Key> = ":w ".chars().chain(path.chars()).map(Key::char).collect();
+        keys.push(Key::named(KeyCode::Enter));
+        app.feed(keys);
+    }
+
+    const ONE_CIRCLE: &str = "lawh version=1\ncircle id=c1 x=0 y=0 r=1\n";
+
+    #[test]
+    fn a_write_to_the_boards_own_file_by_another_path_marks_it_saved() {
+        let dir = TestDir::new("own-file");
+        let x = dir.path("x.lawh");
+        let absolute = x.to_str().unwrap().to_owned();
+        for path in ["~/x.lawh", absolute.as_str(), "./x.lawh"] {
+            dir.write("x.lawh", ONE_CIRCLE);
+            let mut app = changed_app_in(dir.root(), "x.lawh");
+            write_as(&mut app, path);
+            assert!(!app.engine.is_modified(), "{path}");
+            let message = app.engine.message().unwrap();
+            assert_eq!(message.text, format!("\"{path}\" written"));
+            assert_eq!(
+                fs::read_to_string(&x).unwrap(),
+                to_lawh(app.engine.board()),
+                "{path}"
+            );
+        }
+        // Another file is a copy: the board keeps its changes, and its file the old board.
+        dir.write("x.lawh", ONE_CIRCLE);
+        let mut app = changed_app_in(dir.root(), "x.lawh");
+        write_as(&mut app, "~/y.lawh");
+        assert!(app.engine.is_modified());
+        let copy = fs::read_to_string(dir.path("y.lawh")).unwrap();
+        assert_eq!(copy, to_lawh(app.engine.board()));
+        assert_eq!(fs::read_to_string(&x).unwrap(), ONE_CIRCLE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_through_a_link_to_the_boards_file_marks_it_saved() {
+        let dir = TestDir::new("own-file-link");
+        let x = dir.write("x.lawh", ONE_CIRCLE);
+        std::os::unix::fs::symlink("x.lawh", dir.path("link.lawh")).unwrap();
+        let mut app = changed_app_in(dir.root(), "x.lawh");
+        write_as(&mut app, "link.lawh");
+        assert!(!app.engine.is_modified());
+        assert_eq!(fs::read_to_string(&x).unwrap(), to_lawh(app.engine.board()));
+
+        // A board opened through the link, written by the file's own name.
+        let mut app = changed_app_in(dir.root(), "link.lawh");
+        write_as(&mut app, "x.lawh");
+        assert!(!app.engine.is_modified());
+        assert_eq!(fs::read_to_string(&x).unwrap(), to_lawh(app.engine.board()));
+
+        // A hard link is replaced by the write, so the board's file keeps the old board.
+        fs::hard_link(&x, dir.path("hard.lawh")).unwrap();
+        let old = fs::read_to_string(&x).unwrap();
+        let mut app = changed_app_in(dir.root(), "x.lawh");
+        write_as(&mut app, "hard.lawh");
+        assert!(app.engine.is_modified());
+        assert_eq!(fs::read_to_string(&x).unwrap(), old);
     }
 
     /// The copy runs in the app crate, outside lawh-render's bench; see the dev profile in the

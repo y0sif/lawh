@@ -143,6 +143,26 @@ mod tests {
     }
 
     #[test]
+    fn the_keys_that_showed_jump_labels_wait_with_a_first_label_character() {
+        let src = "lawh version=1\n\
+                   circle id=c1 x=1 y=0 r=1\n\
+                   circle id=c2 x=4 y=0 r=1\n\
+                   circle id=c3 x=7 y=0 r=1\n";
+        let mut e = engine(src, Some("a.lawh"));
+        // Three objects and two characters: `a` on the nearest, then `ba` and `bb`.
+        assert_eq!(e.source("set jumplabels=ab\n"), []);
+        feed(&mut e, "s");
+        assert_eq!(status(&e, None), line("", "s   a.lawh   0,0", false));
+        feed(&mut e, "<Esc>2ds");
+        assert_eq!(status(&e, None), line("", "ds   a.lawh   0,0", false));
+        feed(&mut e, "b");
+        assert_eq!(status(&e, None), line("", "dsb   a.lawh   0,0", false));
+        feed(&mut e, "b");
+        assert_eq!(status(&e, None), line("", "a.lawh [+]   0,0", false));
+        assert_eq!(e.board().len(), 2);
+    }
+
+    #[test]
     fn modes_are_labelled_as_in_vim() {
         let mut e = engine(BOARD, None);
         feed(&mut e, "v");

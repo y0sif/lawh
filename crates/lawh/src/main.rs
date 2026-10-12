@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use lawh_core::Engine;
+use lawh_core::engine::Symbol;
 use lawh_math::{MathEngine, WorkerCommand};
 use lawh_render::Renderer;
 use tracing_subscriber::EnvFilter;
@@ -89,6 +90,14 @@ fn run(path: Option<&Path>, started: Instant) -> anyhow::Result<()> {
     );
     let mut engine =
         Engine::new(opened.board).with_file_name(opened.path.as_deref().map(files::engine_name));
+    // Made here, not in `main`: the math worker never needs the list.
+    let symbols_started = Instant::now();
+    let kept = engine.set_symbols(drawable_symbols());
+    tracing::info!(
+        kept,
+        ms = symbols_started.elapsed().as_secs_f64() * 1000.0,
+        "symbols ready for :sym"
+    );
     // The lawhrc is read before the first key, as Vim reads its vimrc.
     let message = rc::path().and_then(|rc| rc::source(&mut engine, &rc));
     let launch_dir = std::env::current_dir()
@@ -128,6 +137,20 @@ fn run(path: Option<&Path>, started: Instant) -> anyhow::Result<()> {
     app.into_result()
 }
 
+/// The symbols `:sym` picks from: Typst's names that the bundled fonts draw
+/// ([`lawh_math::symbols`]), in the order the engine keeps a list in, so it takes this one
+/// without a copy ([`Engine::set_symbols`]).
+fn drawable_symbols() -> Arc<[Symbol]> {
+    lawh_math::symbols()
+        .into_iter()
+        .filter(|symbol| symbol.drawable)
+        .map(|symbol| Symbol {
+            name: symbol.name,
+            value: symbol.value,
+        })
+        .collect()
+}
+
 /// The math engine for a board from a file: formulas are untrusted, so they compile in a worker
 /// process, this executable started with [`cli::MATH_WORKER_FLAG`], which has a memory cap and is
 /// killed when a formula takes too long. The worker starts with the first formula.
@@ -137,4 +160,26 @@ fn math_engine() -> anyhow::Result<MathEngine> {
     Ok(MathEngine::with_worker(
         WorkerCommand::new(exe).arg(cli::MATH_WORKER_FLAG),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use lawh_core::Board;
+
+    use super::*;
+
+    #[test]
+    fn the_engine_keeps_every_drawable_symbol() {
+        let all = lawh_math::symbols();
+        let symbols = drawable_symbols();
+        assert_eq!(symbols.len(), all.iter().filter(|s| s.drawable).count());
+        assert!(symbols.len() < all.len());
+        assert!(
+            symbols
+                .iter()
+                .any(|s| s.name == "alpha" && s.value == "\u{3b1}")
+        );
+        let mut engine = Engine::new(Board::new());
+        assert_eq!(engine.set_symbols(Arc::clone(&symbols)), symbols.len());
+    }
 }
