@@ -1,5 +1,5 @@
 //! Editing the `:` command line: typing, `<BS>`, `<Left>` `<Right>` `<Home>` `<End>`, `<Esc>`
-//! and `<CR>`.
+//! and `<CR>`. The completion keys of a `:sym` line are in `sym.rs`.
 
 use crate::board::MAX_TEXT_CHARS;
 use crate::key::{Key, KeyCode};
@@ -45,6 +45,20 @@ impl CommandLine {
     /// Empties the line, to start typing a new command.
     pub(super) fn clear(&mut self) {
         *self = Self::default();
+    }
+
+    /// Puts `text` on the line in place of what it holds, the cursor at its end: for `:sym`
+    /// completions and `<C-k>`. False, leaving the line as it was, when `text` holds more than
+    /// [`MAX_COMMAND_LINE_CHARS`] characters.
+    pub(super) fn set_text(&mut self, text: String) -> bool {
+        let chars = text.chars().count();
+        if chars > MAX_COMMAND_LINE_CHARS {
+            return false;
+        }
+        self.cursor = text.len();
+        self.text = text;
+        self.chars = chars;
+        true
     }
 
     pub(super) fn key(&mut self, key: Key) -> Outcome {
@@ -175,5 +189,10 @@ mod tests {
         assert_eq!(line.key(Key::named(KeyCode::Backspace)), Outcome::Editing);
         assert_eq!(line.key(Key::char('x')), Outcome::Editing);
         assert_eq!(line.key(Key::char('x')), Outcome::Full);
+        // A whole line put on it at once is held to the same cap.
+        assert!(!line.set_text("y".repeat(MAX_COMMAND_LINE_CHARS + 1)));
+        assert_eq!(line.text().chars().count(), MAX_COMMAND_LINE_CHARS);
+        assert!(line.set_text("sym é".to_owned()));
+        assert_eq!((line.text(), line.cursor(), line.chars), ("sym é", 6, 5));
     }
 }

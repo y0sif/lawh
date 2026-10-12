@@ -7,8 +7,9 @@
 //! for 227 s. So commands count the work they do as they go, each kind of work at what it costs
 //! (the `*_WORK` weights below): objects measured, put in reading order, looked at by
 //! `H J K L` and the place rule, taken, put, resized, labelled for a jump, and edited by undo
-//! and redo, jump labels looked through, fresh ids looked for, the bytes of `:` lines run, and
-//! the bytes of a text block that a key copies, scans, splits into graphemes or walks.
+//! and redo, jump labels looked through, symbol names matched for `:sym`, fresh ids looked for,
+//! the bytes of `:` lines run, and the bytes of a text block that a key copies, scans, splits
+//! into graphemes or walks.
 //!
 //! Counts never multiply a command that makes no progress: motions stop where they cannot go
 //! on, undo and redo at the ends of the history, a put that does not fit is refused whole (before
@@ -40,17 +41,23 @@ use super::text_motion::{Line, indicators_before, line_at};
 /// and at most 0.1 ns in release (0.5 ns for typing, which is copying, 0.2 ns for resizing
 /// text and looking through jump labels, 0.3 ns for making them), so a key that runs out takes
 /// about 0.1 s in debug and 10 ms in release (50 ms if it was typing, 15 to 22 ms if it was
-/// resizing a board of text or showing jump labels). Keys that do no work are bounded by
-/// [`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS) instead: 30,000 of them take 36 ms in debug.
+/// resizing a board of text or showing jump labels). Matching `:sym` names is the exception:
+/// nucleo does it, and dependencies are optimised in debug builds too, so a unit of it takes
+/// up to 0.9 ns in release as in debug, and a key that runs out matching takes 30 ms in release
+/// over 4,096 names as long as Typst's, 66 ms over names of 64 characters. Keys that do no work
+/// are bounded by [`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS) instead: 30,000 of them take
+/// 36 ms in debug.
 ///
 /// The costliest single commands fit: `10000J` down a column of 500 objects (62.5 million units,
 /// 51 ms in debug and 1.8 ms in release), `.` of an insert of 5,000 characters (25 million) and
 /// `10000ia<Esc>` up to [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS), `dG`, `yG` and `p` of a
 /// full board (3 million at most), and `10000<C-a>` in Visual mode over a full board of text
-/// (2.3 million, 2.2 ms in debug), and `s` over a full board of text (1.3 million, 1.1 ms in
-/// debug and 0.14 ms in release). An undo or redo step of a whole board costs 1 to 1.5 million,
-/// so `10000u` over a history of such steps stops after about 80 of them (60 ms in debug, 7 ms
-/// in release); the next key goes on.
+/// (2.3 million, 2.2 ms in debug), `s` over a full board of text (1.3 million, 1.1 ms in
+/// debug and 0.14 ms in release), and each key of a `:sym` query of
+/// [`MAX_SYM_QUERY_CHARS`](super::MAX_SYM_QUERY_CHARS) over [`MAX_SYMBOLS`](super::MAX_SYMBOLS)
+/// names as long as Typst's (32.8 million at most, 4.3 ms in debug). An undo or redo step of a
+/// whole board costs 1 to 1.5 million, so `10000u` over a history of such steps stops after
+/// about 80 of them (60 ms in debug, 7 ms in release); the next key goes on.
 pub const MAX_KEY_WORK: usize = 100_000_000;
 
 // Weights: units for one item of each kind of work, from `work_unit_costs` in debug.
@@ -107,6 +114,18 @@ pub(super) const LABEL_WORK: usize = 500;
 /// Looking at one jump label for a key typed while labels show: 127 times `m<BS>` among 499
 /// labels, every label looked at each time, took 1.27 ms.
 pub(super) const PICK_WORK: usize = 20;
+/// Matching one symbol name against one word of a `:sym` query, and ranking it: `a` over 4,096
+/// names of 14 characters on average took 0.40 ms, and each word of `a a ... a` 24 us more.
+pub(super) const SYM_WORK: usize = 100;
+/// One character of a symbol name, for each word of two characters or more in a `:sym` query
+/// (finding where the word could start and end, and the bonuses along the name): with
+/// [`SYM_CELL_WORK`], from `aa` and 61 `a`s over 4,096 names of 64 characters (1.42 and
+/// 2.00 us a name).
+pub(super) const SYM_CHAR_WORK: usize = 11;
+/// One cell nucleo's matcher fills, matching a word of two characters or more in a `:sym` query
+/// against a name it fits in (`n` rows of `m - n + 1` for a word of `n` characters and a name of
+/// `m`): 32 `a`s over 4,096 names of 64 characters took 23.8 ms, two words of 31 `a`s 47 ms.
+pub(super) const SYM_CELL_WORK: usize = 5;
 
 /// The message when a key runs out of work.
 const TOO_MUCH_WORK: &str = "that key did too much work; the rest of it was dropped";

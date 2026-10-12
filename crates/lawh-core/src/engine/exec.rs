@@ -1,6 +1,6 @@
 //! Running `:` commands: the command line's keys, shapes, text and math at the cursor, writing
 //! and quitting. Mapping commands and `:set` run in `keymap.rs` and `settings.rs`, `:si` in
-//! `size.rs`.
+//! `size.rs`, `:sym` and its completions in `sym.rs`.
 
 use std::path::{Component, Path};
 
@@ -10,6 +10,7 @@ use super::cmdline::Outcome;
 use super::command::{Command, CommandError, Segment, parse_command};
 use super::register::id_prefix;
 use super::size;
+use super::sym::is_sym_command;
 use super::undo::Edit;
 use super::work::PARSE_WORK;
 use super::{Cursor, Effect, Engine, MAX_COMMAND_LINE_CHARS, Mode};
@@ -135,9 +136,18 @@ impl Engine {
         vec![Effect::Quit]
     }
 
+    /// A key on the command line: the completion keys of a `:sym` line, else editing, `<Esc>`
+    /// and `<CR>`. A line opened by `<C-k>` from Insert mode runs only `:sym`, and goes back to
+    /// Insert mode (see `sym.rs`).
     pub(super) fn command_line_key(&mut self, key: Key) -> Vec<Effect> {
+        if self.completion_key(key) {
+            return Vec::new();
+        }
         match self.command_line.key(key) {
-            Outcome::Editing => Vec::new(),
+            Outcome::Editing => {
+                self.update_completions();
+                Vec::new()
+            }
             Outcome::Full => {
                 self.error(format!(
                     "the command line holds at most {MAX_COMMAND_LINE_CHARS} characters"
@@ -145,6 +155,15 @@ impl Engine {
                 Vec::new()
             }
             Outcome::Cancel => {
+                self.leave_command_line();
+                Vec::new()
+            }
+            Outcome::Run(line) if self.session.is_some() => {
+                if is_sym_command(&line) {
+                    self.execute_line(&line);
+                } else if parse_command(&line) != Err(CommandError::Empty) {
+                    self.error("from Insert mode the command line runs only `:sym`");
+                }
                 self.leave_command_line();
                 Vec::new()
             }
@@ -157,10 +176,15 @@ impl Engine {
         }
     }
 
-    /// Back from the command line: to block-Normal mode when it was opened there and the
-    /// cursor is still on the block, else to Normal mode. A selection kept from Visual mode is
-    /// dropped.
+    /// Back from the command line: to the Insert session `<C-k>` opened it from; else to
+    /// block-Normal mode when it was opened there and the cursor is still on the block, else to
+    /// Normal mode. A selection kept from Visual mode is dropped.
     fn leave_command_line(&mut self) {
+        self.completions = None;
+        if self.session.is_some() {
+            self.mode = Mode::Insert;
+            return;
+        }
         if self.visual_command {
             self.leave_visual();
         }
@@ -234,6 +258,7 @@ impl Engine {
                 size: size.unwrap_or(new_size),
             }),
             Command::Size(change) => self.size_command(*change),
+            Command::Sym { query } => self.pick_symbol(query),
             Command::Write { file } => return self.write(file.as_deref(), None),
             Command::WriteQuit { file, force } => return self.write(file.as_deref(), Some(*force)),
             Command::Exit { file, force } => {
@@ -306,7 +331,7 @@ impl Engine {
     /// Puts a new object on top of the board, with a fresh id for its kind (`c1`, `t2`), as one
     /// undo step, and makes it the current object. A refusal becomes the message. Finding the
     /// id counts as work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)).
-    fn add_shape(&mut self, shape: Shape) {
+    pub(super) fn add_shape(&mut self, shape: Shape) {
         if !shape.coordinates_in_range() {
             return self.error(coordinates_message());
         }

@@ -10,8 +10,8 @@
 //! (`h j k l`), object motions (`w b`, `H J K L`, `gg G`), the operators `d` and `y` with `dd`,
 //! `yy` and `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`,
 //! `<C-r>`), the size keys (`<C-a>`, `<C-x>`), all with counts, jump labels (`s`, see
-//! [`Engine::jump_labels`]) and `:` for the command line (shapes, text, math, sizes, write and
-//! quit).
+//! [`Engine::jump_labels`]) and `:` for the command line (shapes, text, math, sizes, symbols by
+//! name with completions, write and quit).
 //!
 //! Text and math objects are text blocks: `i a I A o O` type into one in Insert mode, `<CR>`
 //! enters one in block-Normal mode, Vim's Normal mode inside the text (see
@@ -46,6 +46,7 @@ mod register;
 mod repeat;
 mod settings;
 mod size;
+mod sym;
 mod text;
 mod text_motion;
 mod undo;
@@ -55,6 +56,7 @@ mod work;
 use std::collections::VecDeque;
 
 use kurbo::{Point, Rect};
+use nucleo_matcher::Matcher;
 
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, SizeChange, parse_command};
@@ -73,6 +75,7 @@ pub use rc::{MAX_RC_BYTES, MAX_RC_WARNINGS, RcWarning};
 pub use repeat::MAX_REPEAT_KEYS;
 pub use settings::{Escape, MAX_TIMEOUTLEN, OptionName, OptionValue, SetArg, Settings};
 pub use size::SIZE_STEPS;
+pub use sym::{MAX_SYM_QUERY_CHARS, MAX_SYMBOLS, SYM_ROWS, Symbol};
 pub use text::TextCursor;
 pub use undo::{MAX_UNDO_BYTES, MAX_UNDO_STEPS};
 pub use work::MAX_KEY_WORK;
@@ -84,6 +87,7 @@ use self::keymap::Keymap;
 use self::normal::Pending;
 use self::register::Register;
 use self::repeat::Repeat;
+use self::sym::{Completions, Symbols};
 use self::text::{Block, Session};
 use self::undo::{Edit, History, Step};
 use self::work::{EDIT_WORK, Work};
@@ -197,6 +201,13 @@ pub struct Engine {
     labels: Option<Labels>,
     /// The part of the board in view, for jump labels (see [`Engine::set_view`]).
     view: Option<Rect>,
+    /// The symbols `:sym` picks from (see [`Engine::set_symbols`]).
+    symbols: Symbols,
+    /// The matcher `:sym` matches with, made the first time it matches: it holds about 135 KB
+    /// of scratch memory.
+    matcher: Option<Matcher>,
+    /// The completions of a `:sym` line on the command line (see [`Engine::completions`]).
+    completions: Option<Completions>,
 }
 
 impl Engine {
@@ -227,6 +238,9 @@ impl Engine {
             work: Work::default(),
             labels: None,
             view: None,
+            symbols: Symbols::default(),
+            matcher: None,
+            completions: None,
         }
     }
 
@@ -281,10 +295,10 @@ impl Engine {
     }
 
     /// A mouse click at board point `at`, on object `hit` if any. It ends jump labels, an
-    /// Insert session (as one undo step), block-Normal mode, Visual mode and the command line,
-    /// drops pending keys (those waiting for a mapping too), and puts the cursor on `hit`, or
-    /// else on the grid point nearest `at` (whole units). A point that is not finite leaves the
-    /// cursor where it is.
+    /// Insert session (as one undo step, a `:sym` line opened from it too), block-Normal mode,
+    /// Visual mode and the command line, drops pending keys (those waiting for a mapping too),
+    /// and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units). A
+    /// point that is not finite leaves the cursor where it is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
         self.reset_work();
         if self.session.is_some() {
@@ -296,6 +310,7 @@ impl Engine {
         self.keymap.flush();
         self.message = None;
         self.command_line.clear();
+        self.completions = None;
         self.leave_visual();
         self.mode = Mode::Normal;
         match hit.filter(|id| self.board.contains(id)) {

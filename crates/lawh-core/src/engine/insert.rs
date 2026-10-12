@@ -2,13 +2,15 @@
 //!
 //! A typed character goes in at the cursor, with Alt held too: characters a keyboard layout
 //! types with `AltGr` arrive as plain characters, never as chords, so Alt with a character is
-//! taken as the character. Ctrl and Cmd chords type nothing in M2. `<CR>` breaks the line with
-//! `\n`, `<Tab>` types a tab. `<BS>` and `<Del>` delete a grapheme before or after the cursor,
-//! joining lines at a line break.
+//! taken as the character. `<C-k>` opens a `:sym` line, to pick a symbol by name (see
+//! `sym.rs`); other Ctrl and Cmd chords type nothing. `<CR>` breaks the line with `\n`, `<Tab>`
+//! types a tab. `<BS>` and `<Del>` delete a grapheme before or after the cursor, joining lines
+//! at a line break.
 //! `<Left>` and `<Right>` move by a grapheme within the line, `<Up>` and `<Down>` by a line
 //! keeping the column, `<Home>` and `<End>` to the line's ends. `<Esc>` ends the session (see
 //! `text.rs`). Other keys do nothing.
 
+use super::sym::SYM_KEY;
 use super::text_motion::{
     ceil_boundary, column, content, indicators_before, left, line_at, next_grapheme, prev_grapheme,
     right, vertical, with_content,
@@ -36,6 +38,11 @@ enum Action {
 
 impl Engine {
     pub(super) fn insert_key(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
+        if key == SYM_KEY {
+            // Not recorded: the pick records the characters it puts in.
+            self.open_sym_line();
+            return Vec::new();
+        }
         self.repeat.push(key);
         if key.code == KeyCode::Esc {
             self.end_session(true, measure);

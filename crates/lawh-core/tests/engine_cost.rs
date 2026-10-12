@@ -17,10 +17,14 @@
 mod common;
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use common::{Run, board, run, run_with_rc};
-use lawh_core::engine::{Engine, MAX_EXPANDED_KEYS, MAX_KEY_WORK, MAX_RC_BYTES};
+use common::{Run, board, long_symbols, run, run_with_rc, run_with_symbols, typst_like_symbols};
+use lawh_core::engine::{
+    Engine, MAX_EXPANDED_KEYS, MAX_KEY_WORK, MAX_RC_BYTES, MAX_SYM_QUERY_CHARS, MAX_SYMBOLS,
+    SYM_ROWS, Symbol,
+};
 use lawh_core::{Board, Cursor, ObjectId, Shape};
 
 /// The message when a key runs out of work.
@@ -149,8 +153,27 @@ fn timed(rc: &str, board: Board, script: &str) -> (Run, Duration) {
     (r, started.elapsed())
 }
 
+/// `cmap Q {keys repeated n times}Q`: a command-line mapping that types `keys` `n` times, then
+/// itself.
+fn cmap_repeating(keys: &str, n: usize) -> String {
+    format!("cmap Q {}Q\n", keys.repeat(n))
+}
+
+/// Gives the engine `symbols`, runs `script` on an empty board with `rc`, and how long the
+/// script took.
+fn timed_sym(rc: &str, symbols: Arc<[Symbol]>, script: &str) -> (Run, Duration) {
+    let mut r = run_with_symbols(rc, symbols, Board::new(), "");
+    let started = Instant::now();
+    r.feed(script);
+    (r, started.elapsed())
+}
+
 /// A worst case: its name, and the run to time.
 type Case = (&'static str, Box<dyn Fn() -> (Run, Duration)>);
+
+/// A `:sym` case for `work_unit_costs`: its name, the symbols, the board, the keys before and
+/// the key to measure.
+type SymCase<'a> = (&'a str, &'a Arc<[Symbol]>, Board, String, &'a str);
 
 /// Each worst case.
 #[expect(clippy::too_many_lines, reason = "a table of cases, one a row")]
@@ -244,6 +267,27 @@ fn cases() -> Vec<Case> {
         (
             "(s then 127 m<BS>) x117, 500-rect column",
             Box::new(|| timed(&picks_rc(), column(), "ggW")),
+        ),
+        (
+            ":sym then a<BS> x127, 4096 Typst-like names",
+            Box::new(|| {
+                let symbols = typst_like_symbols(MAX_SYMBOLS);
+                timed_sym(&cmap_repeating("a<BS>", 127), symbols, ":sym Q")
+            }),
+        ),
+        (
+            ":sym then aa<BS><BS> x63, 4096 long names",
+            Box::new(|| {
+                let symbols = long_symbols(MAX_SYMBOLS);
+                timed_sym(&cmap_repeating("aa<BS><BS>", 63), symbols, ":sym Q")
+            }),
+        ),
+        (
+            ":sym a then <Tab> x255, 4096 Typst-like names",
+            Box::new(|| {
+                let symbols = typst_like_symbols(MAX_SYMBOLS);
+                timed_sym(&cmap_repeating("<Tab>", 255), symbols, ":sym aQ")
+            }),
         ),
         (
             "lawhrc of 1 MiB, map and unmap at the front of 999 mappings",
@@ -415,6 +459,84 @@ fn jump_labels_on_a_full_board_fit_in_the_work_budget() {
     r.feed(&last.text);
     assert_eq!(r.engine.board().len(), 499);
     assert!(r.engine.key_work() <= MAX_KEY_WORK / 1000);
+}
+
+#[test]
+fn a_mapping_that_matches_symbols_stops_within_the_work_budget() {
+    // Each `a` matches 4,096 names and `<BS>` empties the query: about 240 rounds fit, and the
+    // key stops on an `a` it could not match for.
+    let symbols = typst_like_symbols(MAX_SYMBOLS);
+    let (mut r, elapsed) = timed_sym(&cmap_repeating("a<BS>", 127), symbols, ":sym Q");
+    assert_eq!(r.engine.mode(), lawh_core::Mode::CommandLine);
+    assert_eq!(r.engine.command_line().map(|(line, _)| line), Some("sym a"));
+    assert_eq!(r.engine.completions(), None);
+    assert_stopped(&mut r, elapsed);
+    // Words of two letters over names of 64 cost the most for each name: fewer rounds fit.
+    let symbols = long_symbols(MAX_SYMBOLS);
+    let (mut r, elapsed) = timed_sym(&cmap_repeating("aa<BS><BS>", 63), symbols, ":sym Q");
+    assert_stopped(&mut r, elapsed);
+    // `<Tab>` matches nothing again: the keys run out first, not the work.
+    let symbols = typst_like_symbols(MAX_SYMBOLS);
+    let (r, elapsed) = timed_sym(&cmap_repeating("<Tab>", 255), symbols, ":sym aQ");
+    assert!(elapsed < bound(), "{elapsed:?}");
+    assert!(r.engine.key_work() < MAX_KEY_WORK / 10);
+    assert!(
+        message(&r)
+            .unwrap()
+            .starts_with("one key may set off at most")
+    );
+}
+
+#[test]
+fn a_max_length_query_fits_the_work_budget() {
+    // Over the most names, as long as Typst's, every key of the costliest queries of
+    // `MAX_SYM_QUERY_CHARS` matches in full: 32 words of one letter, 21 of two (each a pass
+    // over every name), one word of 64 letters and two of 31.
+    let symbols = typst_like_symbols(MAX_SYMBOLS);
+    let mut costliest = 0;
+    for query in [
+        format!("{}a", "a ".repeat(31)),
+        format!("{}a", "ar ".repeat(21)),
+        "a".repeat(MAX_SYM_QUERY_CHARS),
+        format!("{0} {0}", "a".repeat(31)),
+    ] {
+        assert!(query.chars().count() <= MAX_SYM_QUERY_CHARS);
+        let mut r = run_with_symbols("", Arc::clone(&symbols), Board::new(), ":sym ");
+        for c in query.chars() {
+            r.feed(&c.to_string());
+            assert_eq!(message(&r), None, "{query:?}");
+            costliest = costliest.max(r.engine.key_work());
+        }
+        assert!(r.engine.completions().is_some());
+    }
+    assert!(costliest <= MAX_KEY_WORK / 2, "{costliest}");
+    // 32 words of one letter fit over the longest names too.
+    let mut r = run_with_symbols("", long_symbols(MAX_SYMBOLS), Board::new(), ":sym ");
+    r.feed(&format!("{}a", "a ".repeat(31)));
+    assert_eq!(message(&r), None);
+    assert_eq!(r.engine.completions().unwrap().0.len(), SYM_ROWS);
+}
+
+#[test]
+fn a_query_that_costs_too_much_for_its_names_is_refused_whole() {
+    // 21 words of two letters over 4,096 names of 64 characters would take about 0.12 s. The
+    // query goes on the line first, then `sy` in front of it makes it a `:sym` line: the key
+    // that would match it all runs out of work before matching, and shows no rows.
+    let script = format!(":{}<Home>s", " aa".repeat(21));
+    let mut r = run_with_symbols("", long_symbols(MAX_SYMBOLS), Board::new(), &script);
+    assert_eq!((message(&r), r.engine.completions()), (None, None));
+    let started = Instant::now();
+    r.feed("y");
+    let elapsed = started.elapsed();
+    assert!(elapsed < Duration::from_millis(20), "{elapsed:?}");
+    assert_eq!(message(&r), Some(TOO_MUCH_WORK));
+    assert_eq!(r.engine.completions(), None);
+    assert!(r.engine.key_work() <= MAX_KEY_WORK);
+    // A query that fits matches again.
+    let fits = format!(":{}<Home>sy", " aa".repeat(16));
+    let r = run_with_symbols("", long_symbols(MAX_SYMBOLS), Board::new(), &fits);
+    assert_eq!(message(&r), None);
+    assert_eq!(r.engine.completions().unwrap().0.len(), SYM_ROWS);
 }
 
 #[test]
@@ -851,13 +973,7 @@ fn work_unit_costs() {
     ];
     let ls = rc_repeating("l", 255);
     let picks = format!("nnoremap P s{}\n", "m<BS>".repeat(127));
-    for (name, board, setup, key) in cases {
-        let rc = match key {
-            "Q" => ls.as_str(),
-            "P" => picks.as_str(),
-            _ => "",
-        };
-        let mut r = run_with_rc(rc, board, &setup);
+    let measure = |name: &str, mut r: Run, key: &str| {
         let started = Instant::now();
         r.feed(key);
         let elapsed = started.elapsed();
@@ -869,5 +985,128 @@ fn work_unit_costs() {
             .unwrap_or_default();
         let per_unit = elapsed.as_secs_f64() * 1e9 / work.max(1) as f64;
         println!("{name}: {elapsed:.1?}, {work} units, {per_unit:.1} ns a unit ({message})");
+    };
+    for (name, board, setup, key) in cases {
+        let rc = match key {
+            "Q" => ls.as_str(),
+            "P" => picks.as_str(),
+            _ => "",
+        };
+        measure(name, run_with_rc(rc, board, &setup), key);
+    }
+    // `:sym`: the last key of each query matches every name.
+    let typst = typst_like_symbols(MAX_SYMBOLS);
+    let long = long_symbols(MAX_SYMBOLS);
+    let math = || board("math id=m1 x=0 y=0 \"x\"\n");
+    let sym_cases: Vec<SymCase<'_>> = vec![
+        (
+            ":sym a, 4096 Typst-like names",
+            &typst,
+            Board::new(),
+            ":sym ".into(),
+            "a",
+        ),
+        (
+            ":sym of 32 words a, 4096 Typst-like names",
+            &typst,
+            Board::new(),
+            format!(":sym {}", "a ".repeat(31)),
+            "a",
+        ),
+        (
+            ":sym of 21 words ar, 4096 Typst-like names",
+            &typst,
+            Board::new(),
+            format!(":sym {}a", "ar ".repeat(20)),
+            "r",
+        ),
+        (
+            ":sym arrowrl, 4096 Typst-like names",
+            &typst,
+            Board::new(),
+            ":sym arrowr".into(),
+            "l",
+        ),
+        (
+            ":sym of 61 a, 4096 long names",
+            &long,
+            Board::new(),
+            format!(":sym {}", "a".repeat(60)),
+            "a",
+        ),
+        (
+            ":sym of 21 words aa, 4096 long names",
+            &long,
+            Board::new(),
+            format!(":sym {}a", "aa ".repeat(20)),
+            "a",
+        ),
+        (
+            ":sym of 32 words a, 4096 long names",
+            &long,
+            Board::new(),
+            format!(":sym {}", "a ".repeat(31)),
+            "a",
+        ),
+        (
+            ":sym aa, 4096 long names",
+            &long,
+            Board::new(),
+            ":sym a".into(),
+            "a",
+        ),
+        (
+            ":sym of 32 a, 4096 long names",
+            &long,
+            Board::new(),
+            format!(":sym {}", "a".repeat(31)),
+            "a",
+        ),
+        (
+            ":sym of 31 a and 32 a, 4096 long names",
+            &long,
+            Board::new(),
+            format!(":sym {} {}", "a".repeat(31), "a".repeat(31)),
+            "a",
+        ),
+        (
+            ":sym of 64 a, 4096 Typst-like names",
+            &typst,
+            Board::new(),
+            format!(":sym {}", "a".repeat(63)),
+            "a",
+        ),
+        (
+            ":sym of 3 words of 20 a, 4096 long names",
+            &long,
+            Board::new(),
+            format!(":sym {0} {0} {1}", "a".repeat(20), "a".repeat(19)),
+            "a",
+        ),
+        (
+            "<Tab> on :sym a, 4096 Typst-like names",
+            &typst,
+            Board::new(),
+            ":sym a".into(),
+            "<Tab>",
+        ),
+        (
+            "<CR> on :sym a, a math block, 4096 Typst-like names",
+            &typst,
+            math(),
+            "gg<CR>:sym a".into(),
+            "<CR>",
+        ),
+        (
+            "<CR> on :sym alpha, a math block, 4096 Typst-like names",
+            &typst,
+            math(),
+            "gg<CR>:sym alpha".into(),
+            "<CR>",
+        ),
+    ];
+    for (name, symbols, board, setup, key) in sym_cases {
+        let r = run_with_symbols("", Arc::clone(symbols), board, &setup);
+        measure(name, r, key);
     }
 }

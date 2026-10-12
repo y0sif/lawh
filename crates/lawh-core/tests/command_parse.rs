@@ -5,8 +5,9 @@
 #![cfg(test)]
 
 use lawh_core::engine::{
-    Command, CommandError, End, Escape, LabelChars, MAX_LABEL_CHARS, MAX_MAP_KEYS, MAX_TIMEOUTLEN,
-    MapKey, MapMode, OptionName, OptionValue, Segment, SetArg, SizeChange, parse_command,
+    Command, CommandError, End, Escape, LabelChars, MAX_LABEL_CHARS, MAX_MAP_KEYS,
+    MAX_SYM_QUERY_CHARS, MAX_TIMEOUTLEN, MapKey, MapMode, OptionName, OptionValue, Segment, SetArg,
+    SizeChange, parse_command,
 };
 use lawh_core::{Key, parse_keys};
 
@@ -74,6 +75,7 @@ fn every_short_form_names_its_command() {
         ("cmapclear", 5, "cmapc"),
         ("set", 2, "se tm=5"),
         ("size", 2, "si 2"),
+        ("sym", 2, "sy alpha"),
     ];
     for (name, min, example) in cases {
         let expected = parsed(example);
@@ -310,6 +312,29 @@ fn size_takes_one_number_or_a_change() {
         ("s 2", "unknown command `:s`"),
     ];
     assert_messages(&cases);
+}
+
+#[test]
+fn sym_takes_a_query_of_up_to_max_sym_query_chars() {
+    let sym = |query: &str| Command::Sym {
+        query: query.to_owned(),
+    };
+    assert_eq!(parsed("sym alpha"), sym("alpha"));
+    // Spaces at the ends go; those inside stay, between words.
+    assert_eq!(parsed("sy   arrow  r  "), sym("arrow  r"));
+    assert_eq!(parsed(":: sym ^a !b"), sym("^a !b"));
+    let at_cap = "é".repeat(MAX_SYM_QUERY_CHARS);
+    assert_eq!(parsed(&format!("sym {at_cap}")), sym(&at_cap));
+    let too_long = format!("sym {}", "é".repeat(MAX_SYM_QUERY_CHARS + 1));
+    assert_messages(&[
+        ("sym", "missing the symbol's name: `:sy[m] <name>`"),
+        ("sym    ", "missing the symbol's name: `:sy[m] <name>`"),
+        ("sym! alpha", "`:sym` takes no `!`"),
+        ("syms alpha", "unknown command `:syms`"),
+        ("s alpha", "unknown command `:s`"),
+        ("sym1", "unknown command `:sym1`"),
+        (&too_long, "a `:sym` query holds at most 64 characters"),
+    ]);
 }
 
 #[test]

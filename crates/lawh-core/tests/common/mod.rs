@@ -22,8 +22,9 @@
 )]
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
-use lawh_core::engine::{Cursor, Effect, Engine, FixedMeasure, Mode};
+use lawh_core::engine::{Cursor, Effect, Engine, FixedMeasure, Mode, Symbol};
 use lawh_core::key::format_keys;
 use lawh_core::{Board, ObjectId, Point, from_lawh, parse_keys, to_lawh};
 
@@ -51,6 +52,87 @@ pub fn run_with_rc(rc: &str, board: Board, script: &str) -> Run {
     let warnings = engine.source(rc);
     assert!(warnings.is_empty(), "lawhrc warnings: {warnings:#?}");
     run_engine(engine, script)
+}
+
+/// Reads `rc` as [`run_with_rc`] does, gives the engine `symbols` for `:sym` (all of which it
+/// must keep), then types `script` as [`run`] does.
+pub fn run_with_symbols(rc: &str, symbols: Arc<[Symbol]>, board: Board, script: &str) -> Run {
+    let mut engine = Engine::new(board);
+    let warnings = engine.source(rc);
+    assert!(warnings.is_empty(), "lawhrc warnings: {warnings:#?}");
+    let n = symbols.len();
+    assert_eq!(engine.set_symbols(symbols), n, "symbols dropped");
+    run_engine(engine, script)
+}
+
+/// A symbol named `name` for `value`.
+pub fn symbol(name: &str, value: &str) -> Symbol {
+    Symbol {
+        name: name.to_owned(),
+        value: value.to_owned(),
+    }
+}
+
+/// `n` symbols named as Typst names are, a word and up to two modifiers (`arrow.r.long`), all
+/// different, 14 characters long on average; each value is one character of its own. Every word
+/// first, then each with one modifier, then with two.
+pub fn typst_like_symbols(n: usize) -> Arc<[Symbol]> {
+    const WORDS: [&str; 32] = [
+        "alpha", "beta", "gamma", "delta", "epsilon", "theta", "lambda", "sigma", "omega", "arrow",
+        "harpoon", "integral", "sum", "product", "union", "sect", "subset", "supset", "plus",
+        "minus", "times", "div", "dot", "star", "circle", "square", "triangle", "angle", "bracket",
+        "paren", "brace", "infinity",
+    ];
+    const MODIFIERS: [&str; 16] = [
+        "r", "l", "t", "b", "long", "double", "filled", "stroked", "big", "small", "not", "alt",
+        "tilde", "dot", "circle", "square",
+    ];
+    let ones = MODIFIERS.iter().map(|m| vec![*m]);
+    let twos = MODIFIERS.iter().flat_map(|a| {
+        MODIFIERS
+            .iter()
+            .filter(move |b| a != *b)
+            .map(move |b| vec![*a, *b])
+    });
+    let names = std::iter::once(Vec::new())
+        .chain(ones)
+        .chain(twos)
+        .flat_map(|mods| {
+            WORDS.iter().map(move |w| {
+                std::iter::once(*w)
+                    .chain(mods.iter().copied())
+                    .collect::<Vec<_>>()
+            })
+        })
+        .map(|parts| parts.join("."));
+    names
+        .zip(0x2200..)
+        .take(n)
+        .map(|(name, code)| Symbol {
+            name,
+            value: char::from_u32(code).unwrap().to_string(),
+        })
+        .collect()
+}
+
+/// `n` symbols with names of [`MAX_SYM_QUERY_CHARS`](lawh_core::engine::MAX_SYM_QUERY_CHARS)
+/// characters: 30 `a`s, three other letters that tell them apart, and 31 `a`s. A query of `a`s
+/// matches them all the slowest way, skipping the letters in the middle.
+pub fn long_symbols(n: usize) -> Arc<[Symbol]> {
+    let letters: Vec<char> = ('b'..='z').collect();
+    let k = letters.len();
+    (0..n)
+        .map(|i| {
+            let middle: String = [i / (k * k), i / k % k, i % k]
+                .iter()
+                .map(|&d| letters[d % k])
+                .collect();
+            symbol(
+                &format!("{}{middle}{}", "a".repeat(30), "a".repeat(31)),
+                "x",
+            )
+        })
+        .collect()
 }
 
 /// Types `script` into `engine`, as [`run`] does.

@@ -1,0 +1,14 @@
+---
+source: crates/lawh-core/tests/sym.rs
+expression: snapshot(&r)
+---
+// mode=command-line cursor=grid(0,0) keys=7 line="sym al"
+//   alpha α
+//   Alpha Α
+//   arrow.l ←
+//   arrow.l.r ↔
+//   arrow.r.long ⟶
+//   angle ∠
+//   parallel ∥
+//   integral.double ∬
+lawh version=1

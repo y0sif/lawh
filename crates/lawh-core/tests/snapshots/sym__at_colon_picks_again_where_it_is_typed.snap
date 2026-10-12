@@ -1,0 +1,8 @@
+---
+source: crates/lawh-core/tests/sym.rs
+expression: snapshot(&r)
+---
+// mode=normal cursor=object(m2) keys=12
+lawh version=1
+math id=m1 x=0 y=0 "pi"
+math id=m2 x=0 y=3 "pi"

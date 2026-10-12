@@ -16,6 +16,9 @@
 //! `:si[ze]` takes one number: `N` sets the size of text and math, `+N` and `-N` add to it or
 //! take from it.
 //!
+//! `:sy[m]` takes a query: everything after the first space, without spaces at its ends, at most
+//! [`MAX_SYM_QUERY_CHARS`] characters (see `sym.rs`).
+//!
 //! The mapping commands take Vim's: `:map`, `:noremap`, `:unmap` and `:mapclear` with a mode
 //! letter in front (`:nnoremap`, `:iunmap`) or `!` after (`:map!` for Insert and command-line
 //! mode). The map arguments `<silent>` (no effect) and `<nowait>` may come first; then the keys
@@ -26,6 +29,7 @@
 
 use super::keymap::{IC, MAX_MAP_KEYS, MapKey, MapMode, NVO};
 use super::settings::{SetArg, parse_set_arg};
+use super::sym::MAX_SYM_QUERY_CHARS;
 use crate::board::{MAX_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, is_valid_text_size};
 use crate::key::{KeyParseError, parse_keys};
 
@@ -66,6 +70,9 @@ pub enum Command {
     /// `:si[ze] N`, `:si +N`, `:si -N`: the size of the current text or math object, or of the
     /// text and math in the selection when `:` was typed in Visual mode.
     Size(SizeChange),
+    /// `:sy[m] <query>`: the symbol named `query`, else the best match for it, into the block
+    /// being edited or as a new math block (see `sym.rs`). The query has no spaces at its ends.
+    Sym { query: String },
     /// `:w[rite] [file]` and `:w! [file]`.
     Write { file: Option<String> },
     /// `:q[uit]`; `:q!` (`force`) quits even when the board has changes.
@@ -188,6 +195,9 @@ pub enum CommandError {
         max = MAX_TEXT_SIZE
     )]
     TextSizeOutOfRange(String),
+    /// A `:sym` query of more than [`MAX_SYM_QUERY_CHARS`] characters.
+    #[error("a `:sym` query holds at most {MAX_SYM_QUERY_CHARS} characters")]
+    SymQueryTooLong,
     /// A `++` option of `:text` or `:math` other than `++size=N`; the field is the word as typed.
     #[error("unknown option `{0}`: `:text` and `:math` take `++size=N`")]
     UnknownTextOption(String),
@@ -379,6 +389,11 @@ const COMMANDS: &[Row] = &[
         name: "size",
         min: 2,
         parse: size_command,
+    },
+    Row {
+        name: "sym",
+        min: 2,
+        parse: sym,
     },
     Row {
         name: "text",
@@ -672,6 +687,24 @@ fn size_command(args: Args<'_>) -> Result<Command, CommandError> {
     } else {
         Ok(Command::Size(SizeChange::To(text_size(word)?)))
     }
+}
+
+/// `:sy[m] <query>`: a query of 1 to [`MAX_SYM_QUERY_CHARS`] characters, spaces at its ends
+/// dropped.
+fn sym(args: Args<'_>) -> Result<Command, CommandError> {
+    args.no_bang()?;
+    let query = args.rest.trim();
+    if query.is_empty() {
+        return Err(CommandError::MissingBody(
+            "the symbol's name: `:sy[m] <name>`",
+        ));
+    }
+    if query.chars().count() > MAX_SYM_QUERY_CHARS {
+        return Err(CommandError::SymQueryTooLong);
+    }
+    Ok(Command::Sym {
+        query: query.to_owned(),
+    })
 }
 
 fn write(args: Args<'_>) -> Result<Command, CommandError> {

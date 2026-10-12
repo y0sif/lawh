@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/sym.rs
+expression: snapshot(&r)
+---
+// mode=insert cursor=object(m1) keys=12 byte=8
+lawh version=1
+math id=m1 x=0 y=0 "x\nalpha y"

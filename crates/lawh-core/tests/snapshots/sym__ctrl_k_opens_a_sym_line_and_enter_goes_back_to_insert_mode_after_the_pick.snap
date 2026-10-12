@@ -1,0 +1,40 @@
+---
+source: crates/lawh-core/tests/sym.rs
+expression: "trace(math(\"x\"), \"ggA<C-k>al<Tab><CR>+<Esc>\")"
+---
+      g // mode=normal cursor=grid(0,0) keys=1
+      g // mode=normal cursor=object(m1) keys=2
+      A // mode=insert cursor=object(m1) keys=3 byte=1
+  <C-k> // mode=command-line cursor=object(m1) keys=4 line="sym "
+      a // mode=command-line cursor=object(m1) keys=5 line="sym a"
+//   alpha α
+//   Alpha Α
+//   angle ∠
+//   approx ≈
+//   arrow.l ←
+//   arrow.l.r ↔
+//   arrow.r →
+//   arrow.r.long ⟶
+      l // mode=command-line cursor=object(m1) keys=6 line="sym al"
+//   alpha α
+//   Alpha Α
+//   arrow.l ←
+//   arrow.l.r ↔
+//   arrow.r.long ⟶
+//   angle ∠
+//   parallel ∥
+//   integral.double ∬
+  <Tab> // mode=command-line cursor=object(m1) keys=7 line="sym alpha"
+// > alpha α
+//   Alpha Α
+//   arrow.l ←
+//   arrow.l.r ↔
+//   arrow.r.long ⟶
+//   angle ∠
+//   parallel ∥
+//   integral.double ∬
+   <CR> // mode=insert cursor=object(m1) keys=8 byte=7
+      + // mode=insert cursor=object(m1) keys=9 byte=8
+  <Esc> // mode=normal cursor=object(m1) keys=10
+lawh version=1
+math id=m1 x=0 y=0 "x alpha+"

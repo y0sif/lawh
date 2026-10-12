@@ -28,6 +28,9 @@ insta = "1.49.0"
 proptest = "1.11.0"
 # Grapheme clusters, for moving and deleting by user-perceived character inside text blocks.
 unicode-segmentation = "1.13.3"
+# Fuzzy matching of symbol names for `:sym`: Helix's matcher alone (not `nucleo`, which brings
+# threads and rayon). Pinned: the ranking `:sym` shows (and its tests) follows its scores.
+nucleo-matcher = "=0.3.1"
 # Typst is pinned exactly: lawh-math walks its frame types, which change between releases.
 typst = "=0.15.1"
 typst-layout = "=0.15.1"
