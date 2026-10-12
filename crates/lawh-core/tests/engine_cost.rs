@@ -132,6 +132,16 @@ fn rc_repeating(keys: &str, n: usize) -> String {
     format!("nmap Q {}Q\n", keys.repeat(n))
 }
 
+/// `W` runs `Q` 117 times, and `Q` shows jump labels, then types and takes back `m` 127 times:
+/// `m` starts the last two-letter labels of 499, so each looks at every label.
+fn picks_rc() -> String {
+    format!(
+        "nnoremap Q s{}\nnmap W {}\n",
+        "m<BS>".repeat(127),
+        "Q".repeat(117)
+    )
+}
+
 /// Runs `script` on `board` with `rc`, and how long it took.
 fn timed(rc: &str, board: Board, script: &str) -> (Run, Duration) {
     let started = Instant::now();
@@ -143,6 +153,7 @@ fn timed(rc: &str, board: Board, script: &str) -> (Run, Duration) {
 type Case = (&'static str, Box<dyn Fn() -> (Run, Duration)>);
 
 /// Each worst case.
+#[expect(clippy::too_many_lines, reason = "a table of cases, one a row")]
 fn cases() -> Vec<Case> {
     vec![
         (
@@ -221,6 +232,18 @@ fn cases() -> Vec<Case> {
                 r.feed("Q");
                 (r, started.elapsed())
             }),
+        ),
+        (
+            "sa x127, 500-rect column",
+            Box::new(|| timed(&rc_repeating("sa", 127), column(), "ggQ")),
+        ),
+        (
+            "sa x127, 500 texts",
+            Box::new(|| timed(&rc_repeating("sa", 127), texts(), "ggQ")),
+        ),
+        (
+            "(s then 127 m<BS>) x117, 500-rect column",
+            Box::new(|| timed(&picks_rc(), column(), "ggW")),
         ),
         (
             "lawhrc of 1 MiB, map and unmap at the front of 999 mappings",
@@ -346,6 +369,52 @@ fn a_mapping_of_size_keys_stops_within_the_work_budget() {
     assert_eq!(sizes(&r), vec![first; 500]);
     assert_eq!(r.engine.mode(), lawh_core::Mode::Visual);
     assert_stopped(&mut r, elapsed);
+}
+
+#[test]
+fn a_mapping_of_jump_labels_stops_within_the_work_budget() {
+    // Each `s` measures the board, puts it in reading order and labels 499 objects, and `a`
+    // goes to the nearest: about 80 rounds fit over a board of text.
+    let (mut r, elapsed) = timed(&rc_repeating("sa", 127), texts(), "ggQ");
+    assert!(matches!(r.engine.cursor(), Cursor::Object(_)));
+    assert_eq!(r.engine.jump_labels(), None);
+    assert_stopped(&mut r, elapsed);
+    // Keys typed while labels show look through every label: a mapping that types and takes
+    // back a first letter, over and over, runs out of work too, and the labels end.
+    let (mut r, elapsed) = timed(&picks_rc(), column(), "ggW");
+    assert_eq!(r.engine.jump_labels(), None);
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("r0")));
+    assert_stopped(&mut r, elapsed);
+}
+
+#[test]
+fn jump_labels_on_a_full_board_fit_in_the_work_budget() {
+    // 499 labels over a board of text, and the farthest picked: `s` costs about 1% of the
+    // budget.
+    let mut r = run(texts(), "gg");
+    r.feed("s");
+    assert_eq!(message(&r), None);
+    let work = r.engine.key_work();
+    assert!(work <= MAX_KEY_WORK / 50, "{work}");
+    let (labels, typed) = r.engine.jump_labels().unwrap();
+    assert_eq!((labels.len(), typed), (499, ""));
+    let last = labels.last().unwrap().clone();
+    assert_eq!(last.id, id("t499"));
+    for c in last.text.chars() {
+        r.feed(&c.to_string());
+        assert!(r.engine.key_work() <= MAX_KEY_WORK / 1000);
+    }
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("t499")));
+    // In Visual mode and after `d`, the jump measures the board once more, or takes one object.
+    let mut r = run(texts(), "ggvs");
+    assert!(r.engine.key_work() <= MAX_KEY_WORK / 50);
+    r.feed(&last.text);
+    assert_eq!(r.engine.selection().len(), 500);
+    assert!(r.engine.key_work() <= MAX_KEY_WORK / 50);
+    let mut r = run(texts(), "ggds");
+    r.feed(&last.text);
+    assert_eq!(r.engine.board().len(), 499);
+    assert!(r.engine.key_work() <= MAX_KEY_WORK / 1000);
 }
 
 #[test]
@@ -765,10 +834,29 @@ fn work_unit_costs() {
             "gg<CR>".into(),
             "10000E",
         ),
+        ("s over 500 texts", texts(), "gg".into(), "s"),
+        ("s over 500 rectangles", column(), "gg".into(), "s"),
+        (
+            "P: s, then 127 m<BS> among 499 labels",
+            column(),
+            "gg".into(),
+            "P",
+        ),
+        (
+            "a key that starts no label among 499",
+            column(),
+            "ggs".into(),
+            "Z",
+        ),
     ];
     let ls = rc_repeating("l", 255);
+    let picks = format!("nnoremap P s{}\n", "m<BS>".repeat(127));
     for (name, board, setup, key) in cases {
-        let rc = if key == "Q" { ls.as_str() } else { "" };
+        let rc = match key {
+            "Q" => ls.as_str(),
+            "P" => picks.as_str(),
+            _ => "",
+        };
         let mut r = run_with_rc(rc, board, &setup);
         let started = Instant::now();
         r.feed(key);

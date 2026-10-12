@@ -3,6 +3,7 @@
 
 use kurbo::Rect;
 
+use super::jump::{JUMP_KEYS, Jump};
 use super::keymap::too_many_keys;
 use super::motion::{Direction, ObjectMotion, Origin, path};
 use super::ops::Target;
@@ -97,6 +98,8 @@ enum Normal {
     Text(Entry),
     /// `<C-a>` (larger), `<C-x>` (smaller): the size of a text or math block.
     Size(Grow),
+    /// `s`: jump labels.
+    Jump,
 }
 
 /// Normal-mode commands by the keys that run them, after any count.
@@ -119,6 +122,7 @@ const NORMAL: &[(&[Key], Normal)] = &[
     (&[Key::named(KeyCode::Enter)], Normal::Text(Entry::Block)),
     (&[Key::ctrl('a')], Normal::Size(Grow::Larger)),
     (&[Key::ctrl('x')], Normal::Size(Grow::Smaller)),
+    (JUMP_KEYS, Normal::Jump),
 ];
 
 /// What some keys make in a key table.
@@ -167,6 +171,15 @@ pub(super) fn lookup<T: Copy>(table: &[(&[Key], T)], keys: &[Key]) -> Lookup<T> 
     } else {
         Lookup::Nothing
     }
+}
+
+/// What the keys after an operator make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterOperator {
+    /// The operator acts on these objects.
+    Act(Target),
+    /// `s`: jump labels, for the operator to act on the object of the label typed.
+    Labels,
 }
 
 /// What a whole Normal command is.
@@ -301,15 +314,16 @@ impl Engine {
         }
     }
 
-    /// A key after an operator: its own keys again, a count or an object motion run it; any
-    /// other key cancels it, grid motions included (they have no objects to act on).
+    /// A key after an operator: its own keys again, a count or an object motion run it, and
+    /// `s` shows jump labels for it (counts ignored); any other key cancels it, grid motions
+    /// included (they have no objects to act on).
     fn operator_key(&mut self, measure: &mut dyn Measure) -> Vec<Effect> {
         let Some(op) = &self.pending.operator else {
             return Vec::new();
         };
         let keys = &self.pending.keys;
         let target = if *keys == op.keys {
-            Lookup::Found(Target::Objects)
+            Lookup::Found(AfterOperator::Act(Target::Objects))
         } else {
             let own = if op.keys.len() > keys.len() && op.keys.starts_with(keys) {
                 Lookup::Prefix
@@ -317,16 +331,26 @@ impl Engine {
                 Lookup::Nothing
             };
             let motion = match lookup(MOTIONS, keys) {
-                Lookup::Found(Motion::Object(motion)) => Lookup::Found(Target::Motion(motion)),
+                Lookup::Found(Motion::Object(motion)) => {
+                    Lookup::Found(AfterOperator::Act(Target::Motion(motion)))
+                }
                 Lookup::Found(Motion::Grid { .. }) | Lookup::Nothing => Lookup::Nothing,
                 Lookup::Prefix => Lookup::Prefix,
             };
-            Lookup::first([motion, own])
+            let jump = lookup(&[(JUMP_KEYS, AfterOperator::Labels)], keys);
+            Lookup::first([motion, own, jump])
         };
         match target {
             Lookup::Prefix => {}
             Lookup::Nothing => self.pending = Pending::default(),
-            Lookup::Found(target) => {
+            Lookup::Found(AfterOperator::Labels) => {
+                let pending = std::mem::take(&mut self.pending);
+                if let Some(op) = pending.operator {
+                    let keys = [op.keys, pending.keys].concat();
+                    self.show_labels(Jump::Remote(op.operator), &keys, measure);
+                }
+            }
+            Lookup::Found(AfterOperator::Act(target)) => {
                 let pending = std::mem::take(&mut self.pending);
                 let Some(op) = pending.operator else {
                     return Vec::new();
@@ -376,6 +400,7 @@ impl Engine {
                     self.repeat.finish(count);
                 }
             }
+            Normal::Jump => self.show_labels(Jump::Move, JUMP_KEYS, measure),
         }
         Vec::new()
     }
@@ -457,14 +482,14 @@ impl Engine {
     }
 
     /// Puts the cursor on the first object in reading order, as `gg` does, when the board has
-    /// one and the engine is in Normal mode with no keys pending. It makes no undo step and
-    /// leaves `.` as it was.
+    /// one and the engine is in Normal mode with no keys pending and no jump labels showing. It
+    /// makes no undo step and leaves `.` as it was.
     ///
     /// For the app when it opens a board: the cursor starts at the grid's origin, which may be
     /// far from the board's objects.
     pub fn go_first(&mut self, measure: &mut dyn Measure) {
         self.reset_work();
-        if self.mode == Mode::Normal && self.pending.is_empty() {
+        if self.mode == Mode::Normal && self.pending.is_empty() && self.labels.is_none() {
             self.motion(Motion::Object(ObjectMotion::First), 1, measure);
         }
     }

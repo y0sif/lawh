@@ -1,9 +1,11 @@
 //! Visual mode: `v` spans a rectangle from where it was pressed to the cursor and selects the
 //! objects inside it, for `d`, `x` and `y`, the size keys `<C-a>` and `<C-x>`, and `:si` (`:`
-//! keeps the selection for the command line it opens).
+//! keeps the selection for the command line it opens). `s` shows jump labels, and typing one
+//! moves the cursor, stretching the rectangle (see `jump.rs`).
 
 use kurbo::Rect;
 
+use super::jump::{JUMP_KEYS, Jump};
 use super::normal::{Lookup, MOTIONS, Motion, Operator, Pending, lookup};
 use super::size::Grow;
 use super::{Cursor, Effect, Engine, Measure, Mode, bounds};
@@ -21,6 +23,8 @@ enum Visual {
     CommandLine,
     /// `<C-a>`, `<C-x>`: resize the text and math selected; Visual mode stays.
     Size(Grow),
+    /// `s`: jump labels, to move the cursor to the object of the label typed.
+    Jump,
 }
 
 /// Visual-mode commands by their keys, after any count. Motions come from [`MOTIONS`].
@@ -33,6 +37,7 @@ const VISUAL: &[(&[Key], Visual)] = &[
     (&[Key::char(':')], Visual::CommandLine),
     (&[Key::ctrl('a')], Visual::Size(Grow::Larger)),
     (&[Key::ctrl('x')], Visual::Size(Grow::Smaller)),
+    (JUMP_KEYS, Visual::Jump),
 ];
 
 /// What some keys make in Visual mode.
@@ -103,7 +108,7 @@ impl Engine {
     /// Selects the objects whose bounds lie inside the Visual rectangle, edges included. It
     /// measures the board: the caller has counted that work already
     /// ([`Engine::layout_work`]), so the selection is made even once the key has run out.
-    fn select(&mut self, measure: &mut dyn Measure) {
+    pub(super) fn select(&mut self, measure: &mut dyn Measure) {
         let layout = self.layout(measure);
         self.select_in(&layout, measure);
     }
@@ -163,6 +168,9 @@ impl Engine {
             Lookup::Found(Found::Command(Visual::Size(grow))) => {
                 let count = self.pending.count.unwrap_or(1);
                 self.visual_size_key(grow, count);
+            }
+            Lookup::Found(Found::Command(Visual::Jump)) => {
+                self.show_labels(Jump::Stretch, JUMP_KEYS, measure);
             }
         }
         self.pending = Pending::default();

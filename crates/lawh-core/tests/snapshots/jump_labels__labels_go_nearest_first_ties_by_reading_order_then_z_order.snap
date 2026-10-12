@@ -1,0 +1,22 @@
+---
+source: crates/lawh-core/tests/jump_labels.rs
+assertion_line: 122
+expression: snapshot(&r)
+---
+// mode=normal cursor=grid(0,0) keys=1 pending="s"
+// labels typed=""
+// a c1 0,-1
+// s r1 0,-1
+// d c2 -1,0
+// f c3 1,0
+// g c5 1,0
+// h c4 0,1
+// j t1 3,0
+lawh version=1
+circle id=c1 x=0 y=-1 r=0.25
+circle id=c2 x=-1 y=0 r=0.25
+circle id=c3 x=1 y=0 r=0.25
+circle id=c4 x=0 y=1 r=0.25
+circle id=c5 x=1 y=0 r=0.25
+text id=t1 x=3 y=0 "far"
+rect id=r1 x=0 y=-1 w=0.5 h=0.5

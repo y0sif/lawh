@@ -3,11 +3,13 @@
 //! `:se[t]` takes options as Vim does: `{option}={value}` (or `:`) sets one, `{option}?` or
 //! `{option}` alone shows its value, `{option}&` puts back its default, and `:set` alone shows
 //! them all. Several may follow one `:set`; a word starting with `"` ends the line (a comment).
-//! The options are `escape` (`board` or `block`), `leader` (one key in Vim notation), `size`
-//! (the size of new text and math blocks) and `timeoutlen` (`tm`, milliseconds).
+//! The options are `escape` (`board` or `block`), `jumplabels` (the characters of jump labels),
+//! `leader` (one key in Vim notation), `size` (the size of new text and math blocks) and
+//! `timeoutlen` (`tm`, milliseconds).
 
 use super::Engine;
 use super::command::CommandError;
+use super::jump::{LabelChars, MAX_LABEL_CHARS, MIN_LABEL_CHARS};
 use crate::board::{MAX_TEXT_SIZE, MIN_TEXT_SIZE, is_valid_text_size};
 use crate::key::{Key, parse_keys};
 
@@ -44,6 +46,9 @@ impl Escape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub escape: Escape,
+    /// The characters jump labels are made of, nearest object first (see [`LabelChars`]):
+    /// [`DEFAULT_JUMP_LABELS`](super::DEFAULT_JUMP_LABELS) by default.
+    pub jumplabels: LabelChars,
     /// The key `<Leader>` stands for in mappings, when a mapping is made: `\` by default.
     pub leader: Key,
     /// How long keys that start a longer mapping wait for the rest, in milliseconds (see
@@ -73,6 +78,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             escape: Escape::Board,
+            jumplabels: LabelChars::default(),
             leader: Key::char('\\'),
             timeoutlen: 1000,
             size_hundredths: DEFAULT_SIZE_HUNDREDTHS,
@@ -84,6 +90,7 @@ impl Default for Settings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionName {
     Escape,
+    JumpLabels,
     Leader,
     Size,
     TimeoutLen,
@@ -91,12 +98,19 @@ pub enum OptionName {
 
 impl OptionName {
     /// Every option, in the order `:set` alone shows them.
-    const ALL: [Self; 4] = [Self::Escape, Self::Leader, Self::Size, Self::TimeoutLen];
+    const ALL: [Self; 5] = [
+        Self::Escape,
+        Self::JumpLabels,
+        Self::Leader,
+        Self::Size,
+        Self::TimeoutLen,
+    ];
 
     /// The option's name in `:set`.
     pub const fn name(self) -> &'static str {
         match self {
             Self::Escape => "escape",
+            Self::JumpLabels => "jumplabels",
             Self::Leader => "leader",
             Self::Size => "size",
             Self::TimeoutLen => "timeoutlen",
@@ -107,6 +121,7 @@ impl OptionName {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             "escape" => Some(Self::Escape),
+            "jumplabels" => Some(Self::JumpLabels),
             "leader" => Some(Self::Leader),
             "size" => Some(Self::Size),
             "timeoutlen" | "tm" => Some(Self::TimeoutLen),
@@ -117,8 +132,13 @@ impl OptionName {
 
 /// A value for an option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "a value stays `Copy` and `Eq`, so `jumplabels` is a fixed array; `:set` makes few"
+)]
 pub enum OptionValue {
     Escape(Escape),
+    JumpLabels(LabelChars),
     Leader(Key),
     /// The size of new blocks in hundredths (see [`Settings::size_hundredths`]).
     Size(u32),
@@ -127,6 +147,10 @@ pub enum OptionValue {
 
 /// One argument of `:set`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "an `OptionValue` stays `Copy`, so `jumplabels` is a fixed array; `:set` makes few"
+)]
 pub enum SetArg {
     /// `{option}?` or `{option}`: show its value.
     Show(OptionName),
@@ -163,6 +187,15 @@ pub(super) fn parse_set_arg(word: &str) -> Result<SetArg, CommandError> {
             "board" => OptionValue::Escape(Escape::Board),
             "block" => OptionValue::Escape(Escape::Block),
             _ => return Err(bad("`board` or `block`".to_owned())),
+        },
+        OptionName::JumpLabels => match LabelChars::new(value) {
+            Some(chars) => OptionValue::JumpLabels(chars),
+            None => {
+                return Err(bad(format!(
+                    "{MIN_LABEL_CHARS} to {MAX_LABEL_CHARS} different printable characters, \
+                     such as `asdfghjkl`"
+                )));
+            }
         },
         OptionName::Leader => match parse_keys(value).as_deref() {
             Ok([key]) => OptionValue::Leader(*key),
@@ -229,6 +262,7 @@ impl Settings {
     fn show(&self, option: OptionName) -> String {
         let value = match option {
             OptionName::Escape => self.escape.name().to_owned(),
+            OptionName::JumpLabels => self.jumplabels.to_string(),
             OptionName::Leader => self.leader.to_string(),
             OptionName::Size => show_hundredths(self.size_hundredths),
             OptionName::TimeoutLen => self.timeoutlen.to_string(),
@@ -240,6 +274,7 @@ impl Settings {
         let default = Self::default();
         match option {
             OptionName::Escape => self.escape = default.escape,
+            OptionName::JumpLabels => self.jumplabels = default.jumplabels,
             OptionName::Leader => self.leader = default.leader,
             OptionName::Size => self.size_hundredths = default.size_hundredths,
             OptionName::TimeoutLen => self.timeoutlen = default.timeoutlen,
@@ -249,6 +284,7 @@ impl Settings {
     fn assign(&mut self, value: OptionValue) {
         match value {
             OptionValue::Escape(escape) => self.escape = escape,
+            OptionValue::JumpLabels(chars) => self.jumplabels = chars,
             OptionValue::Leader(key) => self.leader = key,
             OptionValue::Size(h) => self.size_hundredths = h,
             OptionValue::TimeoutLen(ms) => self.timeoutlen = ms,

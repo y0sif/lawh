@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/jump_labels.rs
+assertion_line: 326
+expression: snapshot(&r)
+---
+// mode=normal cursor=object(c1) keys=7 pending=""
+lawh version=1
+circle id=c1 x=2 y=0 r=0.5
+circle id=c3 x=9 y=0 r=0.5

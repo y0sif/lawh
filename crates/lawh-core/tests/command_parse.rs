@@ -5,8 +5,8 @@
 #![cfg(test)]
 
 use lawh_core::engine::{
-    Command, CommandError, End, Escape, MAX_MAP_KEYS, MAX_TIMEOUTLEN, MapKey, MapMode, OptionName,
-    OptionValue, Segment, SetArg, SizeChange, parse_command,
+    Command, CommandError, End, Escape, LabelChars, MAX_LABEL_CHARS, MAX_MAP_KEYS, MAX_TIMEOUTLEN,
+    MapKey, MapMode, OptionName, OptionValue, Segment, SetArg, SizeChange, parse_command,
 };
 use lawh_core::{Key, parse_keys};
 
@@ -597,7 +597,7 @@ fn keys_alone_show_mappings_and_unmap_takes_keys() {
 
 #[test]
 fn set_takes_options() {
-    use OptionName::{Escape as EscapeOption, Leader, Size, TimeoutLen};
+    use OptionName::{Escape as EscapeOption, JumpLabels, Leader, Size, TimeoutLen};
     let set = |line: &str| match parsed(line) {
         Command::Set(args) => args,
         other => panic!("{other:?}"),
@@ -645,6 +645,17 @@ fn set_takes_options() {
             SetArg::Assign(OptionValue::Size(200)),
             SetArg::Show(Size),
             SetArg::Reset(Size),
+        ]
+    );
+    // Jump labels: the characters as typed, `=` and `"` inside a word too.
+    let chars = |s: &str| SetArg::Assign(OptionValue::JumpLabels(LabelChars::new(s).unwrap()));
+    assert_eq!(
+        set("set jumplabels=;lkj jumplabels:a=\"b jumplabels? jumplabels&"),
+        vec![
+            chars(";lkj"),
+            chars("a=\"b"),
+            SetArg::Show(JumpLabels),
+            SetArg::Reset(JumpLabels),
         ]
     );
 }
@@ -775,6 +786,23 @@ fn set_errors_say_what_is_wrong() {
         ),
     ];
     assert_messages(&cases);
+    // Jump labels: too few characters, too many, or one twice.
+    let letters: String = ('a'..='z').chain('A'..='Z').collect();
+    assert_eq!(letters.chars().count(), MAX_LABEL_CHARS);
+    assert!(matches!(
+        parse_command(&format!("set jumplabels={letters}")),
+        Ok(Command::Set(_))
+    ));
+    for value in ["", "a", "aa", "abcb", &format!("{letters}1")] {
+        assert_eq!(
+            error(&format!("set jumplabels={value}")),
+            format!(
+                "bad value `{value}` for `jumplabels`: it takes 2 to 52 different printable \
+                 characters, such as `asdfghjkl`"
+            ),
+            "{value}"
+        );
+    }
     // Sizes out of range, with more than two decimals, or not numbers.
     for value in [
         "0.2",

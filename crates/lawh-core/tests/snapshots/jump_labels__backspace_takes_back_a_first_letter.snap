@@ -1,0 +1,62 @@
+---
+source: crates/lawh-core/tests/jump_labels.rs
+assertion_line: 402
+expression: snapshot(&r)
+---
+// mode=normal cursor=grid(0,0) keys=2 pending="sm"
+// labels typed="m"
+// a r1 1,0
+// s r2 2,0
+// d r3 3,0
+// f r4 4,0
+// g r5 5,0
+// h r6 6,0
+// j r7 7,0
+// k r8 8,0
+// l r9 9,0
+// q r10 10,0
+// w r11 11,0
+// e r12 12,0
+// r r13 13,0
+// t r14 14,0
+// y r15 15,0
+// u r16 16,0
+// i r17 17,0
+// o r18 18,0
+// p r19 19,0
+// z r20 20,0
+// x r21 21,0
+// c r22 22,0
+// v r23 23,0
+// b r24 24,0
+// n r25 25,0
+// ma r26 26,0
+// ms r27 27,0
+lawh version=1
+rect id=r1 x=1 y=0 w=0.5 h=0.5
+rect id=r2 x=2 y=0 w=0.5 h=0.5
+rect id=r3 x=3 y=0 w=0.5 h=0.5
+rect id=r4 x=4 y=0 w=0.5 h=0.5
+rect id=r5 x=5 y=0 w=0.5 h=0.5
+rect id=r6 x=6 y=0 w=0.5 h=0.5
+rect id=r7 x=7 y=0 w=0.5 h=0.5
+rect id=r8 x=8 y=0 w=0.5 h=0.5
+rect id=r9 x=9 y=0 w=0.5 h=0.5
+rect id=r10 x=10 y=0 w=0.5 h=0.5
+rect id=r11 x=11 y=0 w=0.5 h=0.5
+rect id=r12 x=12 y=0 w=0.5 h=0.5
+rect id=r13 x=13 y=0 w=0.5 h=0.5
+rect id=r14 x=14 y=0 w=0.5 h=0.5
+rect id=r15 x=15 y=0 w=0.5 h=0.5
+rect id=r16 x=16 y=0 w=0.5 h=0.5
+rect id=r17 x=17 y=0 w=0.5 h=0.5
+rect id=r18 x=18 y=0 w=0.5 h=0.5
+rect id=r19 x=19 y=0 w=0.5 h=0.5
+rect id=r20 x=20 y=0 w=0.5 h=0.5
+rect id=r21 x=21 y=0 w=0.5 h=0.5
+rect id=r22 x=22 y=0 w=0.5 h=0.5
+rect id=r23 x=23 y=0 w=0.5 h=0.5
+rect id=r24 x=24 y=0 w=0.5 h=0.5
+rect id=r25 x=25 y=0 w=0.5 h=0.5
+rect id=r26 x=26 y=0 w=0.5 h=0.5
+rect id=r27 x=27 y=0 w=0.5 h=0.5

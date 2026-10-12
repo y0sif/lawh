@@ -6,9 +6,9 @@
 //! 500 objects for 7.6 s in release, and one that runs `$10000h` on a line of 5,000 flag halves
 //! for 227 s. So commands count the work they do as they go, each kind of work at what it costs
 //! (the `*_WORK` weights below): objects measured, put in reading order, looked at by
-//! `H J K L` and the place rule, taken, put, resized, and edited by undo and redo, fresh ids
-//! looked for, the bytes of `:` lines run, and the bytes of a text block that a key copies,
-//! scans, splits into graphemes or walks.
+//! `H J K L` and the place rule, taken, put, resized, labelled for a jump, and edited by undo
+//! and redo, jump labels looked through, fresh ids looked for, the bytes of `:` lines run, and
+//! the bytes of a text block that a key copies, scans, splits into graphemes or walks.
 //!
 //! Counts never multiply a command that makes no progress: motions stop where they cannot go
 //! on, undo and redo at the ends of the history, a put that does not fit is refused whole (before
@@ -37,16 +37,18 @@ use super::text_motion::{Line, indicators_before, line_at};
 /// Each weight below is what one item of its kind of work took in a debug build, measured with
 /// `work_unit_costs` in `tests/engine_cost.rs` (Linux `x86_64`, 2026-10-12, measuring with
 /// [`FixedMeasure`](super::FixedMeasure)). Over its cases a unit took 0.1 to 1.1 ns in debug
-/// and at most 0.1 ns in release (0.5 ns for typing, which is copying, and 0.2 ns for resizing
-/// text), so a key that runs out takes about 0.1 s in debug and 10 ms in release (50 ms if it
-/// was typing, 20 ms if it was resizing a board of text). Keys that do no work are bounded by
+/// and at most 0.1 ns in release (0.5 ns for typing, which is copying, 0.2 ns for resizing
+/// text and looking through jump labels, 0.3 ns for making them), so a key that runs out takes
+/// about 0.1 s in debug and 10 ms in release (50 ms if it was typing, 15 to 22 ms if it was
+/// resizing a board of text or showing jump labels). Keys that do no work are bounded by
 /// [`MAX_EXPANDED_KEYS`](super::MAX_EXPANDED_KEYS) instead: 30,000 of them take 36 ms in debug.
 ///
 /// The costliest single commands fit: `10000J` down a column of 500 objects (62.5 million units,
 /// 51 ms in debug and 1.8 ms in release), `.` of an insert of 5,000 characters (25 million) and
 /// `10000ia<Esc>` up to [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS), `dG`, `yG` and `p` of a
 /// full board (3 million at most), and `10000<C-a>` in Visual mode over a full board of text
-/// (2.3 million, 2.2 ms in debug). An undo or redo step of a whole board costs 1 to 1.5 million,
+/// (2.3 million, 2.2 ms in debug), and `s` over a full board of text (1.3 million, 1.1 ms in
+/// debug and 0.14 ms in release). An undo or redo step of a whole board costs 1 to 1.5 million,
 /// so `10000u` over a history of such steps stops after about 80 of them (60 ms in debug, 7 ms
 /// in release); the next key goes on.
 pub const MAX_KEY_WORK: usize = 100_000_000;
@@ -98,6 +100,13 @@ pub(super) const STEP_WORK: usize = 1_300;
 /// included). A mapping that resizes until the key runs out takes 92 to 115 ms in debug, 12 to
 /// 19 ms in release.
 pub(super) const SIZE_WORK: usize = 4_500;
+/// Sorting one object in view by its distance and making its jump label (`s`), on top of
+/// measuring the board and putting it in reading order: `s` over 500 rectangles took 0.25 ms
+/// more than `w` (0.43 ms against 0.18), for 499 labels.
+pub(super) const LABEL_WORK: usize = 500;
+/// Looking at one jump label for a key typed while labels show: 127 times `m<BS>` among 499
+/// labels, every label looked at each time, took 1.27 ms.
+pub(super) const PICK_WORK: usize = 20;
 
 /// The message when a key runs out of work.
 const TOO_MUCH_WORK: &str = "that key did too much work; the rest of it was dropped";

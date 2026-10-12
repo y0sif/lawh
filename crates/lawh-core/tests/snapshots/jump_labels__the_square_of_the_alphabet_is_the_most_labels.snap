@@ -1,0 +1,27 @@
+---
+source: crates/lawh-core/tests/jump_labels.rs
+assertion_line: 176
+expression: snapshot(&r)
+---
+// mode=normal cursor=grid(0,0) keys=21 message="1 object in view has no label" pending="s"
+// labels typed=""
+// aa r1 1,0
+// ab r2 2,0
+// ac r3 3,0
+// ba r4 4,0
+// bb r5 5,0
+// bc r6 6,0
+// ca r7 7,0
+// cb r8 8,0
+// cc r9 9,0
+lawh version=1
+rect id=r1 x=1 y=0 w=0.5 h=0.5
+rect id=r2 x=2 y=0 w=0.5 h=0.5
+rect id=r3 x=3 y=0 w=0.5 h=0.5
+rect id=r4 x=4 y=0 w=0.5 h=0.5
+rect id=r5 x=5 y=0 w=0.5 h=0.5
+rect id=r6 x=6 y=0 w=0.5 h=0.5
+rect id=r7 x=7 y=0 w=0.5 h=0.5
+rect id=r8 x=8 y=0 w=0.5 h=0.5
+rect id=r9 x=9 y=0 w=0.5 h=0.5
+rect id=r10 x=10 y=0 w=0.5 h=0.5

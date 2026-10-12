@@ -9,8 +9,9 @@
 //! The cursor is a grid point or an object (see [`Cursor`]). Normal mode has grid motions
 //! (`h j k l`), object motions (`w b`, `H J K L`, `gg G`), the operators `d` and `y` with `dd`,
 //! `yy` and `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`,
-//! `<C-r>`), the size keys (`<C-a>`, `<C-x>`), all with counts, and `:` for the command line
-//! (shapes, text, math, sizes, write and quit).
+//! `<C-r>`), the size keys (`<C-a>`, `<C-x>`), all with counts, jump labels (`s`, see
+//! [`Engine::jump_labels`]) and `:` for the command line (shapes, text, math, sizes, write and
+//! quit).
 //!
 //! Text and math objects are text blocks: `i a I A o O` type into one in Insert mode, `<CR>`
 //! enters one in block-Normal mode, Vim's Normal mode inside the text (see
@@ -33,6 +34,7 @@ mod command;
 mod cursor;
 mod exec;
 mod insert;
+mod jump;
 mod keymap;
 mod measure;
 mod motion;
@@ -58,6 +60,9 @@ pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, SizeChange, parse_command};
 pub use cursor::{Cursor, anchor, round3};
 pub use exec::{MAX_PENDING_WRITES, MAX_WRITES_PER_KEY};
+pub use jump::{
+    DEFAULT_JUMP_LABELS, JumpLabel, LabelChars, MAX_LABEL_CHARS, MAX_LABEL_KEYS, MIN_LABEL_CHARS,
+};
 pub use keymap::{
     MAX_EXPANDED_KEYS, MAX_MAP_DEPTH, MAX_MAP_KEYS, MAX_MAPS, MAX_PENDING_KEYS, MapKey, MapMode,
 };
@@ -74,6 +79,7 @@ pub use work::MAX_KEY_WORK;
 
 use self::cmdline::CommandLine;
 use self::exec::PendingWrite;
+use self::jump::Labels;
 use self::keymap::Keymap;
 use self::normal::Pending;
 use self::register::Register;
@@ -187,6 +193,10 @@ pub struct Engine {
     keymap: Keymap,
     /// The work done for the key being run (see [`MAX_KEY_WORK`]).
     work: Work,
+    /// Jump labels showing after `s`, in Normal or Visual mode; every key goes to them first.
+    labels: Option<Labels>,
+    /// The part of the board in view, for jump labels (see [`Engine::set_view`]).
+    view: Option<Rect>,
 }
 
 impl Engine {
@@ -215,6 +225,8 @@ impl Engine {
             settings: Settings::default(),
             keymap: Keymap::default(),
             work: Work::default(),
+            labels: None,
+            view: None,
         }
     }
 
@@ -252,10 +264,13 @@ impl Engine {
         self.type_key(key, measure)
     }
 
-    /// Runs one key in the current mode, after mappings. `.` replays its keys through here, so
-    /// mappings do not apply to them again.
+    /// Runs one key in the current mode, after mappings, or picks a jump label with it while
+    /// labels show. `.` replays its keys through here, so mappings do not apply to them again.
     fn dispatch(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         let key = unshifted(key);
+        if self.labels.is_some() {
+            return self.label_key(key, measure);
+        }
         match self.mode {
             Mode::Normal => self.normal_key(key, measure),
             Mode::Visual => self.visual_key(key, measure),
@@ -265,16 +280,17 @@ impl Engine {
         }
     }
 
-    /// A mouse click at board point `at`, on object `hit` if any. It ends an Insert session
-    /// (as one undo step), block-Normal mode, Visual mode and the command line, drops pending
-    /// keys (those waiting for a mapping too), and puts the cursor on `hit`, or else on the grid
-    /// point nearest `at` (whole units). A point that is not finite leaves the cursor where it
-    /// is.
+    /// A mouse click at board point `at`, on object `hit` if any. It ends jump labels, an
+    /// Insert session (as one undo step), block-Normal mode, Visual mode and the command line,
+    /// drops pending keys (those waiting for a mapping too), and puts the cursor on `hit`, or
+    /// else on the grid point nearest `at` (whole units). A point that is not finite leaves the
+    /// cursor where it is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
         self.reset_work();
         if self.session.is_some() {
             self.end_session(false, measure);
         }
+        self.labels = None;
         self.block = None;
         self.pending = Pending::default();
         self.keymap.flush();
@@ -314,8 +330,12 @@ impl Engine {
 
     /// Keys typed but not yet run, in Vim notation (`3`, `2d3`), for the status line: a
     /// command's keys so far, then keys waiting for a longer mapping (`2d<Space>`). A count past
-    /// [`MAX_COUNT`] shows as `MAX_COUNT`.
+    /// [`MAX_COUNT`] shows as `MAX_COUNT`. While jump labels show, the keys that showed them and
+    /// the first character of a label typed since, counts left out (`s`, `ds`, `dsk`).
     pub fn pending(&self) -> String {
+        if let Some(labels) = &self.labels {
+            return labels.pending();
+        }
         self.pending.display() + &self.keymap.waiting()
     }
 

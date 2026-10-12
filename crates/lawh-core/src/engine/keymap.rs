@@ -22,8 +22,8 @@
 //! first one when what a mapping maps to starts with its own keys (Vim's rule, so `:nmap l lw`
 //! moves right, then onto the next object). `<Leader>` in a mapping is the `leader` setting at
 //! the time the mapping is made. As in Vim, a `0` that goes on a count and the key after `@`
-//! are not mapped, and `.` replays the keys a change ran after mapping, without mapping them
-//! again.
+//! are not mapped, nor are keys typed while jump labels show (as the key after `f`, `t` or `r`
+//! in Vim), and `.` replays the keys a change ran after mapping, without mapping them again.
 
 use std::collections::VecDeque;
 
@@ -510,8 +510,13 @@ impl Engine {
     }
 
     /// Keys Vim does not map where they come: a `0` that goes on a count (`10j`), and the key
-    /// after `@`, which names what to repeat.
+    /// after `@`, which names what to repeat. Keys typed while jump labels show are not mapped
+    /// either, as the key after Vim's `f`, `t` or `r`: they pick a label, so a label `;` works
+    /// under `noremap ; l`, and they never wait for a longer mapping.
     fn unmapped(&self, key: Key) -> bool {
+        if self.labels.is_some() {
+            return true;
+        }
         let normal = matches!(self.mode, Mode::Normal | Mode::Visual | Mode::BlockNormal);
         let count_zero =
             key == Key::char('0') && self.pending.count.is_some() && self.pending.keys.is_empty();
