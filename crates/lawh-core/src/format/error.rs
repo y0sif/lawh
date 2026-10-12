@@ -3,7 +3,7 @@
 use super::{MAX_COMMENT_DEPTH, MAX_ENTRIES, MAX_FILE_BYTES, MAX_STRING_BYTES};
 use crate::board::{
     MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_ID_CHARS, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
-    MAX_TEXT_LINES,
+    MAX_TEXT_LINES, MAX_TEXT_SIZE, MIN_TEXT_SIZE,
 };
 
 /// Why a `.lawh` file could not be read.
@@ -197,6 +197,15 @@ pub enum FormatError {
         property: String,
     },
 
+    /// The `size` of a `text` or `math` node is below [`MIN_TEXT_SIZE`] or above
+    /// [`MAX_TEXT_SIZE`].
+    #[error(
+        "{line}:{column}: property `size` must be between {min} and {max}",
+        min = MIN_TEXT_SIZE,
+        max = MAX_TEXT_SIZE
+    )]
+    TextSizeOutOfRange { line: usize, column: usize },
+
     /// The content of a `text` or `math` node is longer than [`MAX_TEXT_CHARS`] characters.
     #[error("{line}:{column}: the content of `{kind}` is longer than {MAX_TEXT_CHARS} characters")]
     TextTooLong {
@@ -262,6 +271,7 @@ impl FormatError {
             | Self::TooManyObjects { line, column }
             | Self::CoordinateOutOfRange { line, column, .. }
             | Self::InvalidSize { line, column, .. }
+            | Self::TextSizeOutOfRange { line, column }
             | Self::TextTooLong { line, column, .. }
             | Self::TooManyLines { line, column, .. }
             | Self::TooMuchText { line, column } => (*line, *column),

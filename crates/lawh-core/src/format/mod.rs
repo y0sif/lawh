@@ -3,6 +3,7 @@
 //! ```text
 //! lawh version=1
 //! text id=t1 x=0 y=-5 "Area of a circle"
+//! text id=t2 x=0 y=-8 size=2 "A title"
 //! math id=m1 x=5 y=0 "A = pi r^2"
 //! circle id=c1 x=0 y=0 r=3
 //! ellipse id=e1 x=0 y=0 rx=3 ry=2
@@ -10,6 +11,10 @@
 //! line id=l1 x1=0 y1=0 x2=3 y2=0
 //! arrow id=a1 x1=0 y1=0 x2=3 y2=0
 //! ```
+//!
+//! `text` and `math` take an optional `size` (a multiplier on the text height, see
+//! [`DEFAULT_TEXT_SIZE`](crate::board::DEFAULT_TEXT_SIZE)), which the writer gives only when it
+//! is not 1.
 //!
 //! Hand-written files may use flat KDL v2 syntax: comments, slashdashes, quoted, raw or
 //! multi-line strings, properties in any order. Writing is done here too, in one fixed shape per
@@ -23,6 +28,7 @@
 //! [`MAX_ENTRIES`] entries, strings and numbers to [`MAX_STRING_BYTES`] bytes of the file, and
 //! numbers, texts, ids and the object count to the board's limits
 //! ([`MAX_COORDINATE`](crate::board::MAX_COORDINATE), [`MAX_SIZE`](crate::board::MAX_SIZE),
+//! [`MIN_TEXT_SIZE`](crate::board::MIN_TEXT_SIZE), [`MAX_TEXT_SIZE`](crate::board::MAX_TEXT_SIZE),
 //! [`MAX_TEXT_CHARS`](crate::board::MAX_TEXT_CHARS),
 //! [`MAX_TEXT_LINES`](crate::board::MAX_TEXT_LINES),
 //! [`MAX_BOARD_TEXT_CHARS`](crate::board::MAX_BOARD_TEXT_CHARS),
@@ -36,9 +42,10 @@ mod write;
 
 /// Largest `.lawh` file [`from_lawh`] reads, in bytes (1 MiB).
 ///
-/// The largest board the caps allow writes 415,551 bytes: 40,000 characters of text the writer
-/// escapes as `\u{200B}`, 492 arrows with 25-character coordinates, and ids of 64 digits, which
-/// the writer quotes. The limit leaves room for hand-written comments on top of that.
+/// The largest board the caps allow writes 415,751 bytes: 40,000 characters of text the writer
+/// escapes as `\u{200B}`, in 8 texts with 19-character sizes, 492 arrows with 25-character
+/// coordinates, and ids of 64 digits, which the writer quotes (`largest_board` in
+/// `tests/format_errors.rs`). The limit leaves room for hand-written comments on top of that.
 ///
 /// Reading costs what the file holds up to the first cap it passes. Measured with
 /// `read_time_at_the_size_limit` in `tests/format_errors.rs` (Linux `x86_64`, release, a laptop
@@ -69,8 +76,8 @@ pub const MAX_FILE_BYTES: usize = 1024 * 1024;
 pub const MAX_COMMENT_DEPTH: usize = 16;
 
 /// Most entries (properties and arguments) a node in a `.lawh` file has; reading stops at the
-/// next one. No node takes more: the header takes 1, an ellipse, rect, line or arrow 5.
-/// Slashdashed entries are not counted.
+/// next one. No node takes more: the header takes 1, an ellipse, rect, line or arrow 5, and a
+/// text or math with a size 5. Slashdashed entries are not counted.
 pub const MAX_ENTRIES: usize = 6;
 
 /// Most bytes a string, bare word or number takes in a `.lawh` file (64 KiB), quotes included.

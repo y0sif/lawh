@@ -580,8 +580,8 @@ fn outside_ellipse_distance(long: f64, short: f64, along: f64, across: f64) -> f
 /// Where a text or math block's text starts, and its text (a formula's source).
 fn block_text(object: &Object) -> Option<(Point, &str)> {
     match &object.shape {
-        Shape::Text { at, text } => Some((*at, text)),
-        Shape::Math { at, src } => Some((*at, src)),
+        Shape::Text { at, text, .. } => Some((*at, text)),
+        Shape::Math { at, src, .. } => Some((*at, src)),
         _ => None,
     }
 }

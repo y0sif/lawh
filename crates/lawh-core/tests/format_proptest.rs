@@ -3,9 +3,17 @@
 // Lets the helpers below unwrap and panic like test functions (see clippy.toml).
 #![cfg(test)]
 
-use lawh_core::board::{MAX_COORDINATE, MAX_SIZE};
+use lawh_core::board::{DEFAULT_TEXT_SIZE, MAX_COORDINATE, MAX_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE};
 use lawh_core::{Board, Object, ObjectId, Point, Shape, from_lawh, to_lawh};
 use proptest::prelude::*;
+
+/// Cases for the property tests: `LAWH_PROPTEST_CASES` if set, otherwise `default`.
+fn cases(default: u32) -> u32 {
+    std::env::var("LAWH_PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(default)
+}
 
 /// Coordinates: any bit pattern within the limit, plus the round and fractional values real
 /// boards hold.
@@ -43,6 +51,27 @@ fn size() -> impl Strategy<Value = f64> {
     .prop_filter("sizes are above zero", |v| *v > 0.0)
 }
 
+/// Sizes of text and math: mostly the default, which the writer leaves out, then any number in
+/// range, the bounds, the size keys' steps, and the numbers next to the default and the bounds.
+fn text_size() -> impl Strategy<Value = f64> {
+    let next = |v: f64| f64::from_bits(v.to_bits() + 1);
+    let previous = |v: f64| f64::from_bits(v.to_bits() - 1);
+    prop_oneof![
+        3 => Just(DEFAULT_TEXT_SIZE),
+        2 => MIN_TEXT_SIZE..=MAX_TEXT_SIZE,
+        1 => (1_i32..=64).prop_map(|q| f64::from(q) / 4.0),
+        1 => prop::sample::select(vec![
+            MIN_TEXT_SIZE,
+            MAX_TEXT_SIZE,
+            next(MIN_TEXT_SIZE),
+            previous(MAX_TEXT_SIZE),
+            next(DEFAULT_TEXT_SIZE),
+            previous(DEFAULT_TEXT_SIZE),
+            0.1 + 0.2,
+        ]),
+    ]
+}
+
 fn point() -> impl Strategy<Value = Point> {
     (coordinate(), coordinate()).prop_map(|(x, y)| Point::new(x, y))
 }
@@ -76,8 +105,8 @@ fn id() -> impl Strategy<Value = ObjectId> {
 
 fn shape() -> impl Strategy<Value = Shape> {
     prop_oneof![
-        (point(), text()).prop_map(|(at, text)| Shape::Text { at, text }),
-        (point(), text()).prop_map(|(at, src)| Shape::Math { at, src }),
+        (point(), text(), text_size()).prop_map(|(at, text, size)| Shape::Text { at, text, size }),
+        (point(), text(), text_size()).prop_map(|(at, src, size)| Shape::Math { at, src, size }),
         (point(), size()).prop_map(|(center, r)| Shape::Ellipse {
             center,
             rx: r,
@@ -104,7 +133,7 @@ fn board() -> impl Strategy<Value = Board> {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(512))]
+    #![proptest_config(ProptestConfig::with_cases(cases(512)))]
 
     #[test]
     fn boards_round_trip_exactly(board in board()) {
@@ -113,6 +142,21 @@ proptest! {
             .map_err(|e| TestCaseError::fail(format!("{e}\n--- file ---\n{text}")))?;
         prop_assert_eq!(&read, &board);
         prop_assert_eq!(to_lawh(&read), text);
+    }
+
+    /// A size of exactly the default is left out of the file; every other size is written.
+    #[test]
+    fn only_sizes_other_than_the_default_are_written(board in board()) {
+        let text = to_lawh(&board);
+        let sized = board.objects().iter().filter_map(|o| o.shape.size());
+        let expected = sized.filter(|s| s.to_bits() != DEFAULT_TEXT_SIZE.to_bits()).count();
+        // `text id=t1 x=0 y=0 size=2 "..."`: ids and numbers hold no spaces, and the content
+        // starts with a quote.
+        let written = text
+            .lines()
+            .filter(|line| line.split(' ').nth(4).is_some_and(|t| t.starts_with("size=")))
+            .count();
+        prop_assert_eq!(written, expected, "{}", text);
     }
 
     #[test]

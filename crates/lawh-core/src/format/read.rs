@@ -6,7 +6,8 @@ use super::parse::{End, Entry, Node, Parser, Stop, Text, Value, is_bare_word};
 use super::write::Quoted;
 use super::{FormatError, MAX_FILE_BYTES};
 use crate::board::{
-    Board, BoardError, Object, ObjectId, Shape, TextProblem, is_valid_coordinate, is_valid_size,
+    Board, BoardError, DEFAULT_TEXT_SIZE, Object, ObjectId, Shape, TextProblem,
+    is_valid_coordinate, is_valid_size, is_valid_text_size,
 };
 
 /// The format version this build reads and writes.
@@ -119,6 +120,7 @@ impl Kind {
         }
     }
 
+    /// True for the kinds with text or math content, which also take an optional `size`.
     fn has_content(self) -> bool {
         matches!(self, Self::Text | Self::Math)
     }
@@ -134,6 +136,8 @@ struct Parts {
     /// In [`Kind::numbers`] order.
     numbers: [Option<f64>; MAX_NUMBERS],
     content: Option<String>,
+    /// The `size` of a text or math object, when the file gives one.
+    size: Option<f64>,
 }
 
 struct Reader<'a> {
@@ -297,10 +301,12 @@ impl Reader<'_> {
         } else {
             String::new()
         };
-        Ok(Object::new(id, shape(kind, values, content)))
+        let size = parts.size.unwrap_or(DEFAULT_TEXT_SIZE);
+        Ok(Object::new(id, shape(kind, values, content, size)))
     }
 
-    /// Collects a node's id, numbers and content, rejecting anything the kind does not take.
+    /// Collects a node's id, numbers, content and size, rejecting anything the kind does not
+    /// take.
     fn parts(&self, entries: Vec<Entry>, kind: Kind, board: &Board) -> Result<Parts, FormatError> {
         let mut parts = Parts::default();
         for entry in entries {
@@ -349,6 +355,11 @@ impl Reader<'_> {
                     });
                 }
                 parts.id = Some(id);
+            } else if name == Some("size") && kind.has_content() {
+                if parts.size.is_some() {
+                    return Err(duplicate());
+                }
+                parts.size = Some(self.number(entry.at, &entry.value, "size")?);
             } else if let Some((name, slot)) =
                 (kind.numbers().iter().zip(&mut parts.numbers)).find(|(n, _)| Some(**n) == name)
             {
@@ -415,7 +426,7 @@ impl Reader<'_> {
     }
 
     /// A finite number within the board's limits, the entry at byte `at`: a size for `r`, `rx`,
-    /// `ry`, `w` and `h`, a coordinate otherwise.
+    /// `ry`, `w` and `h`, a text size for `size`, a coordinate otherwise.
     fn number(&self, at: usize, value: &Value, prop: &str) -> Result<f64, FormatError> {
         let v = match value {
             Value::Integer(i) => *i as f64,
@@ -423,8 +434,11 @@ impl Reader<'_> {
             Value::String(_) | Value::Bool(_) | Value::Null => f64::NAN,
         };
         let is_size = matches!(prop, "r" | "rx" | "ry" | "w" | "h");
+        let is_text_size = prop == "size";
         let in_range = if is_size {
             is_valid_size(v)
+        } else if is_text_size {
+            is_valid_text_size(v)
         } else {
             is_valid_coordinate(v)
         };
@@ -442,6 +456,8 @@ impl Reader<'_> {
                         column,
                         property,
                     }
+                } else if is_text_size {
+                    FormatError::TextSizeOutOfRange { line, column }
                 } else {
                     FormatError::CoordinateOutOfRange {
                         line,
@@ -558,17 +574,20 @@ fn shown_value(value: &Value) -> String {
     }
 }
 
-/// Builds the shape from its numbers, in [`Kind::numbers`] order, and its text or math content.
-fn shape(kind: Kind, values: [f64; MAX_NUMBERS], content: String) -> Shape {
+/// Builds the shape from its numbers, in [`Kind::numbers`] order, its text or math content and
+/// its size, which only text and math keep.
+fn shape(kind: Kind, values: [f64; MAX_NUMBERS], content: String, size: f64) -> Shape {
     let [v0, v1, v2, v3] = values;
     match kind {
         Kind::Text => Shape::Text {
             at: Point::new(v0, v1),
             text: content,
+            size,
         },
         Kind::Math => Shape::Math {
             at: Point::new(v0, v1),
             src: content,
+            size,
         },
         Kind::Circle => Shape::Ellipse {
             center: Point::new(v0, v1),
@@ -656,7 +675,8 @@ mod tests {
             board.objects()[0].shape,
             Shape::Text {
                 at: Point::ZERO,
-                text: "hello".to_owned()
+                text: "hello".to_owned(),
+                size: DEFAULT_TEXT_SIZE,
             }
         );
     }

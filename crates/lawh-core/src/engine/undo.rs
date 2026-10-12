@@ -15,10 +15,10 @@ pub const MAX_UNDO_STEPS: usize = 1000;
 /// oldest steps are dropped past it, though never the newest.
 ///
 /// A step holds every object it changed, whole. The largest step the board's caps allow
-/// changes a whole board: 500 objects of up to 184 bytes each (a 120-byte edit on Linux
+/// changes a whole board: 500 objects of up to 200 bytes each (a 136-byte edit on Linux
 /// `x86_64` and a 64-character id) and 40,000 characters of text at up to 4 bytes each, or twice
-/// that text when it is replaced: about 0.4 MB in all (derived from the caps and the type
-/// sizes, not measured). The cap keeps at least 40 such steps. Making a circle takes about 200
+/// that text when it is replaced: about 0.42 MB in all (derived from the caps and the type
+/// sizes, not measured). The cap keeps 39 such steps. Making a circle takes about 200
 /// bytes, so [`MAX_UNDO_STEPS`] of those fit far below it. Editing text keeps the text before
 /// and after, so 1,000 edits of a 5,000-character text would hold up to 40 MB without this cap.
 pub const MAX_UNDO_BYTES: usize = 16 * 1024 * 1024;
@@ -239,6 +239,7 @@ mod tests {
     use kurbo::Point;
 
     use super::*;
+    use crate::board::DEFAULT_TEXT_SIZE;
 
     fn id(s: &str) -> ObjectId {
         ObjectId::new(s).unwrap()
@@ -444,6 +445,7 @@ mod tests {
         let text = |c: char| Shape::Text {
             at: Point::ZERO,
             text: c.to_string().repeat(5_000),
+            size: DEFAULT_TEXT_SIZE,
         };
         let replace = step(
             vec![Edit::Replace {
@@ -476,7 +478,8 @@ mod tests {
 
     #[test]
     fn an_edit_is_as_small_as_the_cap_assumes() {
-        // MAX_UNDO_BYTES's doc counts 120 bytes an edit (measured on Linux x86_64).
-        assert!(size_of::<Edit>() <= 128, "{}", size_of::<Edit>());
+        // MAX_UNDO_BYTES's doc counts 136 bytes an edit (measured on Linux x86_64; 120 before
+        // text and math had a size).
+        assert!(size_of::<Edit>() <= 144, "{}", size_of::<Edit>());
     }
 }

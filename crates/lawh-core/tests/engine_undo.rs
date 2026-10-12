@@ -8,6 +8,7 @@
 mod common;
 
 use common::run;
+use lawh_core::board::DEFAULT_TEXT_SIZE;
 use lawh_core::{Board, Cursor, Object, Point, Shape};
 use proptest::prelude::*;
 
@@ -31,8 +32,16 @@ fn size() -> impl Strategy<Value = f64> {
 fn shape() -> impl Strategy<Value = Shape> {
     let point = || (coordinate(), coordinate()).prop_map(|(x, y)| Point::new(x, y));
     prop_oneof![
-        (point(), "[a-z ]{0,6}").prop_map(|(at, text)| Shape::Text { at, text }),
-        (point(), "[a-z^ ]{1,6}").prop_map(|(at, src)| Shape::Math { at, src }),
+        (point(), "[a-z ]{0,6}").prop_map(|(at, text)| Shape::Text {
+            at,
+            text,
+            size: DEFAULT_TEXT_SIZE
+        }),
+        (point(), "[a-z^ ]{1,6}").prop_map(|(at, src)| Shape::Math {
+            at,
+            src,
+            size: DEFAULT_TEXT_SIZE
+        }),
         (point(), size(), size()).prop_map(|(center, rx, ry)| Shape::Ellipse { center, rx, ry }),
         (point(), size()).prop_map(|(center, r)| Shape::Ellipse {
             center,

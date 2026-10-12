@@ -30,11 +30,20 @@ pub(super) fn content(shape: &Shape) -> Option<&str> {
     }
 }
 
-/// `shape` with `text` as its text or source; `None` for kinds without one.
+/// `shape` with `text` as its text or source, at the same place and size; `None` for kinds
+/// without one.
 pub(super) fn with_content(shape: &Shape, text: String) -> Option<Shape> {
     match shape {
-        Shape::Text { at, .. } => Some(Shape::Text { at: *at, text }),
-        Shape::Math { at, .. } => Some(Shape::Math { at: *at, src: text }),
+        Shape::Text { at, size, .. } => Some(Shape::Text {
+            at: *at,
+            text,
+            size: *size,
+        }),
+        Shape::Math { at, size, .. } => Some(Shape::Math {
+            at: *at,
+            src: text,
+            size: *size,
+        }),
         Shape::Ellipse { .. } | Shape::Rect { .. } | Shape::Line { .. } | Shape::Arrow { .. } => {
             None
         }

@@ -853,6 +853,7 @@ fn text_boards() -> Vec<(String, Board)> {
                     Shape::Text {
                         at: Point::ZERO,
                         text,
+                        size: lawh_core::board::DEFAULT_TEXT_SIZE,
                     },
                 ))
                 .unwrap();

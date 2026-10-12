@@ -762,11 +762,11 @@ impl Renderer {
             }
             Shape::Rect { origin, w, h } => Some(Rect::from_origin_size(*origin, (*w, *h)).abs()),
             Shape::Line { a, b } | Shape::Arrow { a, b } => Some(Rect::from_points(*a, *b)),
-            Shape::Text { at, text } => {
+            Shape::Text { at, text, .. } => {
                 let key = key.unwrap_or_else(|| self.text.key(text));
                 Some(self.text_bounds(*at, key, text, size))
             }
-            Shape::Math { at, src } => {
+            Shape::Math { at, src, .. } => {
                 let key = key.unwrap_or_else(|| self.text.key(src));
                 let laid_out = match math {
                     Some(MathStatus::Ready(layout)) => Some(layout_bounds(layout)),
@@ -855,11 +855,11 @@ impl Renderer {
                 }
                 Outcome::Drawn
             }
-            Shape::Text { at, text } => match seen.key {
+            Shape::Text { at, text, .. } => match seen.key {
                 Some(key) => self.draw_text(*at, key, text, INK, vp, clip, budget),
                 None => Outcome::Pending,
             },
-            Shape::Math { at, src } => match (&seen.math, seen.key) {
+            Shape::Math { at, src, .. } => match (&seen.math, seen.key) {
                 (Some(MathStatus::Ready(layout)), _) => {
                     fits(self.draw_math(*at, layout, vp, clip, budget))
                 }
@@ -1321,8 +1321,8 @@ fn source(object: &Object) -> Option<&str> {
 /// formula still compiling or that failed.
 fn drawn_as_text<'a>(object: &'a Object, math: Option<&MathStatus>) -> Option<(Point, &'a str)> {
     match (&object.shape, math) {
-        (Shape::Text { at, text }, _) => Some((*at, text)),
-        (Shape::Math { at, src }, Some(MathStatus::Pending | MathStatus::Failed(_))) => {
+        (Shape::Text { at, text, .. }, _) => Some((*at, text)),
+        (Shape::Math { at, src, .. }, Some(MathStatus::Pending | MathStatus::Failed(_))) => {
             Some((*at, src))
         }
         _ => None,
@@ -1649,6 +1649,7 @@ mod tests {
                     Shape::Text {
                         at: Point::ZERO,
                         text: text(i),
+                        size: lawh_core::board::DEFAULT_TEXT_SIZE,
                     },
                 ))
                 .unwrap();

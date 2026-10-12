@@ -347,6 +347,7 @@ fn objects_with_non_finite_numbers_have_no_bounds() {
         Shape::Text {
             at: Point::new(f64::NAN, f64::NAN),
             text: "t".to_owned(),
+            size: lawh_core::board::DEFAULT_TEXT_SIZE,
         },
     ] {
         let object = Object::new(id.clone(), shape);
@@ -624,6 +625,7 @@ fn text_board(count: usize, text: impl Fn(usize) -> String) -> Board {
                 Shape::Text {
                     at: Point::ZERO,
                     text: text(i),
+                    size: lawh_core::board::DEFAULT_TEXT_SIZE,
                 },
             ))
             .unwrap();

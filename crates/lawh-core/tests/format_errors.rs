@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use insta::assert_snapshot;
 use lawh_core::board::{
-    MAX_BOARD_TEXT_CHARS, MAX_ID_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES,
+    MAX_BOARD_TEXT_CHARS, MAX_ID_CHARS, MAX_OBJECTS, MAX_TEXT_CHARS, MAX_TEXT_LINES, MAX_TEXT_SIZE,
+    MIN_TEXT_SIZE,
 };
 use lawh_core::format::{MAX_COMMENT_DEPTH, MAX_ENTRIES, MAX_FILE_BYTES, MAX_STRING_BYTES};
 use lawh_core::{Board, FormatError, Shape, from_lawh};
@@ -352,7 +353,7 @@ fn type_annotations() {
 
 #[test]
 fn columns_count_characters_not_bytes() {
-    let e = body_err("text id=t1 x=0 y=0 \"مساحة 😀\" size=2\n");
+    let e = body_err("text id=t1 x=0 y=0 \"مساحة 😀\" font=2\n");
     assert_eq!((e.line(), e.column()), (2, 30));
     assert_snapshot!(e.to_string());
 }
@@ -419,6 +420,126 @@ fn sizes_out_of_range() {
         assert!(matches!(e, FormatError::InvalidSize { .. }), "{e:?}");
         assert_snapshot!(name, e.to_string());
     }
+}
+
+#[test]
+fn text_sizes_out_of_range() {
+    // Just below 0.25 and just above 16, as the writer would print them.
+    let below = f64::from_bits(MIN_TEXT_SIZE.to_bits() - 1);
+    let above = f64::from_bits(MAX_TEXT_SIZE.to_bits() + 1);
+    assert_eq!(below.to_string(), "0.24999999999999997");
+    assert_eq!(above.to_string(), "16.000000000000004");
+    for (name, body) in [
+        (
+            "text_size_just_below",
+            "text id=t1 x=0 y=0 size=0.24999999999999997 \"a\"\n",
+        ),
+        (
+            "text_size_just_above",
+            "math id=m1 x=0 y=0 size=16.000000000000004 \"a\"\n",
+        ),
+        ("text_size_zero", "text id=t1 x=0 y=0 size=0 \"a\"\n"),
+        ("text_size_negative", "math id=m1 x=0 y=0 size=-2 \"a\"\n"),
+        ("text_size_huge", "text id=t1 x=0 y=0 size=1e300 \"a\"\n"),
+    ] {
+        let e = body_err(body);
+        assert_eq!(
+            e,
+            FormatError::TextSizeOutOfRange {
+                line: 2,
+                column: 20
+            },
+            "{name}"
+        );
+        assert_snapshot!(name, e.to_string());
+    }
+}
+
+#[test]
+fn text_sizes_that_are_not_finite_numbers() {
+    for (name, body, expected) in [
+        (
+            "text_size_string",
+            "text id=t1 x=0 y=0 size=big \"a\"\n",
+            "a number",
+        ),
+        (
+            "text_size_bool",
+            "math id=m1 x=0 y=0 size=#true \"a\"\n",
+            "a number",
+        ),
+        (
+            "text_size_null",
+            "text id=t1 x=0 y=0 size=#null \"a\"\n",
+            "a number",
+        ),
+        (
+            "text_size_nan",
+            "text id=t1 x=0 y=0 size=#nan \"a\"\n",
+            "a finite number",
+        ),
+        (
+            "text_size_inf",
+            "math id=m1 x=0 y=0 size=#inf \"a\"\n",
+            "a finite number",
+        ),
+        (
+            "text_size_overflow",
+            "text id=t1 x=0 y=0 size=1e999 \"a\"\n",
+            "a finite number",
+        ),
+    ] {
+        let e = body_err(body);
+        assert_eq!(
+            e,
+            FormatError::WrongType {
+                line: 2,
+                column: 20,
+                property: "size".to_owned(),
+                expected,
+            },
+            "{name}"
+        );
+        assert_snapshot!(name, e.to_string());
+    }
+}
+
+#[test]
+fn duplicate_text_size() {
+    let e = body_err("text id=t1 x=0 y=0 size=2 \"a\" size=2\n");
+    assert_eq!(
+        e,
+        FormatError::DuplicateProperty {
+            line: 2,
+            column: 31,
+            property: "size".to_owned()
+        }
+    );
+    assert_snapshot!(e.to_string());
+}
+
+#[test]
+fn size_on_a_shape() {
+    for kind in ["circle id=c1 x=0 y=0 r=1", "rect id=r1 x=0 y=0 w=1 h=1"] {
+        let e = body_err(&format!("{kind} size=2\n"));
+        assert!(
+            matches!(&e, FormatError::UnknownProperty { property, .. } if property == "size"),
+            "{e:?}"
+        );
+    }
+    let e = body_err("line id=l1 x1=0 y1=0 x2=1 size=2 y2=0\n");
+    assert_snapshot!(e.to_string());
+}
+
+#[test]
+fn text_sizes_at_the_limits_are_read() {
+    let src = format!(
+        "{HEADER}text id=t1 x=0 y=0 size=0.25 \"a\"\nmath id=m1 x=0 y=0 size=16 \"b\"\n\
+         text id=t2 x=0 y=0 size=1e0 \"c\"\nmath id=m2 x=0 y=0 size=2.5E-1 \"d\"\n"
+    );
+    let board = from_lawh(&src).unwrap();
+    let sizes: Vec<Option<f64>> = board.objects().iter().map(|o| o.shape.size()).collect();
+    assert_eq!(sizes, [Some(0.25), Some(16.0), Some(1.0), Some(0.25)]);
 }
 
 #[test]
@@ -957,6 +1078,14 @@ fn entries_past_the_limit() {
         matches!(e, FormatError::ExtraArgument { column: 26, .. }),
         "{e:?}"
     );
+    // A text with every entry it takes has 5, within the cap; a sixth is reported as itself.
+    let full = format!("{HEADER}text id=t1 x=0 y=0 size=2 \"a\"\n");
+    assert_eq!(from_lawh(&full).map(|b| b.len()), Ok(1));
+    let e = body_err("text id=t1 x=0 y=0 size=2 \"a\" \"b\" )\n");
+    assert!(
+        matches!(e, FormatError::ExtraArgument { column: 31, .. }),
+        "{e:?}"
+    );
     // Slashdashed entries are not counted.
     let src = format!("{HEADER}circle id=c1 x=0 y=0{} r=1\n", " /-r=2".repeat(100));
     assert_eq!(from_lawh(&src).map(|b| b.len()), Ok(1));
@@ -1153,12 +1282,14 @@ fn reading_stops_at_the_first_cap() {
 // --- Read time of filler ---
 
 /// The longest file a board within every cap writes: the most text, in characters the writer
-/// escapes as `\u{200B}`, the other objects arrows, every coordinate written with 25 characters
-/// and every id 64 digits, which the writer quotes.
+/// escapes as `\u{200B}`, at a size written with 19 characters, the other objects arrows, every
+/// coordinate written with 25 characters and every id 64 digits, which the writer quotes.
 fn largest_board() -> String {
     use lawh_core::{Object, ObjectId, Point, Shape, to_lawh};
     // Written as `-0.0000010000000000000002`.
     let at = -f64::from_bits(1e-6_f64.to_bits() + 1);
+    // Written as `0.25000000000000006`: no size in range takes more than 17 digits after `0.`.
+    let size = f64::from_bits(MIN_TEXT_SIZE.to_bits() + 1);
     let mut board = Board::new();
     for i in 0..MAX_OBJECTS {
         let id = ObjectId::new(format!("{i:0>MAX_ID_CHARS$}")).unwrap();
@@ -1166,6 +1297,7 @@ fn largest_board() -> String {
             Shape::Text {
                 at: Point::new(at, at),
                 text: "\u{200B}".repeat(MAX_TEXT_CHARS),
+                size,
             }
         } else {
             Shape::Arrow {
@@ -1176,6 +1308,14 @@ fn largest_board() -> String {
         board.insert(Object::new(id, shape)).unwrap();
     }
     to_lawh(&board)
+}
+
+#[test]
+fn the_largest_board_is_well_under_the_file_limit() {
+    // The number `MAX_FILE_BYTES` documents.
+    let largest = largest_board();
+    assert_eq!(largest.len(), 415_751);
+    assert_eq!(from_lawh(&largest).map(|b| b.len()), Ok(MAX_OBJECTS));
 }
 
 /// Time to read any file of up to `MAX_FILE_BYTES`, in a release build.

@@ -250,6 +250,7 @@ fn math_complexity_frame_time() {
                     Shape::Math {
                         at: Point::ZERO,
                         src: src.clone(),
+                        size: lawh_core::board::DEFAULT_TEXT_SIZE,
                     },
                 ))
                 .unwrap();
@@ -942,11 +943,13 @@ fn text_worst_boards(
                 Shape::Math {
                     at: Point::ZERO,
                     src: text,
+                    size: lawh_core::board::DEFAULT_TEXT_SIZE,
                 }
             } else {
                 Shape::Text {
                     at: Point::ZERO,
                     text,
+                    size: lawh_core::board::DEFAULT_TEXT_SIZE,
                 }
             };
             board

@@ -27,6 +27,7 @@ fn text(name: &str, at: Point, text: &str) -> Object {
         Shape::Text {
             at,
             text: text.to_owned(),
+            size: lawh_core::board::DEFAULT_TEXT_SIZE,
         },
     )
 }

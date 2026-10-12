@@ -24,7 +24,7 @@ use super::text_motion::{after_insert, content, on_grapheme};
 use super::undo::Edit;
 use super::work::PLACE_WORK;
 use super::{Cursor, Engine, Measure, Mode, bounds, exec};
-use crate::board::{Object, ObjectId, Shape};
+use crate::board::{DEFAULT_TEXT_SIZE, Object, ObjectId, Shape};
 use crate::key::{Key, KeyCode};
 
 /// The cursor inside a text block, for drawing it.
@@ -543,5 +543,6 @@ fn empty_text(at: Point) -> Shape {
     Shape::Text {
         at,
         text: String::new(),
+        size: DEFAULT_TEXT_SIZE,
     }
 }

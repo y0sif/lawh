@@ -8,7 +8,7 @@ use std::fmt::{self, Display, Formatter, Write as _};
 
 use kurbo::Point;
 
-use crate::board::{Board, Object, ObjectId, Shape};
+use crate::board::{Board, DEFAULT_TEXT_SIZE, Object, ObjectId, Shape};
 
 /// Writes `board` as a `.lawh` file: the header, then one line per object in z-order.
 pub fn to_lawh(board: &Board) -> String {
@@ -30,8 +30,8 @@ impl Display for Document<'_> {
 fn write_object(f: &mut Formatter<'_>, object: &Object) -> fmt::Result {
     let id = Id(&object.id);
     match &object.shape {
-        Shape::Text { at, text } => write_content(f, "text", id, *at, text),
-        Shape::Math { at, src } => write_content(f, "math", id, *at, src),
+        Shape::Text { at, text, size } => write_content(f, "text", id, *at, *size, text),
+        Shape::Math { at, src, size } => write_content(f, "math", id, *at, *size, src),
         Shape::Ellipse { center, rx, ry } => {
             let (x, y) = (Num(center.x), Num(center.y));
             #[expect(
@@ -63,14 +63,22 @@ fn write_object(f: &mut Formatter<'_>, object: &Object) -> fmt::Result {
     }
 }
 
-fn write_content(f: &mut Formatter<'_>, kind: &str, id: Id<'_>, at: Point, s: &str) -> fmt::Result {
-    writeln!(
-        f,
-        "{kind} id={id} x={} y={} {}",
-        Num(at.x),
-        Num(at.y),
-        Quoted(s)
-    )
+/// A `text` or `math` line. `size=` comes after `x y`, and only when the size is not
+/// [`DEFAULT_TEXT_SIZE`], so a board without sizes writes the lines it always did.
+fn write_content(
+    f: &mut Formatter<'_>,
+    kind: &str,
+    id: Id<'_>,
+    at: Point,
+    size: f64,
+    s: &str,
+) -> fmt::Result {
+    write!(f, "{kind} id={id} x={} y={}", Num(at.x), Num(at.y))?;
+    // Only exactly the default is left out: any other size must survive the file.
+    if size != DEFAULT_TEXT_SIZE {
+        write!(f, " size={}", Num(size))?;
+    }
+    writeln!(f, " {}", Quoted(s))
 }
 
 fn write_segment(f: &mut Formatter<'_>, kind: &str, id: Id<'_>, a: Point, b: Point) -> fmt::Result {

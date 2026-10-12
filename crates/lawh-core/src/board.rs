@@ -2,8 +2,9 @@
 //!
 //! Coordinates are grid units (`f64`) with y growing down, like a screen.
 //!
-//! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`]), every
-//! text within [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`], all its text together within
+//! The board keeps every number within fixed limits ([`MAX_COORDINATE`], [`MAX_SIZE`], and
+//! [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`] for the size of text and math), every text within
+//! [`MAX_TEXT_CHARS`] and [`MAX_TEXT_LINES`], all its text together within
 //! [`MAX_BOARD_TEXT_CHARS`], the number of objects within [`MAX_OBJECTS`] and every id within
 //! [`MAX_ID_CHARS`], so bounds, zoom-to-fit and rendering never meet values that overflow or
 //! allocate without limit. The file reader enforces the same limits.
@@ -86,6 +87,31 @@ pub const MAX_COORDINATE: f64 = 1_000_000.0;
 /// absolute value), so the board rejects it instead of storing it.
 pub const MAX_SIZE: f64 = 1_000_000.0;
 
+/// The size of a text or math object that has none in its file: the text height lawh has
+/// always drawn, an em of 0.5 grid units (20 logical pixels at zoom 1).
+///
+/// A size multiplies that height: size 2 draws text twice as tall and wide. Sizes are a
+/// multiplier, not pixels or points, so a board looks the same at any zoom and on any screen,
+/// and the writer leaves a size of exactly 1 out of the file.
+pub const DEFAULT_TEXT_SIZE: f64 = 1.0;
+
+/// Smallest size of a text or math object (see [`DEFAULT_TEXT_SIZE`]).
+///
+/// Size 0.25 is an em of 0.125 grid units: 5 logical pixels at zoom 1, 10 at zoom 2.
+/// Smaller text is a smudge at every view one works in, and the size keys' first step is 0.25.
+pub const MIN_TEXT_SIZE: f64 = 0.25;
+
+/// Largest size of a text or math object (see [`DEFAULT_TEXT_SIZE`]).
+///
+/// Size 16 is an em of 8 grid units: 320 logical pixels at zoom 1, a heading taller than most
+/// windows. The renderer's cost per glyph grows with its size on screen. At the app's closest
+/// view (zoom 20) on a scale factor 4 screen, a size-16 formula, drawn 1.27 times text's em so
+/// its x-height matches text's, has an em of about 32,600 pixels (16 x 0.5 units x 40 pixels a
+/// unit x 20 x 4 x 1.27, derived). The frame budget's cost model is calibrated up to 65,536
+/// pixels per em (`lawh-render/src/renderer/calibrate.rs`), so the largest text stays inside
+/// what the budget has measured.
+pub const MAX_TEXT_SIZE: f64 = 16.0;
+
 /// Most characters (Unicode scalar values) in the content of one text or math object.
 ///
 /// Real whiteboard text is labels and short paragraphs, and math sources are shorter still: a
@@ -154,6 +180,12 @@ pub(crate) fn is_valid_coordinate(v: f64) -> bool {
 /// True when `v` is a size the board accepts: above zero and at most [`MAX_SIZE`]. False for NaN.
 pub(crate) fn is_valid_size(v: f64) -> bool {
     v > 0.0 && v <= MAX_SIZE
+}
+
+/// True when `v` is a size of text or math the board accepts: from [`MIN_TEXT_SIZE`] to
+/// [`MAX_TEXT_SIZE`], both included. False for NaN.
+pub(crate) fn is_valid_text_size(v: f64) -> bool {
+    (MIN_TEXT_SIZE..=MAX_TEXT_SIZE).contains(&v)
 }
 
 /// Why a text or math content is over a per-object cap.
@@ -284,10 +316,12 @@ impl Object {
 /// What an object is and where it sits, in grid units.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Shape {
-    /// Plain text. `at` is the top-left corner of the text box.
-    Text { at: Point, text: String },
+    /// Plain text. `at` is the top-left corner of the text box. `size` multiplies the text's
+    /// height (see [`DEFAULT_TEXT_SIZE`]), from [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`].
+    Text { at: Point, text: String, size: f64 },
     /// Typst math. `at` is the top-left corner of the formula box, `src` the Typst math source.
-    Math { at: Point, src: String },
+    /// `size` is as for [`Shape::Text`].
+    Math { at: Point, src: String, size: f64 },
     /// An ellipse; a circle when `rx == ry`.
     Ellipse { center: Point, rx: f64, ry: f64 },
     /// A rectangle. `origin` is the top-left corner.
@@ -299,10 +333,13 @@ pub enum Shape {
 }
 
 impl Shape {
-    /// True when every coordinate and size is a finite number.
+    /// True when every coordinate and size is a finite number, the size of text and math
+    /// included.
     pub fn is_finite(&self) -> bool {
         match self {
-            Self::Text { at, .. } | Self::Math { at, .. } => at.is_finite(),
+            Self::Text { at, size, .. } | Self::Math { at, size, .. } => {
+                at.is_finite() && size.is_finite()
+            }
             Self::Ellipse { center, rx, ry } => {
                 center.is_finite() && rx.is_finite() && ry.is_finite()
             }
@@ -330,6 +367,18 @@ impl Shape {
         }
     }
 
+    /// The size of a text or math object: a multiplier on the text height (see
+    /// [`DEFAULT_TEXT_SIZE`]). `None` for the other kinds, which have no size in this sense
+    /// (their radii, widths and heights are [`MAX_SIZE`]'s sizes).
+    pub fn size(&self) -> Option<f64> {
+        match self {
+            Self::Text { size, .. } | Self::Math { size, .. } => Some(*size),
+            Self::Ellipse { .. } | Self::Rect { .. } | Self::Line { .. } | Self::Arrow { .. } => {
+                None
+            }
+        }
+    }
+
     /// The text of a text object or the source of a math object.
     fn content(&self) -> Option<&str> {
         match self {
@@ -353,6 +402,12 @@ impl Shape {
     pub fn sizes_in_range(&self) -> bool {
         self.sizes()
             .is_none_or(|s| s.into_iter().all(is_valid_size))
+    }
+
+    /// The size of a text or math object is from [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`]. True
+    /// for kinds without one.
+    pub fn text_size_in_range(&self) -> bool {
+        self.size().is_none_or(is_valid_text_size)
     }
 
     /// The text or math content has at most [`MAX_TEXT_CHARS`] characters and at most
@@ -384,6 +439,13 @@ pub enum BoardError {
     CoordinateOutOfRange(ObjectId),
     #[error("object `{0}` has a size that is not above 0 and at most {max}", max = MAX_SIZE)]
     InvalidSize(ObjectId),
+    /// A text or math object's size is outside [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`].
+    #[error(
+        "object `{0}` has a text size outside {min}..={max}",
+        min = MIN_TEXT_SIZE,
+        max = MAX_TEXT_SIZE
+    )]
+    TextSizeOutOfRange(ObjectId),
     #[error("object `{0}` has more than {max} characters of text", max = MAX_TEXT_CHARS)]
     TextTooLong(ObjectId),
     #[error("object `{0}` has more than {max} lines of text", max = MAX_TEXT_LINES)]
@@ -481,7 +543,8 @@ impl Board {
     /// Adds `object` on top of the others.
     ///
     /// Fails if its id is already used, any of its numbers is not finite or outside the limits
-    /// ([`MAX_COORDINATE`], [`MAX_SIZE`]), its text is longer than [`MAX_TEXT_CHARS`] or
+    /// ([`MAX_COORDINATE`], [`MAX_SIZE`], [`MIN_TEXT_SIZE`] to [`MAX_TEXT_SIZE`] for the size
+    /// of text and math), its text is longer than [`MAX_TEXT_CHARS`] or
     /// [`MAX_TEXT_LINES`], it would take the board's text past [`MAX_BOARD_TEXT_CHARS`], or the
     /// board already holds [`MAX_OBJECTS`] objects.
     pub fn insert(&mut self, object: Object) -> Result<(), BoardError> {
@@ -824,6 +887,8 @@ fn check_shape(
         Err(BoardError::CoordinateOutOfRange)
     } else if !shape.sizes_in_range() {
         Err(BoardError::InvalidSize)
+    } else if !shape.text_size_in_range() {
+        Err(BoardError::TextSizeOutOfRange)
     } else {
         match shape.content().map(check_text) {
             Some(Err(TextProblem::TooLong)) => Err(BoardError::TextTooLong),
@@ -943,6 +1008,7 @@ mod tests {
                 Shape::Text {
                     at: Point::new(0.0, bad),
                     text: String::new(),
+                    size: DEFAULT_TEXT_SIZE,
                 },
             );
             assert_eq!(board.insert(text), Err(BoardError::NonFinite(id("t1"))));
@@ -981,10 +1047,12 @@ mod tests {
                 Shape::Text {
                     at: Point::new(bad, 0.0),
                     text: String::new(),
+                    size: DEFAULT_TEXT_SIZE,
                 },
                 Shape::Math {
                     at: Point::new(0.0, bad),
                     src: String::new(),
+                    size: DEFAULT_TEXT_SIZE,
                 },
                 Shape::Ellipse {
                     center: Point::new(bad, bad),
@@ -1051,6 +1119,95 @@ mod tests {
         assert!(board.is_empty());
     }
 
+    fn sized(name: &str, math: bool, size: f64) -> Object {
+        let (at, content) = (Point::ZERO, "x".to_owned());
+        let shape = if math {
+            Shape::Math {
+                at,
+                src: content,
+                size,
+            }
+        } else {
+            Shape::Text {
+                at,
+                text: content,
+                size,
+            }
+        };
+        Object::new(id(name), shape)
+    }
+
+    #[test]
+    fn text_and_math_sizes_are_kept_from_min_to_max() {
+        let mut board = Board::new();
+        let sizes = [
+            MIN_TEXT_SIZE,
+            DEFAULT_TEXT_SIZE,
+            1.0 + f64::EPSILON,
+            2.5,
+            MAX_TEXT_SIZE,
+        ];
+        for (i, size) in sizes.into_iter().enumerate() {
+            for math in [false, true] {
+                let object = sized(&format!("o{i}{math}"), math, size);
+                board.insert(object.clone()).unwrap();
+                assert_eq!(
+                    board.get(&object.id).and_then(|o| o.shape.size()),
+                    Some(size)
+                );
+            }
+        }
+        assert_eq!(board.len(), 2 * sizes.len());
+        assert_eq!(circle("c1", 1.0).shape.size(), None);
+        assert_eq!(rect("r1", Point::ZERO, 1.0, 1.0).shape.size(), None);
+    }
+
+    #[test]
+    fn text_and_math_sizes_out_of_range_are_refused() {
+        let mut board = Board::new();
+        let below = f64::from_bits(MIN_TEXT_SIZE.to_bits() - 1);
+        let above = f64::from_bits(MAX_TEXT_SIZE.to_bits() + 1);
+        for bad in [below, above, 0.0, -0.0, -1.0, 5e-324, 17.0, 1e300] {
+            for math in [false, true] {
+                assert_eq!(
+                    board.insert(sized("t1", math, bad)),
+                    Err(BoardError::TextSizeOutOfRange(id("t1"))),
+                    "{bad:?}"
+                );
+            }
+        }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for math in [false, true] {
+                assert_eq!(
+                    board.insert(sized("t1", math, bad)),
+                    Err(BoardError::NonFinite(id("t1"))),
+                    "{bad:?}"
+                );
+            }
+        }
+        assert!(board.is_empty());
+        // `replace` checks the size too, and leaves the old shape.
+        board.insert(sized("t1", false, 2.0)).unwrap();
+        let big = sized("t1", true, above).shape;
+        assert_eq!(
+            board.replace(&id("t1"), big.clone()),
+            Err(BoardError::TextSizeOutOfRange(id("t1")))
+        );
+        let change = Change::Replace {
+            id: &id("t1"),
+            shape: &big,
+        };
+        assert_eq!(
+            board.apply(&[change]),
+            Err(BoardError::TextSizeOutOfRange(id("t1")))
+        );
+        assert_eq!(board.get(&id("t1")), Some(&sized("t1", false, 2.0)));
+        assert_eq!(
+            BoardError::TextSizeOutOfRange(id("t1")).to_string(),
+            "object `t1` has a text size outside 0.25..=16"
+        );
+    }
+
     #[test]
     fn insert_rejects_text_over_the_limit() {
         let mut board = Board::new();
@@ -1064,6 +1221,7 @@ mod tests {
         let math = Shape::Math {
             at: Point::ZERO,
             src: "x".repeat(MAX_TEXT_CHARS + 1),
+            size: DEFAULT_TEXT_SIZE,
         };
         assert_eq!(
             board.insert(Object::new(id("m1"), math)),
@@ -1078,6 +1236,7 @@ mod tests {
             Shape::Text {
                 at: Point::ZERO,
                 text,
+                size: DEFAULT_TEXT_SIZE,
             },
         )
     }
@@ -1114,6 +1273,7 @@ mod tests {
         let math = Shape::Math {
             at: Point::ZERO,
             src: "x\n".repeat(MAX_TEXT_LINES),
+            size: DEFAULT_TEXT_SIZE,
         };
         assert_eq!(
             board.insert(Object::new(id("m1"), math)),
@@ -1138,6 +1298,7 @@ mod tests {
                 Shape::Math {
                     at: Point::ZERO,
                     src: "x".repeat(n),
+                    size: DEFAULT_TEXT_SIZE,
                 },
             )
         };

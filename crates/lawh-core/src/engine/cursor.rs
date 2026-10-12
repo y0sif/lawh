@@ -44,6 +44,7 @@ pub(crate) fn offset(p: Point, dx: f64, dy: f64) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::DEFAULT_TEXT_SIZE;
 
     #[test]
     fn anchors_are_the_placing_points() {
@@ -53,10 +54,12 @@ mod tests {
             Shape::Text {
                 at: p,
                 text: String::new(),
+                size: DEFAULT_TEXT_SIZE,
             },
             Shape::Math {
                 at: p,
                 src: String::new(),
+                size: DEFAULT_TEXT_SIZE,
             },
             Shape::Ellipse {
                 center: p,

@@ -116,13 +116,15 @@ pub(crate) fn translate(shape: &Shape, dx: f64, dy: f64) -> Shape {
     let shift = |v: f64, d: f64| if d == 0.0 { v } else { round3(v + d) };
     let point = |p: Point| Point::new(shift(p.x, dx), shift(p.y, dy));
     match shape {
-        Shape::Text { at, text } => Shape::Text {
+        Shape::Text { at, text, size } => Shape::Text {
             at: point(*at),
             text: text.clone(),
+            size: *size,
         },
-        Shape::Math { at, src } => Shape::Math {
+        Shape::Math { at, src, size } => Shape::Math {
             at: point(*at),
             src: src.clone(),
+            size: *size,
         },
         Shape::Ellipse { center, rx, ry } => Shape::Ellipse {
             center: point(*center),

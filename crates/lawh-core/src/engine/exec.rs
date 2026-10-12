@@ -12,8 +12,8 @@ use super::undo::Edit;
 use super::work::PARSE_WORK;
 use super::{Cursor, Effect, Engine, MAX_COMMAND_LINE_CHARS, Mode};
 use crate::board::{
-    BoardError, MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
-    MAX_TEXT_LINES, Object, Shape,
+    BoardError, DEFAULT_TEXT_SIZE, MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE,
+    MAX_TEXT_CHARS, MAX_TEXT_LINES, Object, Shape,
 };
 use crate::key::Key;
 
@@ -211,10 +211,12 @@ impl Engine {
             Command::Text(text) => self.add_shape(Shape::Text {
                 at,
                 text: text.clone(),
+                size: DEFAULT_TEXT_SIZE,
             }),
             Command::Math(src) => self.add_shape(Shape::Math {
                 at,
                 src: src.clone(),
+                size: DEFAULT_TEXT_SIZE,
             }),
             Command::Write { file } => return self.write(file.as_deref(), None),
             Command::WriteQuit { file, force } => return self.write(file.as_deref(), Some(*force)),
