@@ -16,16 +16,17 @@
 
 mod common;
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{Run, board, long_symbols, run, run_with_rc, run_with_symbols, typst_like_symbols};
 use lawh_core::engine::{
-    Engine, MAX_EXPANDED_KEYS, MAX_KEY_WORK, MAX_RC_BYTES, MAX_SYM_QUERY_CHARS, MAX_SYMBOLS,
-    SYM_ROWS, Symbol,
+    Engine, FixedMeasure, MAX_EXPANDED_KEYS, MAX_KEY_WORK, MAX_RC_BYTES, MAX_SYM_QUERY_CHARS,
+    MAX_SYMBOLS, Measure, SYM_ROWS, Symbol,
 };
-use lawh_core::{Board, Cursor, ObjectId, Shape};
+use lawh_core::{Board, Cursor, Key, Object, ObjectId, Rect, Shape, parse_keys};
 
 /// The message when a key runs out of work.
 const TOO_MUCH_WORK: &str = "that key did too much work; the rest of it was dropped";
@@ -290,6 +291,17 @@ fn cases() -> Vec<Case> {
             }),
         ),
         (
+            ":sym past the query cap then x<BS> x127, a 20 KB line",
+            Box::new(|| {
+                let symbols = typst_like_symbols(MAX_SYMBOLS);
+                let rc = cmap_repeating("x<BS>", 127);
+                let mut r = run_with_symbols(&rc, symbols, Board::new(), &long_sym_line());
+                let started = Instant::now();
+                r.feed("Q");
+                (r, started.elapsed())
+            }),
+        ),
+        (
             "lawhrc of 1 MiB, map and unmap at the front of 999 mappings",
             Box::new(|| {
                 let rc = crafted_rc();
@@ -521,22 +533,76 @@ fn a_max_length_query_fits_the_work_budget() {
 fn a_query_that_costs_too_much_for_its_names_is_refused_whole() {
     // 21 words of two letters over 4,096 names of 64 characters would take about 0.12 s. The
     // query goes on the line first, then `sy` in front of it makes it a `:sym` line: the key
-    // that would match it all runs out of work before matching, and shows no rows.
+    // that would match it all runs out of work before matching, and shows no rows. It did next
+    // to no work, so it matched nothing (under a millisecond in release).
     let script = format!(":{}<Home>s", " aa".repeat(21));
     let mut r = run_with_symbols("", long_symbols(MAX_SYMBOLS), Board::new(), &script);
     assert_eq!((message(&r), r.engine.completions()), (None, None));
     let started = Instant::now();
     r.feed("y");
     let elapsed = started.elapsed();
-    assert!(elapsed < Duration::from_millis(20), "{elapsed:?}");
+    assert!(elapsed < bound(), "{elapsed:?}");
     assert_eq!(message(&r), Some(TOO_MUCH_WORK));
     assert_eq!(r.engine.completions(), None);
-    assert!(r.engine.key_work() <= MAX_KEY_WORK);
+    assert!(
+        r.engine.key_work() < MAX_KEY_WORK / 1000,
+        "{}",
+        r.engine.key_work()
+    );
     // A query that fits matches again.
     let fits = format!(":{}<Home>sy", " aa".repeat(16));
     let r = run_with_symbols("", long_symbols(MAX_SYMBOLS), Board::new(), &fits);
     assert_eq!(message(&r), None);
     assert_eq!(r.engine.completions().unwrap().0.len(), SYM_ROWS);
+}
+
+/// `:sym ` and 5,050 characters of four bytes (U+1D538): a query of 20 KB, far past
+/// `MAX_SYM_QUERY_CHARS`, on a line within `MAX_COMMAND_LINE_CHARS`.
+fn long_sym_line() -> String {
+    format!(":sym {}", "\u{1D538}".repeat(5050))
+}
+
+#[test]
+fn a_mapping_on_a_sym_line_past_the_query_cap_stops_in_time() {
+    // Typing and taking back a character after the query: each key changes it, and it is
+    // refused before the line is copied or its characters counted. Before: each key copied the
+    // 20 KB line twice and counted it, 30,000 keys in 110 ms in release, 171 ms in debug, with
+    // no work counted; the keys run out first either way.
+    let symbols = typst_like_symbols(MAX_SYMBOLS);
+    let rc = cmap_repeating("x<BS>", 127);
+    let mut r = run_with_symbols(&rc, symbols, Board::new(), &long_sym_line());
+    let too_long = format!("a `:sym` query holds at most {MAX_SYM_QUERY_CHARS} characters");
+    assert_eq!(message(&r), Some(too_long.as_str()));
+    assert_eq!(r.engine.completions(), Some((&[][..], None)));
+    let started = Instant::now();
+    r.feed("Q");
+    let elapsed = started.elapsed();
+    assert!(elapsed < bound(), "{elapsed:?}");
+    assert!(
+        message(&r)
+            .unwrap()
+            .starts_with("one key may set off at most")
+    );
+    let line = r.engine.command_line().map(|(line, _)| line.to_owned());
+    assert_eq!(line.as_deref(), Some(&long_sym_line()[1..]));
+    assert_eq!(r.engine.completions(), Some((&[][..], None)));
+    // Moving along the line looks at it again and refuses it again.
+    r.feed("<Left>");
+    assert_eq!(message(&r), Some(too_long.as_str()));
+}
+
+#[test]
+fn copying_a_long_sym_line_counts_as_work() {
+    // A short query after thousands of spaces: every key that changes it copies the whole
+    // line. With no symbols to match, that copying is what runs out of work.
+    let line = format!(":sym{}a", " ".repeat(5000));
+    let rc = cmap_repeating("x<BS>", 127);
+    let mut r = run_with_symbols(&rc, Arc::from(Vec::new()), Board::new(), &line);
+    let started = Instant::now();
+    r.feed("Q");
+    let elapsed = started.elapsed();
+    assert_eq!(r.engine.mode(), lawh_core::Mode::CommandLine);
+    assert_stopped(&mut r, elapsed);
 }
 
 #[test]
@@ -627,6 +693,168 @@ fn a_count_on_an_insert_that_changes_nothing_types_its_keys_once_more() {
     // Typing does go on: a count on a key that types repeats it.
     let r = run(Board::new(), "3ia<Left><Right><Esc>");
     assert_eq!(text(&r, "t1"), "aaa");
+}
+
+/// Measures as [`FixedMeasure`] does, and reports `per_block` units of work for every text and
+/// formula it measured, as a renderer that had to lay each out first would
+/// ([`Measure::take_work`]); with `laid_out`, only the first time it measures each object, as
+/// a renderer that keeps its layouts does.
+struct Costly {
+    per_block: usize,
+    reported: usize,
+    laid_out: Option<HashSet<ObjectId>>,
+}
+
+impl Costly {
+    fn new(per_block: usize) -> Self {
+        Self {
+            per_block,
+            reported: 0,
+            laid_out: None,
+        }
+    }
+
+    fn keeping_layouts(per_block: usize) -> Self {
+        Self {
+            laid_out: Some(HashSet::new()),
+            ..Self::new(per_block)
+        }
+    }
+}
+
+impl Measure for Costly {
+    fn bounds(&mut self, object: &Object) -> Option<Rect> {
+        let new = self
+            .laid_out
+            .as_mut()
+            .is_none_or(|seen| seen.insert(object.id.clone()));
+        if object.shape.size().is_some() && new {
+            self.reported += self.per_block;
+        }
+        FixedMeasure.bounds(object)
+    }
+
+    fn take_work(&mut self) -> usize {
+        std::mem::take(&mut self.reported)
+    }
+}
+
+/// An engine for `board` after `script`, measuring with `measure`.
+fn run_measured(board: Board, script: &str, measure: &mut Costly) -> Engine {
+    let mut engine = Engine::new(board);
+    for key in parse_keys(script).unwrap() {
+        engine.feed(key, measure);
+    }
+    engine
+}
+
+#[test]
+fn the_work_a_measure_reports_counts_against_the_key() {
+    // `w` over 500 texts measures each once: what the measure reports comes on top of the
+    // engine's own count.
+    let mut fixed = run(texts(), "gg");
+    fixed.feed("w");
+    let own = fixed.engine.key_work();
+    let mut costly = Costly::new(1_000);
+    let mut engine = run_measured(texts(), "gg", &mut costly);
+    engine.feed(Key::char('w'), &mut costly);
+    assert_eq!(engine.key_work(), own + 500 * 1_000);
+    assert_eq!(engine.cursor(), &Cursor::Object(id("t1")));
+    // What it measured between keys (for the app's drawing, say) is no key's work.
+    assert!(
+        costly
+            .bounds(engine.board().get(&id("t0")).unwrap())
+            .is_some()
+    );
+    engine.feed(Key::char('l'), &mut costly);
+    assert_eq!(engine.key_work(), 0);
+    // Every command that measures counts it: Visual mode, its motions, `d` and `y` in it,
+    // jump labels, puts, and new blocks beside an object.
+    for script in ["v", "vj", "vjd", "vjy", "s", "xp", "o"] {
+        let mut costly = Costly::new(MAX_KEY_WORK / 1000);
+        let mut engine = run_measured(texts(), "gg", &mut costly);
+        for key in parse_keys(script).unwrap() {
+            engine.feed(key, &mut costly);
+        }
+        assert!(
+            engine.key_work() >= MAX_KEY_WORK / 2,
+            "{script}: {}",
+            engine.key_work()
+        );
+    }
+}
+
+#[test]
+fn a_measure_that_reports_more_than_the_budget_stops_the_key() {
+    // Measuring counts once done: `w` measured the board, past the budget, and goes no
+    // further.
+    let mut costly = Costly::new(MAX_KEY_WORK / 400);
+    let mut engine = run(texts(), "gg").engine;
+    engine.feed(Key::char('w'), &mut costly);
+    assert_eq!(engine.cursor(), &Cursor::Object(id("t0")));
+    assert_eq!(
+        engine.message().map(|m| m.text.as_str()),
+        Some(TOO_MUCH_WORK)
+    );
+    assert!(engine.key_work() <= MAX_KEY_WORK);
+    // A put stops before putting anything; Visual mode still selects what it measured.
+    let mut engine = run(texts(), "ggx").engine;
+    engine.feed(Key::char('p'), &mut costly);
+    assert_eq!(engine.board().len(), 499);
+    assert_eq!(
+        engine.message().map(|m| m.text.as_str()),
+        Some(TOO_MUCH_WORK)
+    );
+    let mut engine = run(texts(), "gg").engine;
+    engine.feed(Key::char('v'), &mut costly);
+    assert_eq!(engine.mode(), lawh_core::Mode::Visual);
+    assert_eq!(engine.selection(), [id("t0")]);
+    // With a measure that reports a little, a mapping of `w` stops sooner than with
+    // `FixedMeasure` (about a hundred `w`, see above).
+    let mut engine = Engine::new(texts());
+    let warnings = engine.source(&rc_repeating("w", 255));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let mut costly = Costly::new(4_000);
+    for key in parse_keys("ggQ").unwrap() {
+        engine.feed(key, &mut costly);
+    }
+    let Cursor::Object(at) = engine.cursor().clone() else {
+        panic!("{:?}", engine.cursor());
+    };
+    let n: usize = at.as_str()[1..].parse().unwrap();
+    assert!((25..50).contains(&n), "{at}");
+    assert_eq!(
+        engine.message().map(|m| m.text.as_str()),
+        Some(TOO_MUCH_WORK)
+    );
+}
+
+#[test]
+fn opening_a_board_does_not_count_laying_it_out() {
+    // A board whose text costs more than a key's budget to lay out the first time: the app's
+    // `go_first` still puts the cursor on its first object, with no message, and a key after
+    // it measures what is laid out by then at no extra cost.
+    let mut costly = Costly::keeping_layouts(MAX_KEY_WORK / 400);
+    let mut engine = Engine::new(texts());
+    engine.go_first(&mut costly);
+    assert_eq!(engine.cursor(), &Cursor::Object(id("t0")));
+    assert_eq!(engine.message(), None);
+    engine.feed(Key::char('w'), &mut costly);
+    assert_eq!(engine.cursor(), &Cursor::Object(id("t1")));
+    assert!(
+        engine.key_work() < MAX_KEY_WORK / 50,
+        "{}",
+        engine.key_work()
+    );
+    // A key that lays a board out the first time runs out (see above).
+    let mut costly = Costly::keeping_layouts(MAX_KEY_WORK / 400);
+    let mut engine = Engine::new(texts());
+    engine.feed(Key::char('w'), &mut costly);
+    assert_eq!(engine.cursor(), &Cursor::Grid(lawh_core::Point::ZERO));
+    assert_eq!(
+        engine.message().map(|m| m.text.as_str()),
+        Some(TOO_MUCH_WORK)
+    );
 }
 
 // The costliest single commands fit in the budget whole.

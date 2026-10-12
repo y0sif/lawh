@@ -9,7 +9,8 @@
 //! `H J K L` and the place rule, taken, put, resized, labelled for a jump, and edited by undo
 //! and redo, jump labels looked through, symbol names matched for `:sym`, fresh ids looked for,
 //! the bytes of `:` lines run, and the bytes of a text block that a key copies, scans, splits
-//! into graphemes or walks.
+//! into graphemes or walks. The measure adds what it costs to lay out text it has not laid out
+//! before ([`Measure::take_work`]): the app's renderer reports it.
 //!
 //! Counts never multiply a command that makes no progress: motions stop where they cannot go
 //! on, undo and redo at the ends of the history, a put that does not fit is refused whole (before
@@ -21,16 +22,18 @@
 //! nothing, an undo with a count stops after the steps it made, an Insert session that `.` was
 //! typing ends as `<Esc>` would end it (one undo step) and `.` keeps the whole change. A command
 //! in a text block counts its work once it has run, so it may pass the budget by its own work,
-//! which is at most a few milliseconds. Nothing more runs for that key: the typeahead is dropped
-//! and the message says so. The budget starts again with the next typed key, timeout or click.
+//! which is at most a few milliseconds; so does a command that measures, by what the measure
+//! reports (laying out a whole board of text afresh can pass it: about 70 ms in release at the
+//! caps on text). Nothing more runs for that key: the typeahead is dropped and the message says
+//! so. The budget starts again with the next typed key, timeout or click.
 //!
 //! Writes are counted apart, since the app does them and they cost it far more than they cost
 //! the engine: a key may ask for at most [`MAX_WRITES_PER_KEY`], and one past it stops the key
 //! the same way.
 
-use super::Engine;
 use super::exec::MAX_WRITES_PER_KEY;
 use super::text_motion::{Line, indicators_before, line_at};
+use super::{Engine, Measure};
 
 /// Most work one typed key (or a timeout) may do: 100,000,000 units, a unit being about a
 /// nanosecond of work in a debug build of lawh-core.
@@ -63,7 +66,11 @@ pub const MAX_KEY_WORK: usize = 100_000_000;
 // Weights: units for one item of each kind of work, from `work_unit_costs` in debug.
 
 /// Measuring one object, or one character of text or math, for the board's bounds: `w` over 500
-/// texts of 80 characters measured 40,500 in 0.8 ms.
+/// texts of 80 characters measured 40,500 in 0.8 ms. The app's renderer takes about as long for
+/// text it has laid out already (hashing it to look it up: `w` over 500 texts of 79 characters,
+/// 1.05 million units, took 0.63 ms in debug and 40 us in release, `work_unit_costs` in
+/// lawh-render's `tests/measure_cost.rs`); laying out text it has not costs far more, and it
+/// reports that ([`Measure::take_work`]).
 pub(super) const MEASURE_WORK: usize = 20;
 /// Putting one object in reading order (`w`, `b`, `gg`, `G`, the operators): `w` over 500
 /// rectangles took 0.18 ms.
@@ -152,9 +159,21 @@ impl Engine {
         self.work.spent
     }
 
-    /// A new typed key, timeout or click: its work starts from nothing.
-    pub(super) fn reset_work(&mut self) {
+    /// A new typed key, timeout or click: its work starts from nothing. What `measure` did
+    /// before it (for drawing, say) is dropped, not counted ([`Measure::take_work`]).
+    pub(super) fn reset_work(&mut self, measure: &mut dyn Measure) {
         self.work = Work::default();
+        measure.take_work();
+    }
+
+    /// Counts the work `measure` says it did beyond the engine's own count
+    /// ([`Measure::take_work`]), as [`Engine::charge`] does. Every command that measures calls
+    /// this once it has: measuring counts once done, so a command may pass the budget by what
+    /// it measured (a whole board of text laid out afresh, at most a little more than a key's
+    /// budget); it goes on with what it measured, and every later charge for the key fails.
+    pub(super) fn charge_measured(&mut self, measure: &mut dyn Measure) -> bool {
+        let work = measure.take_work();
+        self.charge(work)
     }
 
     /// Counts `units` of work for the key being run. False when they do not fit in what is

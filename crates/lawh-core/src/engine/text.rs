@@ -220,14 +220,12 @@ impl Engine {
             self.board.fresh_id("t"),
             empty_text(Point::ZERO, block_size),
         );
+        let empty_size = bounds(&empty, measure).size();
+        if !self.charge_measured(measure) {
+            return None;
+        }
         let mut looked = 0;
-        let at = place(
-            reference,
-            bounds(&empty, measure).size(),
-            &obstacles,
-            side,
-            &mut looked,
-        );
+        let at = place(reference, empty_size, &obstacles, side, &mut looked);
         if self.charge(PLACE_WORK.saturating_mul(looked)) {
             at
         } else {

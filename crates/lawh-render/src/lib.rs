@@ -3,9 +3,10 @@
 //!
 //! [`Renderer`] draws a [`lawh_core::Board`] through a [`Viewport`] with
 //! `vello_cpu`, headless and on the CPU. Text is laid out by parley with the
-//! bundled Inter font and math by [`lawh_math::MathEngine`]; no system font is
-//! ever loaded, so a board looks the same everywhere. Glyphs are drawn as
-//! unhinted outlines, so they stay crisp at any zoom.
+//! bundled Inter font, and Libertinus Math for the characters Inter lacks (such
+//! as the symbols `:sym` puts into text), and math by [`lawh_math::MathEngine`];
+//! no system font is ever loaded, so a board looks the same everywhere. Glyphs
+//! are drawn as unhinted outlines, so they stay crisp at any zoom.
 //!
 //! A frame never waits for math: a formula still compiling is drawn as its
 //! source in grey until the engine's waker asks for another frame, and only
@@ -21,7 +22,8 @@
 //! While editing, [`Renderer::render_with`] draws an [`Overlay`] over the board: the cursor, a
 //! Visual selection, the caret in a text block, jump labels, `:sym` completions and the status
 //! bar. The renderer also measures objects for the engine (`lawh_core::engine::Measure`), as it
-//! draws them, sizes included.
+//! draws them, sizes included, and reports what laying out text it had not laid out before cost,
+//! which counts against the engine's work budget for the key.
 //!
 //! Text and math have a size (`lawh_core::board::MIN_TEXT_SIZE` to `MAX_TEXT_SIZE`), a
 //! multiple of [`TEXT_SIZE_UNITS`]. Math is drawn about 1.27 times as large as text of the

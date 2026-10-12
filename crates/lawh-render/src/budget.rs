@@ -90,8 +90,12 @@ const NS_PER_EXAMINED_CHUNK: f64 = 10.0;
 /// with the font's contextual alternates off: `crate::text`), per other character (0.4 to
 /// 0.6 us), per place where parley starts another run because the script or the bidi level
 /// changes, or may (`crate::text::Facts::changes` and `brackets`: about 1.2 to 1.4 us more;
-/// text that changes at every character took 1.6 to 1.9 us a character, 2026-10-11) and per
-/// line.
+/// text that changes at every character took 1.6 to 1.9 us a character, 2026-10-11), per place
+/// where the font changes between the text font and the math font it falls back to
+/// (`crate::text::Facts::fonts`: Inter's letters and Libertinus Math's symbols in turn took
+/// 1.6 us a character) and per line. Since text falls back, a character neither font has is
+/// looked for in both, 0.05 to 0.2 us more: CJK took 0.81 us a character, text whose script
+/// changes at every character 1.8 us (2026-10-12).
 const NS_PER_LAYOUT: f64 = 5_000.0;
 const NS_PER_LAYOUT_ASCII_CHAR: f64 = 950.0;
 const NS_PER_LAYOUT_OTHER_CHAR: f64 = 800.0;
@@ -533,6 +537,48 @@ pub(crate) fn layout(chars: usize, non_ascii: usize, changes: usize, lines: usiz
 /// The estimated cost of hashing `bytes` bytes of text.
 pub(crate) fn hashing(bytes: usize) -> f64 {
     NS_PER_HASHED_BYTE * bytes as f64
+}
+
+/// Units of lawh-core's work budget for a key (`lawh_core::engine::MAX_KEY_WORK`) that each
+/// estimated nanosecond of laying out text costs when the renderer measures an object for the
+/// engine and has to lay its text out first ([`layout`]; `Measure::take_work`). Text laid out
+/// already costs only the engine's own count, its `MEASURE_WORK` per character.
+///
+/// A unit is one estimated nanosecond of release work, so a key that runs out of work by laying
+/// text out spends up to about 100 ms on it in release: the estimate leans high (laying out
+/// takes 0.5 to 1 times it, `calibrate_text_layout`), and the budget's other work is a little
+/// more. Measured with `key_costs` in `tests/measure_cost.rs` (Linux `x86_64`, 2026-10-12, two
+/// runs): a mapping that types into a text of 3,800 characters and then shows jump labels, or
+/// moves `w` and `b`, over and over, stops after 27 rounds in 54 to 55 ms (46 to 47 ms with
+/// `wb`) in release with words, after 14 rounds in 95 to 99 ms (93 to 95 ms) with the script
+/// changing at every character; in debug, where this crate builds without optimisation and lays
+/// text out about 3.3 times slower, in 179 to 187 ms (163 to 170 ms) and 277 to 290 ms (264 to
+/// 280 ms). Before laying out counted, the same keys ran 1,000 rounds (the mapping depth) in
+/// 1.9 s and 6.4 s in release, 7 s and 19.5 s in debug.
+///
+/// A whole board of text laid out afresh is estimated at up to 125 ms at lawh-core's text caps
+/// (`MAX_BOARD_TEXT_CHARS` of text whose script, direction and font change at every character,
+/// which takes about 70 ms, `text_caps_worst_cases` in `tests/bench.rs`), more than a key's
+/// budget at this rate: the engine counts measuring once it is done, so the command that
+/// measured goes on and the key stops after it, and `Engine::go_first` on a board just opened
+/// does not count it. An edit lays one text out again, estimated at 15 ms at most.
+pub(crate) const KEY_WORK_PER_LAYOUT_NS: f64 = 1.0;
+
+/// The units of the engine's work budget for `layout_ns` estimated nanoseconds of laying out
+/// text ([`KEY_WORK_PER_LAYOUT_NS`]), rounded up; 0 for nothing or a value that isn't a number.
+pub(crate) fn key_work(layout_ns: f64) -> usize {
+    let units = (layout_ns * KEY_WORK_PER_LAYOUT_NS).ceil();
+    if units.is_finite() && units > 0.0 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "positive and finite; a float past usize::MAX converts to usize::MAX"
+        )]
+        let units = units as usize;
+        units
+    } else {
+        0
+    }
 }
 
 #[expect(

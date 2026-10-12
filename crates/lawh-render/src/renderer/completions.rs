@@ -3,8 +3,8 @@
 //! over the command line: best first, from the top down, each row its name and then its value
 //! in a column, the selected row highlighted.
 //!
-//! Names and values are laid out in the status bar's font, which falls back to the math font
-//! for symbols the text font lacks (`crate::text::TextShaper::build_status`), and kept laid out
+//! Names and values are laid out as the status bar's text is, falling back to the math font
+//! for symbols the text font lacks (`crate::text::TextShaper::build`), and kept laid out
 //! with the status bar's strings ([`crate::status`]), so a frame lays out only rows that
 //! changed.
 

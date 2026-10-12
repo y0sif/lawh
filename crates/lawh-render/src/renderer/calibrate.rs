@@ -4,8 +4,8 @@
 //! measured time (past an empty frame, for drawing) and their ratio. Estimates lean high, so the
 //! ratio stays under 1 where the cost is high. In a release build each test then asserts that no
 //! row took more than [`MAX_RATIO`] times its estimate, give or take [`SLACK_MS`] of timer and
-//! frame noise; a debug build is far slower and only prints. Ignored by default; run in release
-//! (and on a quiet machine):
+//! frame noise, measuring a row that did up to [`MEASURES`] times first; a debug build is far
+//! slower and only prints. Ignored by default; run in release (and on a quiet machine):
 //! `nice -n 19 cargo test --release -p lawh-render --lib -- --ignored --nocapture calibrate`
 
 // Lets the helpers below unwrap and panic like test functions (see clippy.toml).
@@ -40,6 +40,18 @@ const MAX_RATIO: f64 = 1.2;
 /// each measurement varying from run to run.
 const SLACK_MS: f64 = 0.2;
 
+/// Most times a row is measured, in release: a row that took more than [`MAX_RATIO`] times its
+/// estimate plus [`SLACK_MS`] is measured again, up to this many times in all, and keeps the
+/// least of its times (each a median of several runs).
+///
+/// Under load a row now and then takes a few milliseconds more than it costs: other processes
+/// take the core for most of its runs. Gate runs of `calibrate_text_drawing` in release at a
+/// load of 1.5 to 7 failed 3 of 3 times (measured, 2026-10-12), each on about 0.16% of its rows,
+/// no row twice, rows of small estimates 0.3 to 4 ms over; main failed at the same rate. Load
+/// only adds time, so the least of a few medians is the nearest to what a row costs, while a row
+/// whose estimate is too low is over its limit every time.
+const MEASURES: usize = 3;
+
 /// Estimated and measured costs, printed as they come and checked at the end.
 #[derive(Default)]
 struct Rows {
@@ -49,16 +61,31 @@ struct Rows {
 }
 
 impl Rows {
-    fn add(&mut self, name: &str, estimate_ms: f64, took_ms: f64) {
+    /// Adds a row of estimate `estimate_ms` and the time `measure` takes it to run (a median
+    /// of several runs, in milliseconds), measured again when it is over its limit, in release
+    /// (see [`MEASURES`]).
+    fn add(&mut self, name: &str, estimate_ms: f64, mut measure: impl FnMut() -> f64) {
+        let over = |took_ms: f64| took_ms > MAX_RATIO * estimate_ms + SLACK_MS;
+        let mut took_ms = measure();
+        let mut times = 1;
+        while !cfg!(debug_assertions) && over(took_ms) && times < MEASURES {
+            took_ms = took_ms.min(measure());
+            times += 1;
+        }
         let ratio = took_ms / estimate_ms;
+        let note = if times > 1 {
+            format!("  (least of {times})")
+        } else {
+            String::new()
+        };
         println!(
-            "{name:<64} est {estimate_ms:>9.3} ms  took {took_ms:>9.3} ms  ratio {ratio:>5.2}"
+            "{name:<64} est {estimate_ms:>9.3} ms  took {took_ms:>9.3} ms  ratio {ratio:>5.2}{note}"
         );
         self.count += 1;
         if estimate_ms >= 1.0 {
             self.worst = self.worst.max(ratio);
         }
-        if took_ms > MAX_RATIO * estimate_ms + SLACK_MS {
+        if over(took_ms) {
             self.over.push(format!(
                 "{name}: est {estimate_ms:.3} ms, took {took_ms:.3} ms"
             ));
@@ -130,14 +157,16 @@ fn row(renderer: &mut Renderer, rows: &mut Rows, name: &str, layout: &MathLayout
         .math_cost(at, CAL_SIZE, layout, vp, clip, f64::INFINITY)
         .ns
         / 1e6;
-    let empty = empty_frame(renderer, vp);
-    let took = median(5, || {
-        renderer.begin_frame(vp);
-        let mut budget = Budget::unlimited();
-        assert!(renderer.draw_math(at, CAL_SIZE, layout, vp, clip, &mut budget));
-        black_box(renderer.finish_frame());
+    rows.add(name, estimate, || {
+        let empty = empty_frame(renderer, vp);
+        let took = median(5, || {
+            renderer.begin_frame(vp);
+            let mut budget = Budget::unlimited();
+            assert!(renderer.draw_math(at, CAL_SIZE, layout, vp, clip, &mut budget));
+            black_box(renderer.finish_frame());
+        });
+        ms(took.saturating_sub(empty))
     });
-    rows.add(name, estimate, ms(took.saturating_sub(empty)));
 }
 
 fn ms(d: Duration) -> f64 {
@@ -396,10 +425,11 @@ fn calibrate_estimating() {
         let examined = renderer
             .math_cost(at, CAL_SIZE, &layout, &vp, clip, f64::INFINITY)
             .examined();
-        let took = median(9, || {
-            black_box(renderer.math_cost(at, CAL_SIZE, &layout, &vp, clip, f64::INFINITY));
+        rows.add(&format!("estimating {n} {name}"), examined / 1e6, || {
+            ms(median(9, || {
+                black_box(renderer.math_cost(at, CAL_SIZE, &layout, &vp, clip, f64::INFINITY));
+            }))
         });
-        rows.add(&format!("estimating {n} {name}"), examined / 1e6, ms(took));
     }
     // Text plans: a chunk a line, and long lines of many chunks.
     for (name, per_line) in [
@@ -417,34 +447,36 @@ fn calibrate_estimating() {
         // What the budget charges for looking at every chunk.
         let (cost, _) = text_cost(plan, lines.clone(), &view, &vp, clip, f64::INFINITY);
         let examined = cost.examined();
-        let took = median(9, || {
-            black_box(text_cost(
-                plan,
-                lines.clone(),
-                &view,
-                &vp,
-                clip,
-                f64::INFINITY,
-            ));
-        });
         rows.add(
             &format!("estimating text, {name}: {chunks} chunks"),
             examined / 1e6,
-            ms(took),
+            || {
+                ms(median(9, || {
+                    black_box(text_cost(
+                        plan,
+                        lines.clone(),
+                        &view,
+                        &vp,
+                        clip,
+                        f64::INFINITY,
+                    ));
+                }))
+            },
         );
     }
     // A board's worth of text, hashed once and looked up three times as a frame does.
     let text = cycled(0, MAX_BOARD_TEXT_CHARS, 75, "aα漢 ");
-    let took = median(9, || {
-        let key = renderer.text.key(&text);
-        for _ in 0..3 {
-            black_box(renderer.text.known(key, &text));
-        }
-    });
     rows.add(
         &format!("hashing and looking up {} bytes of text", text.len()),
         budget::hashing(text.len()) / 1e6,
-        ms(took),
+        || {
+            ms(median(9, || {
+                let key = renderer.text.key(&text);
+                for _ in 0..3 {
+                    black_box(renderer.text.known(key, &text));
+                }
+            }))
+        },
     );
     rows.check();
 }
@@ -501,7 +533,7 @@ const WORDS: &str = "lorem ipsum dolor sit amet consectetur adipiscing elit sed 
 
 /// Kinds of text, as the alphabets they cycle through: the costliest ones lawh-core's text caps
 /// were measured with (`text_caps_worst_cases` in `tests/bench.rs`) and plainer ones.
-const TEXT_KINDS: [(&str, &str); 21] = [
+const TEXT_KINDS: [(&str, &str); 24] = [
     ("words", WORDS),
     ("one word", "x"),
     ("greek", "αβγδε ζηθικ λμνξο "),
@@ -534,6 +566,12 @@ const TEXT_KINDS: [(&str, &str); 21] = [
     // level and a tab goes back to the text's (bidi rule L1), so every character is a run.
     ("embedding and tabs", "\u{202B}a\t"),
     ("emoji", "👨\u{200D}👩\u{200D}👧\u{FE0F}"),
+    // Symbols Inter lacks, set in Libertinus Math (`crate::text`), between Inter's spaces; and
+    // the font changing at every character.
+    ("math symbols", "∧∠⊞⨁⟶ "),
+    ("symbols and letters", "a∧"),
+    // Hebrew is Libertinus Math's too: the font changes with the script and the direction.
+    ("hebrew", "שלום עולם "),
     // Lines of nothing but their tag: every character a line break.
     ("newlines", "\n"),
 ];
@@ -622,37 +660,36 @@ fn calibrate_text_layout() {
                     continue;
                 }
                 let mut shaper = TextShaper::new();
-                let mut texts: Vec<String> = (0..9)
-                    .map(|_| {
-                        tag += 1;
-                        cycled(tag, n, per_line, alphabet)
-                    })
-                    .collect();
-                let known = {
-                    let key = shaper.key(&texts[0]);
-                    shaper.known(key, &texts[0])
+                let first = cycled(tag + 1, n, per_line, alphabet);
+                let facts = {
+                    let key = shaper.key(&first);
+                    shaper.known(key, &first).facts
                 };
-                let facts = known.facts;
                 let estimate = facts.layout_cost() / 1e6;
-                // Two to warm up, then the median of seven.
-                let mut times: Vec<Duration> = texts
-                    .drain(..)
-                    .map(|text| {
-                        let key = shaper.key(&text);
-                        let t = Instant::now();
-                        black_box(shaper.lay_out(key, &text, &mut glyphs));
-                        t.elapsed()
-                    })
-                    .skip(2)
-                    .collect();
-                times.sort();
+                // Nine texts new to the cache: two to warm up, then the median of seven.
+                let measure = || {
+                    let mut times: Vec<Duration> = (0..9)
+                        .map(|_| {
+                            tag += 1;
+                            let text = cycled(tag, n, per_line, alphabet);
+                            let key = shaper.key(&text);
+                            let t = Instant::now();
+                            black_box(shaper.lay_out(key, &text, &mut glyphs));
+                            t.elapsed()
+                        })
+                        .skip(2)
+                        .collect();
+                    times.sort();
+                    ms(times[times.len() / 2])
+                };
                 rows.add(
                     &format!(
-                        "lay out {kind}, {shape}: {} chars {} changes {} brackets {} lines",
-                        facts.chars, facts.changes, facts.brackets, facts.lines
+                        "lay out {kind}, {shape}: {} chars {} changes {} brackets {} fonts {} \
+                         lines",
+                        facts.chars, facts.changes, facts.brackets, facts.fonts, facts.lines
                     ),
                     estimate,
-                    ms(times[times.len() / 2]),
+                    measure,
                 );
             }
         }
@@ -816,26 +853,29 @@ fn calibrate_text_drawing() {
                         let (cost, _) =
                             text_cost(plan, view.lines(plan), &view, &vp, clip, f64::INFINITY);
                         let estimate = cost.ns / 1e6;
-                        let empty = empty_frame(&mut renderer, &vp);
-                        let took = median(5, || {
-                            renderer.begin_frame(&vp);
-                            let mut budget = Budget::unlimited();
-                            renderer.draw_text(
-                                Point::ZERO,
-                                size,
-                                key,
-                                &text,
-                                INK,
-                                &vp,
-                                clip,
-                                &mut budget,
-                            );
-                            black_box(renderer.finish_frame());
-                        });
+                        let measure = || {
+                            let empty = empty_frame(&mut renderer, &vp);
+                            let took = median(5, || {
+                                renderer.begin_frame(&vp);
+                                let mut budget = Budget::unlimited();
+                                renderer.draw_text(
+                                    Point::ZERO,
+                                    size,
+                                    key,
+                                    &text,
+                                    INK,
+                                    &vp,
+                                    clip,
+                                    &mut budget,
+                                );
+                                black_box(renderer.finish_frame());
+                            });
+                            ms(took.saturating_sub(empty))
+                        };
                         rows.add(
                             &format!("{width}x{height} {label} size {size} {kind}, {shape}"),
                             estimate,
-                            ms(took.saturating_sub(empty)),
+                            measure,
                         );
                     }
                 }
@@ -850,10 +890,7 @@ fn calibrate_text_drawing() {
         let bounds = renderer.board_bounds(&board).unwrap();
         for (width, height, scale) in SCREENS {
             for (label, vp) in text_views(bounds, width, height, scale) {
-                let empty = empty_frame(&mut renderer, &vp);
-                let took = median(5, || {
-                    black_box(renderer.draw_frame(&board, &vp, MathWait::Yes));
-                });
+                renderer.draw_frame(&board, &vp, MathWait::Yes);
                 let stats = renderer.last_frame();
                 assert_eq!(
                     (stats.downgraded, stats.laid_out, stats.text_pending),
@@ -863,7 +900,13 @@ fn calibrate_text_drawing() {
                 rows.add(
                     &format!("{width}x{height} {label} board {name}"),
                     ms(stats.estimated),
-                    ms(took.saturating_sub(empty)),
+                    || {
+                        let empty = empty_frame(&mut renderer, &vp);
+                        let took = median(5, || {
+                            black_box(renderer.draw_frame(&board, &vp, MathWait::Yes));
+                        });
+                        ms(took.saturating_sub(empty))
+                    },
                 );
             }
         }

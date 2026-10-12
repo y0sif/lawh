@@ -288,6 +288,9 @@ pub struct Renderer {
     resized: bool,
     last: FrameStats,
     work: Work,
+    /// The estimated cost of the text laid out to measure objects for the engine since it last
+    /// asked ([`lawh_core::engine::Measure::take_work`]), in nanoseconds.
+    measured_ns: f64,
 }
 
 impl Renderer {
@@ -321,6 +324,7 @@ impl Renderer {
             resized: false,
             last: FrameStats::default(),
             work: Work::default(),
+            measured_ns: 0.0,
         }
     }
 

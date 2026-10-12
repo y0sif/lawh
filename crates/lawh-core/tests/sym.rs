@@ -206,11 +206,14 @@ fn completions_show_on_a_sym_line_and_follow_its_query() {
 fn matching_runs_again_only_when_the_query_changes() {
     let mut r = sym_run(Board::new(), ":sym al");
     let al = rows(&r);
-    assert!(r.engine.key_work() > 0);
-    // Moving on the line, and spaces after the query, leave it as it was.
+    let matched = r.engine.key_work();
+    assert!(matched > 1000, "{matched}");
+    // Moving on the line, and spaces after the query, leave it as it was. A space changes the
+    // line, which is copied (a unit a byte), but not the query.
     for key in ["<Left>", "<End>", "<Space>", "<Home>"] {
         r.feed(key);
-        assert_eq!((r.engine.key_work(), rows(&r)), (0, al.clone()), "{key}");
+        assert!(r.engine.key_work() < 100, "{key}: {}", r.engine.key_work());
+        assert_eq!(rows(&r), al.clone(), "{key}");
     }
     r.feed("<End><BS>p");
     assert!(r.engine.key_work() > 0);

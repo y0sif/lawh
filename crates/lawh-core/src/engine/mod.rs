@@ -271,7 +271,9 @@ impl Engine {
     /// is dropped, in every mode: `<S-CR>` runs the command line. A mapping of the shifted key
     /// still wins.
     ///
-    /// `measure` gives the bounds of text and math, for object motions, Visual mode and puts.
+    /// `measure` gives the bounds of text and math, for object motions, Visual mode and puts,
+    /// and what laying text out to measure it cost, which counts against the key's work
+    /// ([`Measure::take_work`]).
     pub fn feed(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         let key = key.canonical();
         self.message = None;
@@ -300,7 +302,7 @@ impl Engine {
     /// and puts the cursor on `hit`, or else on the grid point nearest `at` (whole units). A
     /// point that is not finite leaves the cursor where it is.
     pub fn click(&mut self, at: Point, hit: Option<ObjectId>, measure: &mut dyn Measure) {
-        self.reset_work();
+        self.reset_work(measure);
         if self.session.is_some() {
             self.end_session(false, measure);
         }
@@ -393,13 +395,18 @@ impl Engine {
         self.board.position(id)
     }
 
-    /// The bounds of every object, in z-order.
-    fn layout(&self, measure: &mut dyn Measure) -> Vec<Rect> {
-        self.board
+    /// The bounds of every object, in z-order, counting the work `measure` reports for them
+    /// (and for anything it measured since it last reported: [`Engine::charge_measured`]). The
+    /// caller counts the engine's own share first ([`Engine::layout_work`]).
+    fn layout(&mut self, measure: &mut dyn Measure) -> Vec<Rect> {
+        let layout = self
+            .board
             .objects()
             .iter()
             .map(|o| bounds(o, measure))
-            .collect()
+            .collect();
+        self.charge_measured(measure);
+        layout
     }
 
     /// Moves the cursor point by whole grid units; an object cursor becomes a grid point.
@@ -517,7 +524,8 @@ fn unshifted(key: Key) -> Key {
     }
 }
 
-/// The bounds of `object`, or a box of zero size at its anchor when it cannot be measured.
+/// The bounds of `object`, or a box of zero size at its anchor when it cannot be measured. The
+/// caller counts the work `measure` reports for it ([`Engine::charge_measured`]).
 fn bounds(object: &Object, measure: &mut dyn Measure) -> Rect {
     measure.bounds(object).unwrap_or_else(|| {
         let p = anchor(&object.shape);

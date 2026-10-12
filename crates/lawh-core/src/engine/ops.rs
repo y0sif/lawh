@@ -221,7 +221,11 @@ impl Engine {
             .copied()
             .reduce(|a, b| a.union(b))
             .unwrap_or_default();
+        // Counts what `measure` reports for the group and the board together.
         let mut obstacles = self.layout(measure);
+        if self.out_of_work() {
+            return false;
+        }
         let mut reference = match &self.cursor {
             Cursor::Grid(_) => None,
             Cursor::Object(id) => self.index_of(id).and_then(|i| obstacles.get(i).copied()),

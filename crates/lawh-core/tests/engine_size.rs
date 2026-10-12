@@ -228,6 +228,73 @@ fn size_keys_in_visual_mode_report_the_ends_and_what_has_no_size() {
     assert!(!r.engine.is_modified());
 }
 
+// What is highlighted after a Visual resize is what `d`, `x`, `y` and `:si` act on.
+
+/// A text and a small circle below its second half: the circle is outside the rectangle from
+/// the grid's origin to the text until the text grows over it.
+fn text_over_circle() -> Board {
+    board("text id=t2 x=2 y=0 \"ab\"\ncircle id=c1 x=2.3 y=1 r=0.2\n")
+}
+
+/// A long text and a short one above it, to its right: `vK` from the long one selects both.
+fn long_and_short() -> Board {
+    board("text id=t1 x=0 y=0 \"abcdefgh\"\ntext id=t2 x=1 y=-2 \"x\"\n")
+}
+
+#[test]
+fn visual_d_after_a_resize_leaves_what_the_rectangle_gained() {
+    // The cursor's text grows to 1.2 units tall, so the rectangle now holds the circle too;
+    // only the text is highlighted, and only the text goes.
+    let mut r = run(text_over_circle(), "vw<C-a><C-a><C-a>");
+    assert_eq!(r.engine.selection(), [id("t2")]);
+    assert_eq!(size(&r, "t2"), 2.0);
+    r.feed("d");
+    assert_eq!(r.engine.board().len(), 1);
+    assert!(r.engine.board().contains(&id("c1")));
+    assert_snapshot!(r.snapshot());
+    // `x` the same.
+    let mut r = run(text_over_circle(), "vw<C-a><C-a><C-a>x");
+    assert!(r.engine.board().contains(&id("c1")));
+    // The next motion selects from the rectangle again: the circle with it.
+    r = run(text_over_circle(), "vw<C-a><C-a><C-a>wb");
+    assert_eq!(r.engine.selection(), [id("t2"), id("c1")]);
+    r.feed("d");
+    assert!(r.engine.board().is_empty());
+}
+
+#[test]
+fn visual_d_after_a_resize_takes_what_grew_out_of_the_rectangle() {
+    // `t1` grows past where `v` was pressed, out of the rectangle; it is still highlighted,
+    // and goes with `t2`.
+    let mut r = run(long_and_short(), "");
+    r.click(0.1, 0.1, Some("t1"));
+    r.feed("vK<C-a>");
+    assert_eq!(r.engine.selection(), [id("t1"), id("t2")]);
+    r.feed("d");
+    assert!(r.engine.board().is_empty());
+    assert_snapshot!(r.snapshot());
+    // One undo step puts both back, at their new size.
+    r.feed("u");
+    assert_eq!((size(&r, "t1"), size(&r, "t2")), (1.25, 1.25));
+}
+
+#[test]
+fn visual_y_and_si_after_a_resize_act_on_what_is_highlighted() {
+    // `y` yanks both, and `p` puts both.
+    let mut r = run(long_and_short(), "");
+    r.click(0.1, 0.1, Some("t1"));
+    r.feed("vK<C-a>y");
+    assert_eq!(r.engine.mode(), Mode::Normal);
+    r.feed("p");
+    assert_eq!(r.engine.board().len(), 4);
+    assert_snapshot!(r.snapshot());
+    // `:si` from Visual mode keeps the same selection.
+    let mut r = run(long_and_short(), "");
+    r.click(0.1, 0.1, Some("t1"));
+    r.feed("vK<C-a>:si 3<CR>");
+    assert_eq!((size(&r, "t1"), size(&r, "t2")), (3.0, 3.0));
+}
+
 #[test]
 fn dot_does_not_repeat_a_visual_resize() {
     // `.` would repeat the `<C-a>` before it on one block, not the Visual change: it forgets.

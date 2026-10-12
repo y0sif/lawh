@@ -10,7 +10,8 @@
 //!
 //! The `overlay_*` goldens are window frames ([`Renderer::render_with`]) with the cursor, a
 //! Visual selection, a caret, jump labels, `:sym` completions or the status bar drawn over the
-//! area board. The `sizes` golden is text and math at sizes 0.5, 1, 2 and 4.
+//! area board. The `sizes` golden is text and math at sizes 0.5, 1, 2 and 4, and `text_symbols`
+//! text with symbols Inter lacks, set in Libertinus Math.
 //!
 //! `LAWH_UPDATE_GOLDEN=1 cargo test -p lawh-render --test golden` rewrites
 //! the images. Look at every rewritten image before committing it.
@@ -375,6 +376,21 @@ fn text_and_math_at_four_sizes() {
     let bounds = renderer.board_bounds(&board).unwrap();
     let vp = Viewport::fit(bounds, 800, 600, 1.0);
     check_golden("sizes", &renderer.render_png(&board, &vp).unwrap());
+}
+
+/// Symbols in text, as `:sym` puts them there: `∧`, `∠` and `⊞` are Libertinus Math's, which
+/// text falls back to for characters Inter lacks, set between Inter's letters on one baseline.
+#[test]
+fn text_with_symbols_from_the_math_font() {
+    let board = common::board(
+        "lawh version=1\n\
+         text id=t1 x=0 y=0 \"p \u{2227} q, \u{2220}ABC, A \u{229E} B\"\n\
+         text id=t2 x=0 y=1 size=2 \"\u{2227}\u{2220}\u{229E} xyz\"\n",
+    );
+    let mut renderer = Renderer::new_trusted();
+    let bounds = renderer.board_bounds(&board).unwrap();
+    let vp = Viewport::fit(bounds, 800, 300, 1.0);
+    check_golden("text_symbols", &renderer.render_png(&board, &vp).unwrap());
 }
 
 /// A label on each object of the area board but the current one (`t2`), in the order the

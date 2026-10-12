@@ -235,9 +235,11 @@ fn follow_links(path: &Path) -> io::Result<PathBuf> {
 /// `a` and `b` name one file: each path with its symbolic links followed as [`write_atomic`]
 /// follows them ([`follow_links`]), then on Unix the same device and inode, elsewhere the same
 /// path once [`fs::canonicalize`] has made it absolute (the standard library has no stable file
-/// id on Windows). So `~/a.lawh`, an absolute path and `./a.lawh` of one file are one file, and
-/// so is a link to it. Asked after a write, it also sees that a hard link the write replaced with
-/// a new file no longer shares the other name's file.
+/// id on Windows). So an absolute path and `./a.lawh` of one file are one file, and so is a link
+/// to it. It takes paths as they are: a `~` in one names a directory `~`, so a `:w ~/a.lawh` is
+/// compared once [`write_target`] has made it the home directory's. Asked after a write, it also
+/// sees that a hard link the write replaced with a new file no longer shares the other name's
+/// file.
 ///
 /// False when either path can't be looked up (a file not written yet, a loop of links); the
 /// reason is logged at debug level.

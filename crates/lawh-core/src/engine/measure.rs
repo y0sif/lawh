@@ -6,9 +6,29 @@ use kurbo::Rect;
 use crate::board::{Object, Shape};
 
 /// Tells the engine the bounds of objects, in grid units.
+///
+/// Measuring counts against the work a key may do
+/// ([`MAX_KEY_WORK`](super::MAX_KEY_WORK)). The engine counts a fixed amount for every object
+/// and every character it has measured (`MEASURE_WORK` in `work.rs`, measured with
+/// [`FixedMeasure`]); a measure that can do more than that, such as a renderer laying out a
+/// text it has not laid out before, says how much more with [`Measure::take_work`].
 pub trait Measure {
     /// The box `object` covers on the board, or `None` when it cannot be measured.
     fn bounds(&mut self, object: &Object) -> Option<Rect>;
+
+    /// The work [`Measure::bounds`] did since this was last called, beyond what the engine
+    /// counts for it, in units of [`MAX_KEY_WORK`](super::MAX_KEY_WORK) (about a nanosecond of
+    /// work each), and starts counting again from nothing.
+    ///
+    /// The engine asks after every time it measures, and counts the answer against the key
+    /// being run. It also asks when a key, a timeout or a click starts, and drops the answer:
+    /// measuring done between keys (for drawing, say) is no key's work.
+    ///
+    /// The default is 0, for a measure whose work the engine's own count covers, as
+    /// [`FixedMeasure`]'s does.
+    fn take_work(&mut self) -> usize {
+        0
+    }
 }
 
 /// The bounds of shapes that need no layout: ellipses, rectangles and the box between a line's

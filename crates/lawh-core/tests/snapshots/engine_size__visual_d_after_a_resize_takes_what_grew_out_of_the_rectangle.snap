@@ -1,0 +1,6 @@
+---
+source: crates/lawh-core/tests/engine_size.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=grid(1,-2) keys=4
+lawh version=1

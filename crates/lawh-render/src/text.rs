@@ -1,4 +1,9 @@
-//! Text layout with parley and the bundled text font, cached by string.
+//! Text layout with parley and the bundled fonts, cached by string.
+//!
+//! Text is set in the bundled text font (Inter), and a character it lacks in the next bundled
+//! font that has it (Libertinus Math), so the symbols `:sym` puts into text show, as they do in
+//! the status bar; a character no bundled font has is Inter's missing-glyph box. No system font
+//! is ever looked at.
 //!
 //! A frame hashes each text once ([`TextShaper::key`]) and looks it up by that hash from then
 //! on, comparing it with the text cached under it. For every text it has seen, the cache keeps
@@ -23,8 +28,8 @@ use lawh_core::board::{MAX_BOARD_TEXT_CHARS, MAX_OBJECTS};
 use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
 use parley::setting::{FontFeature, Tag};
 use parley::{
-    Alignment, AlignmentOptions, FontContext, FontFamily, FontFamilyName, FontFeatures, Layout,
-    LayoutContext, PositionedLayoutItem, StyleProperty,
+    Alignment, AlignmentOptions, FontContext, FontData, FontFamily, FontFamilyName, FontFeatures,
+    Layout, LayoutContext, PositionedLayoutItem, StyleProperty,
 };
 
 use parley_data::Properties;
@@ -45,14 +50,115 @@ const FALLBACK_FAMILY: &str = "Inter";
 /// brackets, `:` and other punctuation next to capitals or between digits; automatic fractions
 /// (`frac`, `numr`, `dnom`) shrink the digits around U+2044 FRACTION SLASH. `calt` also made
 /// laying out brackets and most other punctuation 3 to 20 times slower, `)`, `]` and `}` worst
-/// (`calibrate_text_layout`, 2026-10-11). Inter has no `liga`, `clig` or `rlig`, and the shaper
-/// leaves `dlig` and `case` off. `ccmp` stays: it only joins a letter and its combining marks.
-const FEATURES_OFF: [FontFeature; 4] = [
+/// (`calibrate_text_layout`, 2026-10-11). Libertinus Math's ligatures (`liga`: `fi`, `ffl`, and
+/// `ch` or `ct` with a zero-width joiner between) would join letters set in it, as letters are
+/// when a joiner or a mark only it has goes with them. Inter has no `liga`, neither font has
+/// `clig` or `rlig`, and the shaper leaves `dlig` and `case` off. `ccmp` stays: it only joins a
+/// letter and its combining marks.
+const FEATURES_OFF: [FontFeature; 5] = [
     FontFeature::new(Tag::new(b"calt"), 0),
     FontFeature::new(Tag::new(b"frac"), 0),
     FontFeature::new(Tag::new(b"numr"), 0),
     FontFeature::new(Tag::new(b"dnom"), 0),
+    FontFeature::new(Tag::new(b"liga"), 0),
 ];
+
+/// Which characters board text sets in a fallback font: those the text font
+/// (`lawh_math::fonts()[0]`) lacks and another bundled font has, read from the fonts' character
+/// maps once, as parley picks a font for a character (`Facts::fonts`).
+struct Fallback {
+    /// A bit for each Unicode scalar value, set when the character falls back.
+    bits: Vec<u64>,
+    /// One character that falls back to each fallback font that has any, to measure the height
+    /// of a line set in it.
+    samples: Vec<char>,
+    /// The widest advance of a character that falls back, in ems.
+    widest_em: f32,
+}
+
+/// Unicode scalar values and surrogates: every value a `char` can have, and more.
+const CODE_POINTS: usize = 0x11_0000;
+
+impl Fallback {
+    fn new() -> Self {
+        let faces: Vec<Option<ttf_parser::Face<'static>>> = lawh_math::fonts()
+            .iter()
+            .map(|asset| ttf_parser::Face::parse(asset.data, asset.index).ok())
+            .collect();
+        let mut fallback = Self {
+            bits: vec![0; CODE_POINTS / 64],
+            samples: Vec::new(),
+            widest_em: 0.0,
+        };
+        let Some((text, others)) = faces.split_first() else {
+            return fallback;
+        };
+        let has =
+            |face: &ttf_parser::Face<'_>, c: char| face.glyph_index(c).is_some_and(|g| g.0 != 0);
+        for face in others.iter().flatten() {
+            // A letter or a digit, if the font has one that falls back: a mark, a space or a
+            // control character might not make a line of its own height.
+            let mut sample = None;
+            let mut any = None;
+            let mut code_points = Vec::new();
+            for subtable in face
+                .tables()
+                .cmap
+                .into_iter()
+                .flat_map(|cmap| cmap.subtables)
+            {
+                if subtable.is_unicode() {
+                    subtable.codepoints(|cp| code_points.push(cp));
+                }
+            }
+            code_points.sort_unstable();
+            code_points.dedup();
+            for c in code_points.into_iter().filter_map(char::from_u32) {
+                let in_text = text.as_ref().is_some_and(|text| has(text, c));
+                if in_text || !has(face, c) || fallback.falls_back(c) {
+                    continue;
+                }
+                let index = u32::from(c) as usize;
+                if let Some(word) = fallback.bits.get_mut(index / 64) {
+                    *word |= 1 << (index % 64);
+                }
+                if c.is_alphanumeric() {
+                    sample.get_or_insert(c);
+                }
+                any.get_or_insert(c);
+                let advance = face
+                    .glyph_index(c)
+                    .and_then(|g| face.glyph_hor_advance(g))
+                    .map_or(0.0, f32::from);
+                let em = advance / f32::from(face.units_per_em().max(1));
+                fallback.widest_em = fallback.widest_em.max(em);
+            }
+            fallback.samples.extend(sample.or(any));
+        }
+        fallback
+    }
+
+    /// Whether board text sets `c` in a fallback font.
+    fn falls_back(&self, c: char) -> bool {
+        let index = u32::from(c) as usize;
+        self.bits
+            .get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
+    }
+}
+
+/// The characters board text sets in a fallback font, found on first use.
+static FALLBACK: LazyLock<Fallback> = LazyLock::new(Fallback::new);
+
+/// The index in `lawh_math::fonts` of the bundled font `font` is; 0, the text font, for any
+/// other.
+pub(crate) fn font_index(font: &FontData) -> usize {
+    let data = font.data.data().as_ptr();
+    lawh_math::fonts()
+        .iter()
+        .position(|asset| std::ptr::eq(asset.data.as_ptr(), data) && asset.index == font.index)
+        .unwrap_or(0)
+}
 
 /// Most glyphs in one [`Chunk`] of a [`Plan`].
 const CHUNK_GLYPHS: u32 = 64;
@@ -133,6 +239,12 @@ pub(crate) struct Facts {
     /// gives each pair the direction of what is inside it or around it (rule N0), which can start
     /// runs [`Splits`] doesn't count, so each counts as one more possible change.
     pub(crate) brackets: usize,
+    /// Places where the font changes from one character to the next, between the text font and
+    /// a fallback font ([`Fallback`]): parley starts another run there too. Counted for each
+    /// character, which is no fewer than parley's: it picks a font for a letter and its
+    /// combining marks together, the font that has them all. Where the script or the direction
+    /// changes too, the run counts twice.
+    pub(crate) fonts: usize,
     /// Lines, as lawh-core counts them (`lawh_core::board::MAX_TEXT_LINES`).
     pub(crate) lines: usize,
     /// Characters in the longest line.
@@ -146,18 +258,25 @@ impl Facts {
             non_ascii: 0,
             changes: 0,
             brackets: 0,
+            fonts: 0,
             lines: 1,
             longest_line: 0,
         };
         let mut line = 0;
         let mut after_cr = false;
         let mut splits = Splits::new(text);
+        let fallback = &*FALLBACK;
+        let mut last_fell_back = None;
         for c in text.chars() {
             facts.chars += 1;
             if !c.is_ascii() {
                 facts.non_ascii += 1;
             }
             splits.push(c);
+            let falls_back = fallback.falls_back(c);
+            if last_fell_back.replace(falls_back) == Some(!falls_back) {
+                facts.fonts += 1;
+            }
             match c {
                 // CRLF breaks a line once.
                 '\n' if after_cr => {}
@@ -180,7 +299,7 @@ impl Facts {
         budget::layout(
             self.chars,
             self.non_ascii,
-            self.changes + self.brackets,
+            self.changes + self.brackets + self.fonts,
             self.lines,
         )
     }
@@ -534,6 +653,7 @@ impl Plan {
                     continue;
                 };
                 run += 1;
+                let font = font_index(glyph_run.run().font());
                 for glyph in glyph_run.positioned_glyphs() {
                     if let Some((chunk, count, _)) = open
                         && (count >= CHUNK_GLYPHS
@@ -542,8 +662,7 @@ impl Plan {
                         chunks.push(chunk);
                         open = None;
                     }
-                    // Text is laid out with the bundled text font only, `fonts()[0]`.
-                    let stats = table.stats(0, glyph.id);
+                    let stats = table.stats(font, glyph.id);
                     let [left, bottom, right, top] = stats.ink_em.map(|v| v * LAYOUT_EM);
                     let ink = [
                         glyph.x + left,
@@ -666,15 +785,14 @@ impl Entry {
     }
 }
 
-/// Lays out board text with the bundled text font (`lawh_math::fonts()[0]`) only,
-/// and caches what it laid out (see the module docs). Status strings ([`Self::build_status`])
-/// fall back to the bundled math font for characters the text font lacks.
+/// Lays out text in the bundled text font (`lawh_math::fonts()[0]`), falling back to the other
+/// bundled fonts for characters it lacks, and caches what it laid out for the board (see the
+/// module docs). Status strings are laid out the same way, and cached apart (`crate::status`).
 pub(crate) struct TextShaper {
     fonts: FontContext,
     layouts: LayoutContext<()>,
-    family: &'static str,
-    /// The families of status strings: the text font, then every other bundled font.
-    status_families: Vec<FontFamilyName<'static>>,
+    /// The families text is set in: the text font, then every other bundled font.
+    families: Vec<FontFamilyName<'static>>,
     hasher: RandomState,
     cache: KeyMap<Entry>,
     /// Estimated bytes of everything in `cache`.
@@ -682,8 +800,10 @@ pub(crate) struct TextShaper {
     limit: usize,
     /// Counts lookups, for least-recently-used order.
     tick: u64,
-    /// The height of a line and the widest advance of the font, in layout units: the size of a
-    /// text not laid out yet is estimated from them.
+    /// The height of a line and the widest advance of a character, in layout units: the size of
+    /// a text not laid out yet is estimated from them. A line with a character in a fallback
+    /// font is as high as its fonts' ascents and descents together: Libertinus Math's descent
+    /// is 0.005 em more than Inter's, so this is the height of such a line.
     line_height: f32,
     max_advance: f32,
     /// How far below the top of its box a one-line text's baseline is, in layout units.
@@ -691,6 +811,10 @@ pub(crate) struct TextShaper {
     /// Texts hashed and laid out since this shaper was made, for logs and tests.
     pub(crate) hashed: u64,
     pub(crate) built: u64,
+    /// The estimated cost of every text laid out since this shaper was made
+    /// ([`Facts::layout_cost`], nanoseconds), for the work measuring costs the engine
+    /// (`lawh_core::engine::Measure::take_work`).
+    pub(crate) built_ns: f64,
 }
 
 impl TextShaper {
@@ -707,10 +831,9 @@ impl TextShaper {
             }),
             source_cache: SourceCache::default(),
         };
-        // Every bundled font is registered, but board text names only the text font, and the
-        // collection has no fallback families (no system fonts): board text never falls back to
-        // another font, so its glyphs are all Inter's (`Plan` looks their outlines up there).
-        // Status strings name the math font after it, for the symbols `:sym` lists.
+        // Every bundled font is registered and text names them all, the text font first. The
+        // collection has no fallback families of its own (no system fonts), so a character no
+        // bundled font has is the text font's missing-glyph box.
         for asset in lawh_math::fonts() {
             let families = fonts
                 .collection
@@ -724,13 +847,15 @@ impl TextShaper {
             tracing::warn!("no bundled text font");
         }
         let family = asset.map_or(FALLBACK_FAMILY, |asset| asset.family);
-        let mut status_families = vec![FontFamilyName::named(family)];
-        status_families.extend(
+        let mut families = vec![FontFamilyName::named(family)];
+        families.extend(
             lawh_math::fonts()
                 .iter()
                 .filter(|other| other.family != family)
                 .map(|other| FontFamilyName::named(other.family)),
         );
+        let fallback = &*FALLBACK;
+        // Any glyph of the text font, and the characters that fall back to the others.
         let max_advance = asset
             .and_then(|asset| ttf_parser::Face::parse(asset.data, asset.index).ok())
             .map_or(LAYOUT_EM * 2.0, |face| {
@@ -739,12 +864,12 @@ impl TextShaper {
                     .max()
                     .unwrap_or(0);
                 f32::from(widest) / f32::from(face.units_per_em().max(1)) * LAYOUT_EM
-            });
+            })
+            .max(fallback.widest_em * LAYOUT_EM);
         let mut shaper = Self {
             fonts,
             layouts: LayoutContext::new(),
-            family,
-            status_families,
+            families,
             hasher: RandomState::new(),
             cache: KeyMap::default(),
             bytes: 0,
@@ -755,9 +880,12 @@ impl TextShaper {
             baseline: LAYOUT_EM,
             hashed: 0,
             built: 0,
+            built_ns: 0.0,
         };
         let x = shaper.build("x");
-        let line = x.height();
+        let mut every_font = String::from("x");
+        every_font.extend(&fallback.samples);
+        let line = x.height().max(shaper.build(&every_font).height());
         if line.is_finite() && line > 0.0 {
             shaper.line_height = line;
         }
@@ -808,10 +936,12 @@ impl TextShaper {
         if let (Some(size), Some(_)) = (entry.size, &entry.shaped) {
             return size;
         }
+        let cost = entry.facts.layout_cost();
         let layout = self.build(text);
         let plan = Plan::new(&layout, glyphs);
         let size = (layout.width(), layout.height());
         self.built += 1;
+        self.built_ns += cost;
         if let Some(entry) = self.cache.get_mut(&key.0) {
             entry.size = Some(size);
             if entry
@@ -917,28 +1047,16 @@ impl TextShaper {
         );
     }
 
-    /// Lays `text` out as board text is laid out, without caching it, in the text font only.
+    /// Lays `text` out as board text is laid out, without caching it: for status strings
+    /// (`crate::status` has its own cache) and the shaper's own measures.
     pub(crate) fn build(&mut self, text: &str) -> Layout<()> {
-        let family = FontFamily::Single(FontFamilyName::named(self.family));
-        self.build_in(text, family)
-    }
-
-    /// Lays a status string out, without caching it (`crate::status` has its own cache): as
-    /// board text, but characters the text font lacks fall back to the math font, so `:sym`
-    /// rows show symbols such as `⨁` and `⟶`.
-    pub(crate) fn build_status(&mut self, text: &str) -> Layout<()> {
-        let families = std::mem::take(&mut self.status_families);
-        let layout = self.build_in(text, FontFamily::List(Cow::Borrowed(&families)));
-        self.status_families = families;
-        layout
-    }
-
-    fn build_in(&mut self, text: &str, family: FontFamily<'_>) -> Layout<()> {
         // No quantizing: positions stay fractional so text scales smoothly.
         let mut builder = self
             .layouts
             .ranged_builder(&mut self.fonts, text, 1.0, false);
-        builder.push_default(StyleProperty::FontFamily(family));
+        builder.push_default(StyleProperty::FontFamily(FontFamily::List(Cow::Borrowed(
+            &self.families,
+        ))));
         builder.push_default(StyleProperty::FontSize(LAYOUT_EM));
         builder.push_default(FontFeatures::from(&FEATURES_OFF));
         let mut layout = builder.build(text);
@@ -1048,7 +1166,17 @@ mod tests {
         ] {
             let facts = Facts::of(text);
             let runs = glyph_runs(&mut shaper, &mut glyphs, text);
-            assert_eq!(facts.changes + 1, runs, "{text:?}");
+            if facts.fonts == 0 {
+                assert_eq!(facts.changes + 1, runs, "{text:?}");
+            } else {
+                // Hebrew is in the math font only: where the font changes with the script or
+                // the direction, the run counts twice.
+                assert!(
+                    runs <= facts.changes + facts.fonts + 1,
+                    "{text:?}: {runs} runs"
+                );
+                assert!(runs > facts.changes, "{text:?}: {runs} runs");
+            }
         }
 
         // From an explicit embedding, override or isolate on, every character counts, which is
@@ -1086,7 +1214,7 @@ mod tests {
         for text in &texts {
             let facts = Facts::of(text);
             let runs = glyph_runs(&mut shaper, &mut glyphs, text);
-            if facts.changes + facts.brackets + 1 < runs {
+            if facts.changes + facts.brackets + facts.fonts + 1 < runs {
                 under.push(format!("{text:?}: {runs} runs, {facts:?}"));
             }
         }
@@ -1126,6 +1254,11 @@ mod tests {
         assert_eq!(ids("12:30")[2], ids("a:")[1]);
         // No small digits around a fraction slash.
         assert_eq!(ids("1\u{2044}2")[0], ids("1")[0]);
+        // Symbols from the math font, a glyph each, and no ligature of letters set in it: with
+        // a zero-width joiner and U+20D7 COMBINING RIGHT ARROW ABOVE (the math font's only),
+        // `c` and `h` are, and its `liga` would join them.
+        assert_eq!(ids("\u{2227}\u{2220}\u{229E}").len(), 3);
+        assert_eq!(ids("c\u{200D}h\u{20D7}").len(), 4);
     }
 
     /// In a text with a right-to-left character, the bidi algorithm resolves pairs of brackets on
@@ -1138,7 +1271,10 @@ mod tests {
         let nested = "\u{5D0}((a))b".repeat(50);
         let facts = Facts::of(&nested);
         let laid_out = glyph_runs(&mut shaper, &mut glyphs, &nested);
-        assert!(laid_out > facts.changes + 1, "{laid_out} runs, {facts:?}");
+        assert!(
+            laid_out > facts.changes + facts.fonts + 1,
+            "{laid_out} runs, {facts:?}"
+        );
         for text in [
             nested.as_str(),
             "a [\u{5D0}] {b} (\u{661}) \u{2329}c\u{232A}",
@@ -1149,7 +1285,7 @@ mod tests {
             assert!(facts.brackets > 0, "{text:?}");
             let laid_out = glyph_runs(&mut shaper, &mut glyphs, text);
             assert!(
-                laid_out <= facts.changes + facts.brackets + 1,
+                laid_out <= facts.changes + facts.brackets + facts.fonts + 1,
                 "{text:?}: {laid_out} runs, {facts:?}"
             );
         }
@@ -1178,22 +1314,81 @@ mod tests {
         fonts
     }
 
-    /// Board text is drawn in the text font only, as the frame budget assumes; status strings
-    /// fall back to the math font for symbols the text font lacks.
+    /// Text is set in the text font, and a character it lacks in the math font when that has
+    /// it; one neither has is the text font's missing-glyph box. Each change of font starts a
+    /// run, counted in [`Facts::fonts`], and the plan sizes each glyph from its own font.
     #[test]
-    fn only_status_strings_fall_back_to_the_math_font() {
+    fn text_falls_back_to_the_math_font_for_what_the_text_font_lacks() {
         // U+2A01 N-ARY CIRCLED PLUS OPERATOR: in Libertinus Math, not in Inter.
-        let table = GlyphTable::new();
+        let mut table = GlyphTable::new();
         assert!(table.char_glyph(0, '\u{2A01}').is_none());
         assert!(table.char_glyph(1, '\u{2A01}').is_some());
         let mut shaper = TextShaper::new();
-        let text = "plus.circle.big \u{2A01}";
-        // The symbol is Inter's missing-glyph box on the board.
-        assert!(run_fonts(&shaper.build(text)).iter().all(|font| *font == 0));
-        assert_eq!(run_fonts(&shaper.build_status(text)), [0, 1]);
+        assert_eq!(run_fonts(&shaper.build("plus.circle.big \u{2A01}")), [0, 1]);
         // Inter has Greek (a run of its own, a script of its own): no fallback.
-        let greek = run_fonts(&shaper.build_status("alpha \u{3B1}"));
+        let greek = run_fonts(&shaper.build("alpha \u{3B1}"));
         assert!(!greek.is_empty() && greek.iter().all(|font| *font == 0));
+        // Neither has Han: Inter's box, in Inter's run.
+        assert_eq!(run_fonts(&shaper.build("ab\u{6F22}\u{5B57}")), [0, 0]);
+        for (text, fonts) in [
+            ("a\u{2227}b", [0, 1, 0].as_slice()),
+            ("\u{2227} \u{2220} \u{229E}", &[1, 0, 1, 0, 1]),
+            ("x\u{2A01}\u{2A01}y", &[0, 1, 0]),
+        ] {
+            assert_eq!(run_fonts(&shaper.build(text)), fonts, "{text:?}");
+            let facts = Facts::of(text);
+            assert_eq!(
+                (facts.changes, facts.fonts),
+                (0, fonts.len() - 1),
+                "{text:?}"
+            );
+        }
+        let symbol = "\u{2A01}";
+        lay_out(&mut shaper, &mut table, symbol);
+        let key = shaper.key(symbol);
+        let plan = &shaper.shaped(key, symbol).unwrap().plan;
+        let (id, _) = table.char_glyph(1, '\u{2A01}').unwrap();
+        let mut expected = GlyphSums::default();
+        expected.add(table.stats(1, id));
+        assert_eq!(plan.chunks(0..1)[0].glyphs, expected);
+    }
+
+    /// The characters that fall back are those Inter lacks and Libertinus Math has.
+    #[test]
+    fn the_fallback_table_matches_the_fonts() {
+        let table = GlyphTable::new();
+        let fallback = &*FALLBACK;
+        for c in [
+            'a',
+            ' ',
+            '\n',
+            '\t',
+            '\u{3B1}',
+            '\u{2192}',
+            '\u{6F22}',
+            '\u{627}',
+            '\u{1F600}',
+        ] {
+            let expected = table.char_glyph(0, c).is_none() && table.char_glyph(1, c).is_some();
+            assert_eq!(fallback.falls_back(c), expected, "{c:?}");
+        }
+        for c in [
+            '\u{2A01}',
+            '\u{2227}',
+            '\u{2220}',
+            '\u{229E}',
+            '\u{5D0}',
+            '\u{1D538}',
+        ] {
+            assert!(fallback.falls_back(c), "{c:?}");
+        }
+        assert_eq!(fallback.samples.len(), 1);
+        // Libertinus Math's long arrows, 1.42 em: narrower than Inter's widest glyph.
+        assert!(
+            (fallback.widest_em - 1.42).abs() < 0.01,
+            "{}",
+            fallback.widest_em
+        );
     }
 
     #[test]
@@ -1205,6 +1400,9 @@ mod tests {
             "lorem ipsum\ndolor sit amet",
             "WWWWWWWW\n\n\n",
             "\u{6F22}\u{5B57}\u{5D0}a\u{301}",
+            // From the math font: its long arrows are its widest characters, and a line with it
+            // is a little taller.
+            "\u{27F6}\u{27F6}\n\u{2227}x\n\u{2A01}",
         ] {
             let before = known(&mut shaper, text);
             let estimated = shaper.size(&before);

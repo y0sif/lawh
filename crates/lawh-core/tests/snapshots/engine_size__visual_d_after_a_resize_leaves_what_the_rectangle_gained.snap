@@ -1,0 +1,7 @@
+---
+source: crates/lawh-core/tests/engine_size.rs
+expression: r.snapshot()
+---
+// mode=normal cursor=grid(2,0) keys=6
+lawh version=1
+circle id=c1 x=2.3 y=1 r=0.2

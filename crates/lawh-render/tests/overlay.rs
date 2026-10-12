@@ -142,6 +142,42 @@ fn a_combining_accent_is_one_step_for_the_caret() {
 }
 
 #[test]
+fn a_symbol_from_the_math_font_is_one_step_for_the_caret_and_is_hit() {
+    let mut renderer = Renderer::new_trusted();
+    // U+2227 LOGICAL AND: Inter lacks it, so it is set in Libertinus Math.
+    let content = "a\u{2227}b";
+    let before = caret_in(&mut renderer, content, 1);
+    let after = caret_in(&mut renderer, content, 4);
+    let a = text_bounds(&mut renderer, "a").width();
+    let a_and = text_bounds(&mut renderer, "a\u{2227}").width();
+    assert!(near(before.x0, AT.x + a), "{before:?}, a is {a} wide");
+    assert!(
+        near(after.x0, AT.x + a_and),
+        "{after:?}, a and is {a_and} wide"
+    );
+    // Inside its three bytes: at its start.
+    assert_eq!(caret_in(&mut renderer, content, 2), before);
+    assert_eq!(caret_in(&mut renderer, content, 3), before);
+    // It is as wide as Libertinus Math's glyph, at text's em of 0.5 units.
+    let face = ttf_parser::Face::parse(lawh_math::fonts()[1].data, 0).unwrap();
+    let glyph = face.glyph_index('\u{2227}').unwrap();
+    let advance = f64::from(face.glyph_hor_advance(glyph).unwrap());
+    let em = advance / f64::from(face.units_per_em()) * lawh_render::TEXT_SIZE_UNITS;
+    assert!(near(after.x0 - before.x0, em), "{before:?} {after:?} {em}");
+    // The end of the text, and a line as high as the text.
+    let bounds = text_bounds(&mut renderer, content);
+    assert!(near(caret_in(&mut renderer, content, 5).x0, bounds.x1));
+    assert!(
+        near(after.height(), bounds.height()),
+        "{after:?} {bounds:?}"
+    );
+    // A click on the symbol hits the text.
+    let board = board_of([text("t1", AT, content)]);
+    let on_symbol = Point::new(f64::midpoint(before.x0, after.x0), before.center().y);
+    assert_eq!(renderer.hit_test(&board, on_symbol, 0.0), Some(id("t1")));
+}
+
+#[test]
 fn only_texts_and_formulas_have_a_caret() {
     let board = common::area_board();
     let mut renderer = Renderer::new_trusted();

@@ -69,15 +69,16 @@ use crate::key::{Key, KeyCode, Mods};
 /// Most symbols `:sym` picks from (4,096); [`Engine::set_symbols`] keeps the first this many
 /// it can use and drops the rest.
 ///
-/// Typst 0.15 names 1,142 symbols (`codex` 0.3), of which the bundled fonts draw 723; this
-/// leaves room for a later Typst and more fonts. Each typed key of a `:sym` line that changes
-/// its query matches every name once for each word of the query (see `SYM_WORK` in
-/// `work.rs`). With this many names about as long as Typst's (11 characters on average, 28 at
-/// most; the test's average 14), every key of the costliest queries of
-/// [`MAX_SYM_QUERY_CHARS`] fits in a third of [`MAX_KEY_WORK`](super::MAX_KEY_WORK), 4.3 ms
-/// at most in debug (`a_max_length_query_fits_the_work_budget` in `tests/engine_cost.rs`).
-/// With names of 64 characters some of those queries cost more than the budget, and are
-/// refused whole.
+/// Typst's `codex` 0.3.0 names 1,189 symbols for math (1,142 in `sym`, 47 in `gender` and
+/// `control`), of which the bundled fonts draw 732 and miss 457 (lawh-math's
+/// `counts_are_codex_0_3_0_and_the_bundled_fonts`); this leaves room for a later Typst and more
+/// fonts. Each typed key of a `:sym` line that changes its query matches every name once for
+/// each word of the query (see `SYM_WORK` in `work.rs`). With this many names about as long as
+/// Typst's (11 characters on average, 28 at most; the test's average 14), every key of the
+/// costliest queries of [`MAX_SYM_QUERY_CHARS`] fits in a third of
+/// [`MAX_KEY_WORK`](super::MAX_KEY_WORK), 4.3 ms at most in debug
+/// (`a_max_length_query_fits_the_work_budget` in `tests/engine_cost.rs`). With names of 64
+/// characters some of those queries cost more than the budget, and are refused whole.
 pub const MAX_SYMBOLS: usize = 4096;
 
 /// Most characters in a `:sym` query, spaces at its ends not counted (64). A longer query
@@ -85,9 +86,23 @@ pub const MAX_SYMBOLS: usize = 4096;
 ///
 /// The longest Typst name is 28 characters. Matching costs each word of the query a pass over
 /// every name: a query of 1,000 characters and 500 words took 7.3 ms in release over the 1,142
-/// names, while 64 characters hold at most 32 words. A name longer than this could not be put on
-/// the line by `<Tab>` and matched again, so [`Engine::set_symbols`] drops such names.
+/// names of Typst's `sym` (of the 1,189 lawh lists), while 64 characters hold at most 32
+/// words. A name longer than this could not be put on the line by `<Tab>` and matched again,
+/// so [`Engine::set_symbols`] drops such names.
 pub const MAX_SYM_QUERY_CHARS: usize = 64;
+
+/// Most bytes of a `:sym` query that are read before it is refused: four a character, the most
+/// UTF-8 takes, so a longer query holds more than [`MAX_SYM_QUERY_CHARS`] characters whatever
+/// they are. Derived, not measured.
+///
+/// It is refused without copying the line or counting its characters: before, a mapping that
+/// typed and took back a character after a query of 5,050 four-byte characters (a 20 KB line,
+/// within [`MAX_COMMAND_LINE_CHARS`](super::MAX_COMMAND_LINE_CHARS)) copied and counted the
+/// line on every key, 30,000 keys in 110 ms in release and 171 ms in debug, none of it counted
+/// as work; now 6.5 ms and 52 ms, the keys running out first (`key_costs` in
+/// `tests/engine_cost.rs`, 2026-10-12). A query of at most this many bytes is copied and counted
+/// as work ([`COPY_WORK`] a byte).
+const MAX_SYM_QUERY_BYTES: usize = 4 * MAX_SYM_QUERY_CHARS;
 
 /// Rows of completions a `:sym` line shows (8), the best match first.
 ///
@@ -193,6 +208,21 @@ pub(super) struct Completions {
     shown: String,
 }
 
+impl Completions {
+    /// No rows, for a query of more than [`MAX_SYM_QUERY_BYTES`]: the line is not kept, so the
+    /// next key on it looks at it again (and refuses it again, as cheaply).
+    fn refused(prefix: usize) -> Self {
+        Self {
+            typed: String::new(),
+            prefix,
+            query: String::new(),
+            rows: Vec::new(),
+            selected: None,
+            shown: String::new(),
+        }
+    }
+}
+
 impl Engine {
     /// Sets the symbols `:sym` picks from, and returns how many it kept.
     ///
@@ -264,7 +294,28 @@ impl Engine {
             self.completions = None;
             return;
         };
-        let (line, query) = (line.to_owned(), query.to_owned());
+        if query.len() > MAX_SYM_QUERY_BYTES {
+            // Past the cap whatever its characters: refused before the line is copied or the
+            // query's characters counted, so a key on a long line costs next to nothing.
+            self.completions = Some(Completions::refused(prefix));
+            self.error(CommandError::SymQueryTooLong.to_string());
+            return;
+        }
+        // Copying the line twice (as typed and as shown) and the query, and counting the
+        // query's characters.
+        let (copied, query_len) = (
+            line.len().saturating_mul(2).saturating_add(query.len()),
+            query.len(),
+        );
+        if !self.charge(COPY_WORK.saturating_mul(copied)) {
+            self.completions = None;
+            return;
+        }
+        let line = self.command_line.text().to_owned();
+        let query = line
+            .get(prefix..prefix + query_len)
+            .unwrap_or_default()
+            .to_owned();
         if let Some(completions) = &mut self.completions
             && completions.query == query
         {

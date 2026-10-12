@@ -10,9 +10,11 @@
 //!
 //! In Visual mode they resize every text and math block selected, each from its own size, as one
 //! undo step, and Visual mode stays. Shapes in the selection are skipped. The selection stays
-//! the same objects, those that grew out of the rectangle too, so the keys can be pressed again;
-//! the next motion selects from the rectangle again. As other Visual changes, `.` cannot repeat
-//! them, so they forget the last change.
+//! the same objects, those that grew out of the rectangle too, and takes in none that the
+//! rectangle holds only because the cursor's object grew: the keys can be pressed again, and
+//! `d`, `x`, `y` and `:si` act on what stays highlighted. The next motion selects from the
+//! rectangle again. As other Visual changes, `.` cannot repeat them, so they forget the last
+//! change.
 //!
 //! `:si[ze] N` sets the size, `:si +N` and `:si -N` add to it or take from it, on the current
 //! object, or on the text and math of the selection when `:` was typed in Visual mode: the

@@ -439,7 +439,7 @@ impl Engine {
     pub(super) fn type_key(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         self.keymap.depth = 0;
         self.keymap.spent = 0;
-        self.reset_work();
+        self.reset_work(measure);
         self.keymap.typeahead.push_back(Queued { key, remap: true });
         self.run_typeahead(false, measure)
     }
@@ -456,7 +456,7 @@ impl Engine {
         }
         self.keymap.depth = 0;
         self.keymap.spent = 0;
-        self.reset_work();
+        self.reset_work(measure);
         self.run_typeahead(true, measure)
     }
 

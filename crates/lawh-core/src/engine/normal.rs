@@ -12,7 +12,7 @@ use super::repeat::Context;
 use super::size::Grow;
 use super::text::Entry;
 use super::work::{LOOK_WORK, ORDER_WORK};
-use super::{Cursor, Effect, Engine, MAX_COUNT, Measure, Mode};
+use super::{Cursor, Effect, Engine, MAX_COUNT, Measure, Mode, bounds};
 use crate::key::{Key, KeyCode, format_keys};
 
 /// A motion: where the cursor goes, or what an operator acts on.
@@ -486,11 +486,18 @@ impl Engine {
     /// makes no undo step and leaves `.` as it was.
     ///
     /// For the app when it opens a board: the cursor starts at the grid's origin, which may be
-    /// far from the board's objects.
+    /// far from the board's objects. A board just opened has its text laid out for the first
+    /// time, which can cost more than a key's budget at the caps on text: that work is no
+    /// key's, so it is not counted ([`Measure::take_work`]); the motion's own is.
     pub fn go_first(&mut self, measure: &mut dyn Measure) {
-        self.reset_work();
         if self.mode == Mode::Normal && self.pending.is_empty() && self.labels.is_none() {
+            for object in self.board.objects() {
+                bounds(object, measure);
+            }
+            self.reset_work(measure);
             self.motion(Motion::Object(ObjectMotion::First), 1, measure);
+        } else {
+            self.reset_work(measure);
         }
     }
 

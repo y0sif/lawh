@@ -54,8 +54,10 @@ impl Engine {
     /// selection for `:si` (as Vim's `:'<,'>`) until it closes, while
     /// [`Engine::visual_rect`] is `None`.
     ///
-    /// The size keys in Visual mode keep the same objects selected, even those that grew out
-    /// of the rectangle; the next motion selects from the rectangle again.
+    /// What is selected is what the window highlights, and what `d`, `x`, `y` and `:si` act
+    /// on. The size keys in Visual mode keep the same objects selected, even those that grew
+    /// out of the rectangle, and none it holds only since they resized the cursor's object;
+    /// the next motion selects from the rectangle again.
     ///
     /// Every key that moves the cursor in Visual mode pays for the new selection before it
     /// moves (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)), so a motion that runs out of work part
@@ -89,6 +91,8 @@ impl Engine {
         if !self.charge(self.layout_work()) {
             return;
         }
+        // What measuring the cursor's object costs counts with the rest of the board, in
+        // `select`.
         self.visual = Some(self.cursor_region(measure));
         self.mode = Mode::Visual;
         self.select(measure);
@@ -106,17 +110,15 @@ impl Engine {
     }
 
     /// Selects the objects whose bounds lie inside the Visual rectangle, edges included. It
-    /// measures the board: the caller has counted that work already
-    /// ([`Engine::layout_work`]), so the selection is made even once the key has run out.
+    /// measures the board: the caller has counted the engine's share of that work already
+    /// ([`Engine::layout_work`]), and what `measure` reports counts once done, so the selection
+    /// is made even once the key has run out.
     pub(super) fn select(&mut self, measure: &mut dyn Measure) {
         let layout = self.layout(measure);
-        self.select_in(&layout, measure);
-    }
-
-    /// [`Engine::select`] with the bounds of every object, in z-order, measured already.
-    fn select_in(&mut self, layout: &[Rect], measure: &mut dyn Measure) {
         self.selection.clear();
-        let Some(rect) = self.visual_rect(measure) else {
+        let rect = self.visual_rect(measure);
+        self.charge_measured(measure);
+        let Some(rect) = rect else {
             return;
         };
         let inside =
@@ -125,7 +127,7 @@ impl Engine {
             .board
             .objects()
             .iter()
-            .zip(layout)
+            .zip(&layout)
             .filter(|(_, b)| inside(b))
             .map(|(o, _)| o.id.clone())
             .collect();
@@ -180,16 +182,16 @@ impl Engine {
     /// Deletes or yanks the selection as one change and returns to Normal mode. `.` cannot
     /// repeat a Visual change in M2, so a delete forgets the last change.
     ///
-    /// The selection is made again from the bounds measured for the change, so it is what the
-    /// rectangle holds now, at no extra work. When the key runs out of work before measuring,
-    /// it only leaves Visual mode.
+    /// It acts on the objects selected, which the window highlights (see
+    /// [`Engine::selection`]), not on what the rectangle holds now: after the size keys the two
+    /// may differ. The board is measured to put them in reading order. When the key runs out
+    /// of work before measuring, it only leaves Visual mode.
     fn visual_operate(&mut self, operator: Operator, measure: &mut dyn Measure) {
         if !self.charge(self.layout_work()) {
             self.leave_visual();
             return;
         }
         let bounds = self.layout(measure);
-        self.select_in(&bounds, measure);
         let selected: Vec<usize> = self
             .selection
             .iter()

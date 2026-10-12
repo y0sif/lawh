@@ -16,7 +16,7 @@ use super::{
     CURSOR, CURSOR_BLOCK, ERROR, INK, MathWait, Renderer, SELECTED, STATUS_BAR, STATUS_EDGE, Seen,
     TextSize, VISUAL_EDGE, VISUAL_FILL, text_scale, text_view,
 };
-use crate::budget::{Budget, Estimate};
+use crate::budget::{self, Budget, Estimate};
 use crate::overlay::{Caret, Overlay, OverlayCursor, STATUS_FONT_PX, status_bar_height_px};
 use crate::status::{Keep, window};
 use crate::text::{LAYOUT_EM, TextKey};
@@ -491,9 +491,22 @@ impl Renderer {
 /// change once it has. So a command that places by size right after making one (`o` in the
 /// same mapping as `:ma ...`) places by the source's size, not the formula's. This is
 /// deliberate: measuring never waits for the math engine.
+///
+/// Measuring a text this renderer has not laid out before (a text just edited, say) lays it
+/// out first, which costs far more than the engine counts for measuring it: that work is
+/// reported to the engine ([`Measure::take_work`]) at `budget::KEY_WORK_PER_LAYOUT_NS` units
+/// of its budget per estimated nanosecond (`budget::layout`). Texts laid out already, for
+/// drawing or measuring, cost nothing more.
 impl Measure for Renderer {
     fn bounds(&mut self, object: &Object) -> Option<Rect> {
-        self.object_bounds(object)
+        let before = self.text.built_ns;
+        let bounds = self.object_bounds(object);
+        self.measured_ns += self.text.built_ns - before;
+        bounds
+    }
+
+    fn take_work(&mut self) -> usize {
+        budget::key_work(std::mem::take(&mut self.measured_ns))
     }
 }
 

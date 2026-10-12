@@ -1,6 +1,6 @@
 //! The status bar's text and the `:sym` rows above it: the part of each string that is shown,
-//! and its layouts, cached by content. They are laid out in the text font with the math font as
-//! a fallback (`crate::text::TextShaper::build_status`), so symbols show.
+//! and its layouts, cached by content. They are laid out as board text is, in the text font with
+//! the math font as a fallback (`crate::text::TextShaper::build`), so symbols show.
 //!
 //! A status string can be long: the command line holds up to
 //! `lawh_core::engine::MAX_COMMAND_LINE_CHARS` characters, and a message can name anything.
@@ -125,7 +125,7 @@ impl StatusText {
         self.built += 1;
         let entry = Entry {
             text: text.to_owned(),
-            layout: shaper.build_status(text),
+            layout: shaper.build(text),
             last_used: self.tick,
         };
         if self.entries.len() < STATUS_CACHE_ENTRIES {
