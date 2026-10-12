@@ -39,8 +39,8 @@ const CLICK_SLOP_PX: f64 = 4.0;
 const HIT_TOLERANCE_PX: f64 = 4.0;
 
 /// The status line on a close request while the board has unwritten changes. A second close
-/// request closes while this still shows: a key, a click or a mapping timeout between drops
-/// it, and the next close warns again.
+/// request closes while this still shows: a key, a click on the board or a mapping timeout
+/// between drops it, and the next close warns again.
 const CLOSE_MODIFIED: &str = "unsaved changes: :w to save, :q! to discard, or close again";
 
 /// Sent to the event loop by the math engine's waker when a formula finishes compiling.
@@ -309,8 +309,8 @@ impl App {
     /// warns of the unwritten changes ([`CLOSE_MODIFIED`]).
     ///
     /// The close is armed only while that warning shows, so whatever drops it (a key, a click
-    /// on the board, a mapping timeout) disarms it too: after anything else, a close warns
-    /// first, and only two closes in a row close.
+    /// on the board, a mapping timeout) disarms it too, and the next close warns again. Panning,
+    /// zooming and a click on the status bar leave it armed.
     fn close_or_warn(&mut self) -> bool {
         let warned = self.message.as_deref() == Some(CLOSE_MODIFIED);
         if close_now(self.engine.is_modified(), warned) {

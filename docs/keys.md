@@ -318,7 +318,7 @@ cp examples/lawhrc ~/.config/lawh/lawhrc
 | Pan | Drag with the left or middle mouse button |
 | Zoom | Mouse wheel or touchpad scroll, at the pointer, from 0.1 to 20 |
 | Select | Click an object to make it the current object, or empty space to put the cursor on the nearest grid point. A click ends Insert, block-Normal and Visual mode and the command line, and drops keys waiting for a mapping |
-| Close | The window's close button (Cmd+Q on macOS). With unwritten changes the first close only warns; close again while the warning shows to quit (a key or click drops it) |
+| Close | The window's close button (Cmd+Q on macOS). With unwritten changes the first close only warns; close again while the warning shows to quit (a key, a click on the board or a mapping timeout drops it; panning and zooming don't) |
 
 The view follows the cursor as you type.
 
