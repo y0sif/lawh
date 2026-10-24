@@ -12,11 +12,13 @@
 
 pub mod board;
 pub mod engine;
+pub mod export;
 pub mod format;
 pub mod key;
 
 pub use board::{Board, BoardError, Object, ObjectId, Shape};
 pub use engine::{Cursor, Effect, Engine, FixedMeasure, Measure, Message, Mode, RcWarning};
+pub use export::{ExportBackground, ExportFormat, ExportOptions, ExportReport};
 pub use format::{FormatError, from_lawh, to_lawh};
 pub use key::{Key, KeyCode, KeyParseError, Mods, parse_keys};
 pub use kurbo::{Point, Rect};

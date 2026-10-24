@@ -12,10 +12,7 @@ use parley::{Affinity, Cluster, Layout, PositionedLayoutItem, Selection};
 use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::{Glyph, RenderContext, Resources};
 
-use super::{
-    CURSOR, CURSOR_BLOCK, ERROR, INK, MathWait, Renderer, SELECTED, STATUS_BAR, STATUS_EDGE, Seen,
-    TextSize, VISUAL_EDGE, VISUAL_FILL, text_scale, text_view,
-};
+use super::{MathWait, Renderer, Seen, TextSize, text_scale, text_view};
 use crate::budget::{self, Budget, Estimate};
 use crate::overlay::{Caret, Overlay, OverlayCursor, STATUS_FONT_PX, status_bar_height_px};
 use crate::status::{Keep, window};
@@ -173,9 +170,9 @@ impl Renderer {
         if let Some(visual) = overlay.visual {
             let screen = vp.transform().transform_rect_bbox(visual);
             if screen.is_finite() && screen.overlaps(clip) {
-                self.fill_screen(screen.intersect(clip), VISUAL_FILL);
+                self.fill_screen(screen.intersect(clip), self.palette.visual_fill);
                 if let Some(edge) = box_path(screen, clip) {
-                    self.stroke_screen(&edge, VISUAL_LINE_PX * sf, VISUAL_EDGE);
+                    self.stroke_screen(&edge, VISUAL_LINE_PX * sf, self.palette.visual_edge);
                 }
             }
         }
@@ -189,7 +186,7 @@ impl Renderer {
                 if let Some(screen) = self.current_bounds(board, seen, id, caret, vp) {
                     let gap = CURRENT_GAP_PX * sf;
                     if let Some(edge) = box_path(screen.inflate(gap, gap), clip) {
-                        self.stroke_screen(&edge, CURRENT_LINE_PX * sf, CURSOR);
+                        self.stroke_screen(&edge, CURRENT_LINE_PX * sf, self.palette.cursor);
                     }
                 }
             }
@@ -276,7 +273,7 @@ impl Renderer {
             );
         }
         if !path.elements().is_empty() {
-            self.stroke_screen(&path, width, SELECTED);
+            self.stroke_screen(&path, width, self.palette.selected);
         }
     }
 
@@ -291,7 +288,7 @@ impl Renderer {
         cross.line_to((at.x + arm, at.y));
         cross.move_to((at.x, at.y - arm));
         cross.line_to((at.x, at.y + arm));
-        self.stroke_screen(&cross, CROSS_LINE_PX * sf, CURSOR);
+        self.stroke_screen(&cross, CROSS_LINE_PX * sf, self.palette.cursor);
     }
 
     /// Draws `caret` in the text it is in, when that text is drawn and laid out (a frame that
@@ -331,11 +328,11 @@ impl Renderer {
             return;
         }
         if caret.block {
-            self.fill_screen(screen.intersect(clip), CURSOR_BLOCK);
+            self.fill_screen(screen.intersect(clip), self.palette.cursor_block);
         } else {
             let half = CARET_PX * vp.scale_factor / 2.0;
             let bar = Rect::new(screen.x0 - half, screen.y0, screen.x0 + half, screen.y1);
-            self.fill_screen(bar.intersect(clip), CURSOR);
+            self.fill_screen(bar.intersect(clip), self.palette.cursor);
         }
     }
 
@@ -369,11 +366,11 @@ impl Renderer {
         let (width, height) = (f64::from(vp.width), f64::from(vp.height));
         let bar_height = f64::from(status_bar_height_px(sf)).min(height);
         let top = height - bar_height;
-        self.fill_screen(Rect::new(0.0, top, width, height), STATUS_BAR);
+        self.fill_screen(Rect::new(0.0, top, width, height), self.palette.status_bar);
         let edge = (STATUS_EDGE_PX * sf).round().max(1.0);
         self.fill_screen(
             Rect::new(0.0, top, width, (top + edge).min(height)),
-            STATUS_EDGE,
+            self.palette.status_edge,
         );
 
         let px_per_layout_unit = STATUS_FONT_PX * sf / f64::from(LAYOUT_EM);
@@ -381,9 +378,13 @@ impl Renderer {
         let status = overlay.status;
         let (left, caret, left_color) = if let Some((text, cursor)) = overlay.command_line {
             let (shown, at) = window(":", text, Keep::Around(cursor));
-            (shown, Some(at), INK)
+            (shown, Some(at), self.palette.ink)
         } else {
-            let color = if status.error { ERROR } else { INK };
+            let color = if status.error {
+                self.palette.error
+            } else {
+                self.palette.ink
+            };
             (window("", status.left, Keep::Start).0, None, color)
         };
         let right = window("", status.right, Keep::End).0;
@@ -432,7 +433,7 @@ impl Renderer {
                 // line it doesn't touch the last one.
                 let bar = Rect::new(bar.x0, bar.y0, bar.x0 + CARET_PX * sf, bar.y1);
                 self.ctx.set_transform(Affine::IDENTITY);
-                self.ctx.set_paint(CURSOR);
+                self.ctx.set_paint(self.palette.cursor);
                 self.ctx.fill_rect(&bar);
             }
         }
@@ -443,7 +444,7 @@ impl Renderer {
         ) {
             // Over any left text that runs this far.
             self.ctx.set_transform(Affine::IDENTITY);
-            self.ctx.set_paint(STATUS_BAR);
+            self.ctx.set_paint(self.palette.status_bar);
             self.ctx
                 .fill_rect(&Rect::new(from - pad, top + edge, width, height));
             let cut = x < from;
@@ -453,7 +454,13 @@ impl Renderer {
             }
             let transform =
                 Affine::translate((x, at_y(layout))) * Affine::scale(px_per_layout_unit);
-            fill_layout(&mut self.ctx, &mut self.resources, layout, transform, INK);
+            fill_layout(
+                &mut self.ctx,
+                &mut self.resources,
+                layout,
+                transform,
+                self.palette.ink,
+            );
             if cut {
                 self.ctx.pop_clip();
             }

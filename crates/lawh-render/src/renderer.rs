@@ -17,6 +17,7 @@ use vello_cpu::{Glyph, Pixmap, RenderContext, Resources};
 use crate::budget::{self, Budget, Estimate, GlyphSums, MIN_VISIBLE_PX};
 use crate::glyphs::GlyphTable;
 use crate::overlay::Overlay;
+use crate::palette::{Palette, math_paint};
 use crate::status::StatusText;
 use crate::text::{Chunk, KeyMap, Known, LAYOUT_EM, Plan, TextKey, TextShaper};
 use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
@@ -24,43 +25,6 @@ use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
 mod completions;
 mod labels;
 mod ui;
-
-/// Board background.
-const PAPER: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xFA, 0xFA, 0xF7);
-/// Shapes, text and math.
-const INK: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x1F, 0x1F, 0x1F);
-/// Grid dots.
-const GRID: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
-/// The source of math that failed to compile, and error messages on the status line.
-const ERROR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC0, 0x39, 0x2B);
-/// The source of math that is still compiling, as a placeholder.
-const PENDING: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x9A, 0x9A, 0x94);
-/// The outline of an object drawn in its place when the frame budget is spent.
-const OUTLINE: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xC8, 0xC8, 0xC2);
-
-// The overlay ([`Renderer::render_with`]): blue for where the cursor is, amber for what is
-// selected, and a status bar a shade darker than the paper.
-
-/// The cursor: the grid cursor's cross, the outline around the current object, and the caret
-/// in a text block.
-const CURSOR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0x25, 0x63, 0xEB);
-/// The block caret of block-Normal mode: the cursor's blue at 35 %, so the character under it
-/// still shows.
-const CURSOR_BLOCK: AlphaColor<Srgb> = AlphaColor::from_rgba8(0x25, 0x63, 0xEB, 0x59);
-/// The outline around each object of a Visual selection.
-const SELECTED: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD9, 0x77, 0x06);
-/// The Visual rectangle: the selection's amber at 10 % over its area, and at 70 % along its
-/// edge.
-const VISUAL_FILL: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xD9, 0x77, 0x06, 0x1A);
-const VISUAL_EDGE: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xD9, 0x77, 0x06, 0xB3);
-/// The status bar, and the line along its top. Its text is [`INK`], or [`ERROR`] for an error.
-/// The `:sym` rows above it are the same, with the selected row in [`CURSOR_BLOCK`].
-const STATUS_BAR: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xEE, 0xEE, 0xE9);
-const STATUS_EDGE: AlphaColor<Srgb> = AlphaColor::from_rgb8(0xD6, 0xD6, 0xD0);
-/// Jump labels are boxes of the cursor's blue ([`CURSOR`]) with the letters left to type in the
-/// paper colour, and the letters typed so far in the paper colour at 50 %, dimmer.
-const LABEL_LEFT: AlphaColor<Srgb> = PAPER;
-const LABEL_TYPED: AlphaColor<Srgb> = AlphaColor::from_rgba8(0xFA, 0xFA, 0xF7, 0x80);
 
 /// Width of those outlines in logical pixels.
 const OUTLINE_PX: f64 = 1.0;
@@ -81,15 +45,12 @@ const RUN_SLACK_EM: f64 = 2.0;
 /// the app ever shows (the largest drawable is 10,000 pixels per unit, an
 /// 80,000-pixel em of size-16 text), and math that asks for an absurd font
 /// size, get near this. It covers math glyph runs too.
-const MAX_GLYPH_EM_PX: f64 = 100_000.0;
+pub(crate) const MAX_GLYPH_EM_PX: f64 = 100_000.0;
 
 /// Math strokes wider than this many physical pixels aren't drawn: their
 /// round joins and caps would be arcs that size, which `vello_cpu` flattens
 /// whole. A 1 pt stroke at the largest drawable zoom is 250 pixels.
 const MAX_STROKE_PX: f64 = 100_000.0;
-
-/// Typst's default text colour; math drawn in it is drawn in [`INK`] instead.
-const TYPST_BLACK: [u8; 4] = [0, 0, 0, 255];
 
 /// Grid units per Typst pt of math of size 1, before [`MATH_SCALE`]: a math em is then a text
 /// em.
@@ -192,9 +153,9 @@ struct Seen {
 /// What placing a laid-out formula takes, in pt within its layout: the bounds of everything it
 /// draws, and its first line's baseline, which sits on the baseline of text at the same `y`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct MathBox {
-    bounds: Rect,
-    baseline: f64,
+pub(crate) struct MathBox {
+    pub(crate) bounds: Rect,
+    pub(crate) baseline: f64,
 }
 
 /// A formula that has laid out.
@@ -270,14 +231,14 @@ pub struct Renderer {
     ctx: RenderContext,
     resources: Resources,
     pixmap: Pixmap,
-    text: TextShaper,
+    pub(crate) text: TextShaper,
     /// The status bar's strings, laid out.
     status: StatusText,
-    math: MathEngine,
+    pub(crate) math: MathEngine,
     /// `vello_cpu` handles for [`lawh_math::fonts`], by the same index.
-    math_fonts: Vec<FontData>,
+    pub(crate) math_fonts: Vec<FontData>,
     /// Outline sizes of the glyphs of [`lawh_math::fonts`], for the budget.
-    glyphs: GlyphTable,
+    pub(crate) glyphs: GlyphTable,
     /// Formulas known to have laid out, by the hash of their source, so bounds
     /// and culling can use their real extent without asking the math engine
     /// for them. Entries a frame doesn't look at are dropped at its end.
@@ -291,6 +252,8 @@ pub struct Renderer {
     /// The estimated cost of the text laid out to measure objects for the engine since it last
     /// asked ([`lawh_core::engine::Measure::take_work`]), in nanoseconds.
     measured_ns: f64,
+    /// The colours of the board and the overlay, for the window and exports alike.
+    pub(crate) palette: Palette,
 }
 
 impl Renderer {
@@ -325,6 +288,7 @@ impl Renderer {
             last: FrameStats::default(),
             work: Work::default(),
             measured_ns: 0.0,
+            palette: Palette::LIGHT,
         }
     }
 
@@ -376,7 +340,7 @@ impl Renderer {
             self.lay_out_on_screen(board, &seen, vp, clip, &mut budget, &mut stats);
             if let Some((path, dots)) = draw::grid_dots(vp) {
                 budget.charge(budget::grid(dots, vp.scale_factor));
-                self.ctx.set_paint(GRID);
+                self.ctx.set_paint(self.palette.grid);
                 self.ctx.fill_path(&path);
             }
             self.draw_objects(board, &seen, vp, clip, &mut budget, &mut stats);
@@ -432,7 +396,7 @@ impl Renderer {
             self.ctx.reset();
         }
         self.ctx.set_transform(Affine::IDENTITY);
-        self.ctx.set_paint(PAPER);
+        self.ctx.set_paint(self.palette.paper);
         self.ctx
             .fill_rect(&Rect::new(0.0, 0.0, f64::from(width), f64::from(height)));
         true
@@ -858,7 +822,7 @@ impl Renderer {
     /// `size` at `at` whose first baseline is `baseline` pt below the top of its box: drawn
     /// [`MATH_SCALE`] times as large as text of the same size, and moved up or down so that
     /// baseline sits where the first baseline of a text at `at` does, at any size.
-    fn math_to_board(&self, at: Point, size: f64, baseline: f64) -> Affine {
+    pub(crate) fn math_to_board(&self, at: Point, size: f64, baseline: f64) -> Affine {
         let units_per_pt = math_units_per_pt(size);
         let text_baseline = f64::from(self.text.baseline()) * text_scale(size);
         let down = text_baseline - baseline * units_per_pt;
@@ -915,13 +879,15 @@ impl Renderer {
                 }
                 if let Some(head) = head {
                     self.ctx.set_transform(Affine::IDENTITY);
-                    self.ctx.set_paint(INK);
+                    self.ctx.set_paint(self.palette.ink);
                     self.ctx.fill_path(&head);
                 }
                 Outcome::Drawn
             }
             Shape::Text { at, text, size } => match seen.key {
-                Some(key) => self.draw_text(*at, *size, key, text, INK, vp, clip, budget),
+                Some(key) => {
+                    self.draw_text(*at, *size, key, text, self.palette.ink, vp, clip, budget)
+                }
                 None => Outcome::Pending,
             },
             Shape::Math { at, src, size } => match (&seen.math, seen.key) {
@@ -933,10 +899,14 @@ impl Renderer {
                 (Some(MathStatus::Evicted(_)), _) => Outcome::Evicted,
                 (Some(MathStatus::Failed(err)), Some(key)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");
-                    self.draw_text(*at, *size, key, src, ERROR, vp, clip, budget)
+                    self.draw_text(*at, *size, key, src, self.palette.error, vp, clip, budget)
                 }
                 (Some(MathStatus::Pending) | None, Some(key)) => {
-                    let color = if seen.edited { INK } else { PENDING };
+                    let color = if seen.edited {
+                        self.palette.ink
+                    } else {
+                        self.palette.pending
+                    };
                     self.draw_text(*at, *size, key, src, color, vp, clip, budget)
                 }
                 (_, None) => Outcome::Pending,
@@ -969,7 +939,7 @@ impl Renderer {
     /// Strokes a path given in screen pixels in ink, `width` pixels wide.
     fn stroke_ink(&mut self, path: &BezPath, width: f64) {
         self.ctx.set_transform(Affine::IDENTITY);
-        self.ctx.set_paint(INK);
+        self.ctx.set_paint(self.palette.ink);
         self.ctx.set_stroke(
             Stroke::new(width)
                 .with_caps(Cap::Round)
@@ -1005,7 +975,7 @@ impl Renderer {
             return false;
         }
         self.ctx.set_transform(Affine::IDENTITY);
-        self.ctx.set_paint(OUTLINE);
+        self.ctx.set_paint(self.palette.outline);
         self.ctx.set_stroke(Stroke::new(width));
         self.ctx.stroke_path(&path);
         true
@@ -1217,7 +1187,7 @@ impl Renderer {
                         continue;
                     };
                     self.ctx.set_transform(transform);
-                    self.ctx.set_paint(math_color(*fill));
+                    self.ctx.set_paint(self.palette.color(math_paint(*fill)));
                     let kept = Cell::new(0);
                     let drawn = self
                         .ctx
@@ -1254,11 +1224,11 @@ impl Renderer {
                     screen.apply_affine(transform);
                     self.ctx.set_transform(Affine::IDENTITY);
                     if let Some(fill) = fill {
-                        self.ctx.set_paint(math_color(*fill));
+                        self.ctx.set_paint(self.palette.color(math_paint(*fill)));
                         self.ctx.fill_path(&draw::cut_path(&screen, near, true));
                     }
                     if let Some((width, color)) = stroke {
-                        self.ctx.set_paint(math_color(color));
+                        self.ctx.set_paint(self.palette.color(math_paint(color)));
                         self.ctx.set_stroke(Stroke::new(width));
                         self.ctx.stroke_path(&draw::cut_path(&screen, near, false));
                     }
@@ -1271,7 +1241,7 @@ impl Renderer {
 
 /// A math path's stroke as its width in screen pixels and its colour; `None`
 /// when it has none, or one too wide to draw ([`MAX_STROKE_PX`]).
-fn stroke_px(stroke: Option<(f64, [u8; 4])>, px_per_pt: f64) -> Option<(f64, [u8; 4])> {
+pub(crate) fn stroke_px<C>(stroke: Option<(f64, C)>, px_per_pt: f64) -> Option<(f64, C)> {
     stroke.and_then(|(width, color)| {
         let width = width.abs() * px_per_pt;
         if width.is_finite() && width <= MAX_STROKE_PX {
@@ -1306,7 +1276,7 @@ fn math_units_per_pt(size: f64) -> f64 {
 
 /// The bounds of everything a layout covers, in pt (its box joined with its ink, which can
 /// reach outside the box), and its first baseline.
-fn layout_box(layout: &MathLayout) -> MathBox {
+pub(crate) fn layout_box(layout: &MathLayout) -> MathBox {
     MathBox {
         bounds: Rect::new(0.0, 0.0, layout.width, layout.height)
             .abs()
@@ -1358,13 +1328,13 @@ fn glyph_area(em_px: f64, clip: Rect) -> Option<Rect> {
 }
 
 /// Grid units per layout unit of text of size `size`.
-fn text_scale(size: f64) -> f64 {
+pub(crate) fn text_scale(size: f64) -> f64 {
     TEXT_SIZE_UNITS / f64::from(LAYOUT_EM) * drawn_size(size)
 }
 
 /// The box of a text of size `size`, `width` x `height` layout units, with its top-left corner
 /// at `at`, in grid units.
-fn text_box(at: Point, size: f64, width: f32, height: f32) -> Rect {
+pub(crate) fn text_box(at: Point, size: f64, width: f32, height: f32) -> Rect {
     let scale = text_scale(size);
     Rect::from_origin_size(at, (f64::from(width) * scale, f64::from(height) * scale))
 }
@@ -1520,16 +1490,6 @@ fn text_cost(
     (cost, charged)
 }
 
-/// A Typst colour, with Typst's default black drawn as board ink.
-fn math_color(rgba: [u8; 4]) -> AlphaColor<Srgb> {
-    if rgba == TYPST_BLACK {
-        INK
-    } else {
-        let [r, g, b, a] = rgba;
-        AlphaColor::from_rgba8(r, g, b, a)
-    }
-}
-
 #[expect(
     clippy::cast_possible_truncation,
     reason = "glyph sizes and positions in pt are far inside f32 range and precision"
@@ -1626,7 +1586,7 @@ mod tests {
             let i = (y * usize::from(vp.width) + x) * 4;
             [image[i], image[i + 1], image[i + 2], image[i + 3]]
         };
-        let paper = PAPER.to_rgba8().to_u8_array();
+        let paper = Palette::LIGHT.paper.to_rgba8().to_u8_array();
         assert!(at(0.0, 0.0)[0] < 100, "no ink at the centre of {vp:?}");
         for side in [-1.0, 1.0] {
             let px = at(side * away * normal.0, side * away * normal.1);
@@ -1670,7 +1630,10 @@ mod tests {
         let left = (row + usize::from(vp.width / 2) - 20) * 4;
         let right = (row + usize::from(vp.width / 2) + 20) * 4;
         assert!(image[left] < 100, "no fill left of the edge");
-        assert_eq!(image[right..right + 4], PAPER.to_rgba8().to_u8_array());
+        assert_eq!(
+            image[right..right + 4],
+            Palette::LIGHT.paper.to_rgba8().to_u8_array()
+        );
 
         // On the line, whose stroke is too wide to draw at this zoom.
         let vp = max_zoom(Point::new(0.0, units(-MAX)));
@@ -1980,7 +1943,7 @@ mod tests {
             "{:?}",
             at(100, 100)
         );
-        let paper = PAPER.to_rgba8().to_u8_array();
+        let paper = Palette::LIGHT.paper.to_rgba8().to_u8_array();
         assert_eq!(at(200, 100), paper);
         assert!(
             image

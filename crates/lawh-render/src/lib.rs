@@ -1,5 +1,5 @@
 //! Rendering for lawh: draws a board to pixels for the window and exports it
-//! to PNG (SVG and PDF come later).
+//! to PNG ([`Renderer::export`]; SVG and PDF come next).
 //!
 //! [`Renderer`] draws a [`lawh_core::Board`] through a [`Viewport`] with
 //! `vello_cpu`, headless and on the CPU. Text is laid out by parley with the
@@ -10,8 +10,12 @@
 //!
 //! A frame never waits for math: a formula still compiling is drawn as its
 //! source in grey until the engine's waker asks for another frame, and only
-//! formulas on screen are asked for. Exports ([`Renderer::render_png`]) wait
-//! for every formula, so they are the same every time.
+//! formulas on screen are asked for. Exports ([`Renderer::export`], and
+//! [`Renderer::render_png`] of a view) wait for every formula, so they are the
+//! same every time. An export frames the whole board (or a selection) at the
+//! window's zoom-1 sizes, from a draw list in grid units every output shares,
+//! within caps of its own ([`EXPORT_MATH_WAIT`], [`MAX_EXPORT_PIXELS`],
+//! [`MAX_EXPORT_BYTES`], ...). Every colour comes from one [`Palette`].
 //!
 //! A frame's work is budgeted, so a hostile board can't freeze the window:
 //! each object's cost is estimated before it is drawn, and objects that don't
@@ -36,15 +40,25 @@
 mod budget;
 mod draw;
 mod error;
+mod export;
 mod glyphs;
 mod overlay;
+mod palette;
 mod renderer;
+mod scene;
 mod status;
 mod text;
 mod viewport;
 
 pub use error::RenderError;
+#[doc(hidden)]
+pub use export::ExportLimits;
+pub use export::{
+    EXPORT_ARROW_HEAD_UNITS, EXPORT_MARGIN_UNITS, EXPORT_MATH_WAIT, EXPORT_STROKE_UNITS,
+    ExportError, Exported, MAX_EXPORT_BYTES, MAX_EXPORT_PIXELS, MAX_EXPORT_SIDE_PX,
+};
 pub use overlay::{Caret, Overlay, OverlayCursor, StatusLine, status_bar_height_px};
+pub use palette::Palette;
 pub use renderer::{FrameStats, Renderer};
 pub use text::MAX_TEXT_CACHE_BYTES;
 pub use viewport::Viewport;

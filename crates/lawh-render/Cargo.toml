@@ -21,6 +21,8 @@ lawh-core.workspace = true
 lawh-math.workspace = true
 parley.workspace = true
 parley_data.workspace = true
+# PNG export, with an sRGB chunk; already in the tree through vello_cpu.
+png.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 # Glyph outline sizes for the frame budget; already in the tree through lawh-math.

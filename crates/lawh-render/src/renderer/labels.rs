@@ -22,7 +22,7 @@ use kurbo::{Affine, Rect, Shape as _};
 use lawh_core::engine::JumpLabel;
 use vello_cpu::Glyph;
 
-use super::{CURSOR, LABEL_LEFT, LABEL_TYPED, Renderer, to_f32};
+use super::{Renderer, to_f32};
 use crate::budget::Estimate;
 use crate::overlay::status_bar_height_px;
 use crate::{Viewport, draw};
@@ -185,7 +185,7 @@ impl Renderer {
         self.work.labels += placed.boxes.len();
         self.work.label_letters += placed.letters.len();
         self.ctx.set_transform(Affine::IDENTITY);
-        self.ctx.set_paint(CURSOR);
+        self.ctx.set_paint(self.palette.cursor);
         for rect in &placed.boxes {
             self.ctx.fill_rect(rect);
         }
@@ -210,8 +210,11 @@ impl Renderer {
             return;
         };
         self.ctx.set_transform(Affine::IDENTITY);
-        self.ctx
-            .set_paint(if typed { LABEL_TYPED } else { LABEL_LEFT });
+        self.ctx.set_paint(if typed {
+            self.palette.label_typed
+        } else {
+            self.palette.label_left
+        });
         let drawn = self
             .ctx
             .glyph_run(&mut self.resources, font_data)
@@ -253,6 +256,7 @@ mod tests {
 
     use super::*;
     use crate::overlay::Overlay;
+    use crate::palette::Palette;
 
     fn label(name: &str, at: Point, text: &str) -> JumpLabel {
         JumpLabel {
@@ -362,7 +366,7 @@ mod tests {
         let (width, height) = (400_u16, 300_u16);
         let vp = Viewport::new(Point::ZERO, 1.0, width, height, 1.0);
         let bar = status_bar_height_px(1.0);
-        let blue = CURSOR.to_rgba8().to_u8_array();
+        let blue = Palette::LIGHT.cursor.to_rgba8().to_u8_array();
         let pixel = |image: &[u8], x: u32, y: u32| {
             let i = usize::try_from((y * u32::from(width) + x) * 4).unwrap();
             [image[i], image[i + 1], image[i + 2], image[i + 3]]

@@ -1653,6 +1653,7 @@ dependencies = [
  "lawh-math",
  "parley",
  "parley_data",
+ "png",
  "thiserror 2.0.21",
  "tracing",
  "ttf-parser",

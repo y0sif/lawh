@@ -11,8 +11,8 @@
 use kurbo::{Affine, Rect};
 use lawh_core::engine::{SYM_ROWS, Symbol};
 
+use super::Renderer;
 use super::ui::{STATUS_EDGE_PX, STATUS_PAD_PX, fill_layout};
-use super::{CURSOR_BLOCK, INK, Renderer, STATUS_BAR, STATUS_EDGE};
 use crate::Viewport;
 use crate::overlay::{STATUS_FONT_PX, status_bar_height_px};
 use crate::status::{Keep, STATUS_CACHE_ENTRIES, window};
@@ -81,18 +81,24 @@ impl Renderer {
         let top = bar_top - row_height * count(shown);
 
         let edge = (STATUS_EDGE_PX * sf).round().max(1.0);
-        self.fill_screen(Rect::new(0.0, top, panel_width, bar_top), STATUS_BAR);
+        self.fill_screen(
+            Rect::new(0.0, top, panel_width, bar_top),
+            self.palette.status_bar,
+        );
         self.fill_screen(
             Rect::new(0.0, top, panel_width, (top + edge).min(bar_top)),
-            STATUS_EDGE,
+            self.palette.status_edge,
         );
         self.fill_screen(
             Rect::new((panel_width - edge).max(0.0), top, panel_width, bar_top),
-            STATUS_EDGE,
+            self.palette.status_edge,
         );
         if let Some(row) = selected.and_then(|selected| selected.checked_sub(first)) {
             let y = top + row_height * count(row);
-            self.fill_screen(Rect::new(0.0, y, panel_width, y + row_height), CURSOR_BLOCK);
+            self.fill_screen(
+                Rect::new(0.0, y, panel_width, y + row_height),
+                self.palette.cursor_block,
+            );
         }
         for (row, (name, value)) in slots.into_iter().enumerate() {
             let row_top = top + row_height * count(row);
@@ -104,7 +110,13 @@ impl Renderer {
                 let y =
                     row_top + (row_height - f64::from(layout.height()) * px_per_layout_unit) / 2.0;
                 let transform = Affine::translate((x, y)) * Affine::scale(px_per_layout_unit);
-                fill_layout(&mut self.ctx, &mut self.resources, layout, transform, INK);
+                fill_layout(
+                    &mut self.ctx,
+                    &mut self.resources,
+                    layout,
+                    transform,
+                    self.palette.ink,
+                );
             }
         }
     }
@@ -140,6 +152,7 @@ mod tests {
 
     use super::*;
     use crate::overlay::Overlay;
+    use crate::palette::Palette;
 
     fn rows(n: usize) -> Vec<Symbol> {
         (0..n)
@@ -168,7 +181,7 @@ mod tests {
     /// The rows of column 2 of `image` (`width` wide) from `y0` up to the top, and what each is:
     /// the panel, the selected row's highlight, or paper.
     fn column(image: &[u8], width: u16, y0: u32) -> Vec<char> {
-        let panel = STATUS_BAR.to_rgba8().to_u8_array();
+        let panel = Palette::LIGHT.status_bar.to_rgba8().to_u8_array();
         (0..y0)
             .rev()
             .map(|y| {

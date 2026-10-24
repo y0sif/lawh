@@ -23,10 +23,11 @@ use lawh_core::{Board, Object, ObjectId, Shape};
 use lawh_math::{MathEngine, MathGlyph, MathItem, MathLayout};
 
 use super::{
-    INK, MATH_SCALE, MathWait, Renderer, UNITS_PER_PT, layout_box, text_box, text_cost, text_view,
+    MATH_SCALE, MathWait, Renderer, UNITS_PER_PT, layout_box, text_box, text_cost, text_view,
 };
 use crate::budget::{self, Budget};
 use crate::glyphs::{GlyphStats, GlyphTable};
+use crate::palette::Palette;
 use crate::text::TextShaper;
 use crate::{Viewport, draw};
 
@@ -879,7 +880,7 @@ fn calibrate_text_drawing() {
                                     size,
                                     key,
                                     &text,
-                                    INK,
+                                    Palette::LIGHT.ink,
                                     &vp,
                                     clip,
                                     &mut budget,

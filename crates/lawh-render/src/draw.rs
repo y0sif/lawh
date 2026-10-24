@@ -22,9 +22,9 @@ pub(crate) const TOLERANCE_PX: f64 = 0.1;
 pub(crate) const STROKE_PX: f64 = 2.0;
 
 /// Arrowhead length in grid units, kept between the pixel limits below.
-const ARROW_HEAD_UNITS: f64 = 0.3;
-const ARROW_HEAD_MIN_PX: f64 = 8.0;
-const ARROW_HEAD_MAX_PX: f64 = 24.0;
+pub(crate) const ARROW_HEAD_UNITS: f64 = 0.3;
+pub(crate) const ARROW_HEAD_MIN_PX: f64 = 8.0;
+pub(crate) const ARROW_HEAD_MAX_PX: f64 = 24.0;
 /// Arrowhead half-width as a fraction of its length.
 const ARROW_HEAD_SPREAD: f64 = 0.4;
 
@@ -71,6 +71,33 @@ pub(crate) fn clip_rect(vp: &Viewport) -> Rect {
 
 pub(crate) fn stroke_width_px(vp: &Viewport) -> f64 {
     STROKE_PX * vp.scale_factor
+}
+
+/// How long an arrowhead is through `vp`, in physical pixels, before an arrow shorter than that
+/// cuts it down: [`ARROW_HEAD_UNITS`] kept between the pixel limits.
+fn arrow_head_px(vp: &Viewport) -> f64 {
+    let sf = vp.scale_factor;
+    (ARROW_HEAD_UNITS * vp.px_per_unit())
+        .max(ARROW_HEAD_MIN_PX * sf)
+        .min(ARROW_HEAD_MAX_PX * sf)
+}
+
+/// An arrow from `a` to `b` with a head `head` long, cut down to the arrow's length, in any
+/// units: where its shaft ends, inside the head so the shaft's stroke never pokes past the tip,
+/// and the head's corners, tip first. `None` for an arrow of no length (or not finite), which
+/// has no head. The window ([`arrow`], in screen pixels) and exports (`crate::scene`, in grid
+/// units) both build arrows with this.
+pub(crate) fn arrow_parts(a: Point, b: Point, head: f64) -> Option<(Point, [Point; 3])> {
+    let dir = b - a;
+    let len = dir.hypot();
+    if !(len.is_finite() && len > f64::EPSILON) {
+        return None;
+    }
+    let head = head.min(len);
+    let along = dir / len;
+    let across = Vec2::new(-along.y, along.x) * (head * ARROW_HEAD_SPREAD);
+    let base = b - along * head;
+    Some((b - along * (head * 0.5), [b, base + across, base - across]))
 }
 
 /// The part of an ellipse's outline inside `clip`, or `None` when none of it is.
@@ -172,28 +199,24 @@ pub(crate) fn arrow(
     clip: Rect,
 ) -> (Option<BezPath>, Option<BezPath>) {
     let (a, b) = (vp.to_screen(a), vp.to_screen(b));
-    let dir = b - a;
-    let len = dir.hypot();
-    if !(len.is_finite() && len > f64::EPSILON) {
+    let Some((end, corners)) = arrow_parts(a, b, arrow_head_px(vp)) else {
         return (clip_segment(a, b, clip).map(|(a, b)| segment(a, b)), None);
-    }
-    let sf = vp.scale_factor;
-    let head = (ARROW_HEAD_UNITS * vp.px_per_unit())
-        .max(ARROW_HEAD_MIN_PX * sf)
-        .min(ARROW_HEAD_MAX_PX * sf)
-        .min(len);
-    let along = dir / len;
-    let across = Vec2::new(-along.y, along.x) * (head * ARROW_HEAD_SPREAD);
-    let base = b - along * head;
-
-    let mut tip = BezPath::new();
-    tip.move_to(b);
-    tip.line_to(base + across);
-    tip.line_to(base - across);
-    tip.close_path();
+    };
+    let tip = triangle(corners);
     let tip = tip.bounding_box().overlaps(clip).then_some(tip);
-    let shaft = clip_segment(a, b - along * (head * 0.5), clip).map(|(a, b)| segment(a, b));
+    let shaft = clip_segment(a, end, clip).map(|(a, b)| segment(a, b));
     (shaft, tip)
+}
+
+/// The closed path through `corners`.
+pub(crate) fn triangle(corners: [Point; 3]) -> BezPath {
+    let [a, b, c] = corners;
+    let mut path = BezPath::new();
+    path.move_to(a);
+    path.line_to(b);
+    path.line_to(c);
+    path.close_path();
+    path
 }
 
 /// `path`, in screen pixels, with everything far from `clip` straightened, so `vello_cpu`
@@ -381,7 +404,7 @@ pub(crate) fn grid_dots(vp: &Viewport) -> Option<(BezPath, usize)> {
     Some((path, dots))
 }
 
-fn segment(a: Point, b: Point) -> BezPath {
+pub(crate) fn segment(a: Point, b: Point) -> BezPath {
     let mut path = BezPath::new();
     path.move_to(a);
     path.line_to(b);

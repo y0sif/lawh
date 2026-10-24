@@ -144,6 +144,16 @@ impl Budget {
         Self::new(EXPORT_BUDGET_NS)
     }
 
+    /// An export's budget of `ns`, or [`EXPORT_BUDGET_NS`] if that is less (or `ns` isn't a
+    /// number): tests may give an export less, never more.
+    pub(crate) fn export_within(ns: f64) -> Self {
+        Self::new(if ns < EXPORT_BUDGET_NS {
+            ns.max(0.0)
+        } else {
+            EXPORT_BUDGET_NS
+        })
+    }
+
     /// For the highlights of a Visual selection.
     pub(crate) fn highlights() -> Self {
         Self::new(HIGHLIGHT_BUDGET_NS)
@@ -365,6 +375,17 @@ impl Estimate {
         }
         self.add(NS_PER_AREA_PX * area, 0.0);
     }
+}
+
+/// Each pixel of an image a frame or an export draws into: painting the paper and the final
+/// render, about 1 ms at 1920x1080 and 3 ms at 2880x1800 (see [`FRAME_BUDGET_NS`]), 0.48 to
+/// 0.58 ns a pixel.
+const NS_PER_IMAGE_PX: f64 = 0.6;
+
+/// The estimated cost of an image of `pixels` pixels, before anything is drawn into it: what an
+/// export charges for its image, which grows with the export.
+pub(crate) fn image(pixels: f64) -> f64 {
+    NS_PER_IMAGE_PX * pixels
 }
 
 /// The estimated cost of drawing `dots` grid dots at `scale_factor` (they are
