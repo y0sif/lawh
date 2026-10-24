@@ -1,7 +1,7 @@
 # lawh whiteboard keys
 
-Every key and `:` command the lawh whiteboard takes today, from the code on
-`feat/m3-sizes-jumps`. How they work inside is in [architecture.md](architecture.md#the-engine).
+Every key and `:` command the lawh whiteboard takes today. How they work inside is in
+[architecture.md](architecture.md#the-engine).
 
 Notation: `{count}` is a number typed first (`3w`). Keys are in Vim notation: `<CR>` is Enter,
 `<Esc>` Escape, `<BS>` Backspace, `<C-r>` Ctrl+R, `<S-Tab>` Shift+Tab. Keys match the character

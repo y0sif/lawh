@@ -5,9 +5,9 @@ macOS and Windows (unsigned). Repo is private until the app has been tested.
 
 Milestone 1 ("see a board") is done: `lawh file.lawh` draws a board, with mouse pan and zoom.
 Milestone 2 (the Vim engine) is done and merged: keys, editing, selection, saving, key maps and
-`lawhrc`. Milestone 3 is built on `feat/m3-sizes-jumps`, pending y0sif's test: text and math sizes
-(`<C-a>`/`<C-x>`, `:si`, `size=` in files), jump labels on `s`, `:sym` symbol search (`<C-k>` in
-Insert mode) and `W B E` in blocks. Keys are listed in `docs/keys.md`.
+`lawhrc`. Milestone 3 is done and merged: text and math sizes (`<C-a>`/`<C-x>`, `:si`, `size=` in
+files), jump labels on `s`, `:sym` symbol search (`<C-k>` in Insert mode) and `W B E` in blocks.
+Milestone 4 (export to SVG, PNG and PDF) is next. Keys are listed in `docs/keys.md`.
 
 ## Workspace
 

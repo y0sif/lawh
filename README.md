@@ -30,8 +30,8 @@ Milestone 2, the Vim engine, is done: the keyboard drives the board, and `:w` sa
 the "area of a circle" example from an empty board takes 62 keys (see the
 [quick start](#quick-start)).
 
-Milestone 3 is built and being tested: sizes for text and math, jump labels to reach any object in
-view in two or three keys, and `:sym` to put in a math symbol by name.
+Milestone 3 is done: sizes for text and math, jump labels to reach any object in view in two or
+three keys, and `:sym` to put in a math symbol by name.
 
 ## What works
 
