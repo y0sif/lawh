@@ -29,5 +29,12 @@ tracing.workspace = true
 ttf-parser.workspace = true
 vello_cpu.workspace = true
 
+[dev-dependencies]
+# Snapshots of exported SVG files.
+insta.workspace = true
+# Draws exported SVGs to compare with PNG exports; checks their XML.
+resvg.workspace = true
+roxmltree.workspace = true
+
 [lints]
 workspace = true

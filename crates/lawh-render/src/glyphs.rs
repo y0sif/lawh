@@ -6,6 +6,7 @@
 //! up here instead of assuming a typical one. Outlines are read from the font once per glyph, on
 //! first use, into a table as long as the font's glyph count.
 
+use kurbo::{BezPath, Point};
 use lawh_math::fonts;
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
@@ -99,6 +100,25 @@ impl GlyphTable {
         let id = face.glyph_index(c)?;
         let advance = face.glyph_hor_advance(id).map_or(0.0, f64::from) / table.units_per_em;
         Some((u32::from(id.0), advance))
+    }
+
+    /// The outline of glyph `id` of font `font` (an index into [`lawh_math::fonts`]) in font
+    /// units, y down (the font's y up turned over, as the board's y): what a vector export
+    /// draws the glyph as. `None` for a font or glyph the table doesn't have, or a glyph with no
+    /// outline (a space). Read from the font on each call: exporters keep what they need.
+    pub(crate) fn outline(&self, font: usize, id: u32) -> Option<BezPath> {
+        let face = self.fonts.get(font)?.face.as_ref()?;
+        let id = GlyphId(u16::try_from(id).ok()?);
+        let mut path = Outline(BezPath::new());
+        face.outline_glyph(id, &mut path)?;
+        (!path.0.elements().is_empty()).then_some(path.0)
+    }
+
+    /// The units per em of font `font`'s outlines ([`Self::outline`]); `None` for a font the
+    /// table doesn't have.
+    pub(crate) fn units_per_em(&self, font: usize) -> Option<f64> {
+        let table = self.fonts.get(font)?;
+        table.face.as_ref().map(|_| table.units_per_em)
     }
 
     /// The missing-glyph box of font `font` (glyph 0) and its advance in ems.
@@ -214,9 +234,87 @@ impl OutlineBuilder for Walk {
     }
 }
 
+/// Builds a glyph's outline as a path, y turned over.
+struct Outline(BezPath);
+
+impl OutlineBuilder for Outline {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.0.move_to(flip(x, y));
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.0.line_to(flip(x, y));
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.0.quad_to(flip(x1, y1), flip(x, y));
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.0.curve_to(flip(x1, y1), flip(x2, y2), flip(x, y));
+    }
+
+    fn close(&mut self) {
+        self.0.close_path();
+    }
+}
+
+/// A point of a font's outline, y up, as a point y down.
+fn flip(x: f32, y: f32) -> Point {
+    Point::new(f64::from(x), -f64::from(y))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outlines_come_from_the_fonts_y_down() {
+        let table = GlyphTable::new();
+        let face = Face::parse(fonts()[0].data, 0).unwrap();
+        let x = face.glyph_index('x').unwrap();
+        let outline = table.outline(0, u32::from(x.0)).unwrap();
+        // The same elements as the font's walk, its box turned over.
+        let mut walk = Walk::default();
+        let bbox = face.outline_glyph(x, &mut walk).unwrap();
+        let moves = outline
+            .elements()
+            .iter()
+            .filter(|el| matches!(el, kurbo::PathEl::MoveTo(_)))
+            .count();
+        assert!(((outline.elements().len() - moves) as f64 - walk.lines - walk.curves).abs() < 0.5);
+        let bounds = outline.control_box();
+        assert!(
+            (bounds.y0 + f64::from(bbox.y_max)).abs() < 1e-9,
+            "{bounds:?}"
+        );
+        assert!(
+            (bounds.y1 + f64::from(bbox.y_min)).abs() < 1e-9,
+            "{bounds:?}"
+        );
+        assert!(
+            (bounds.x1 - f64::from(bbox.x_max)).abs() < 1e-9,
+            "{bounds:?}"
+        );
+        assert_eq!(table.units_per_em(0), Some(f64::from(face.units_per_em())));
+        // Libertinus Math's outlines are cubic (CFF).
+        let math = Face::parse(fonts()[1].data, fonts()[1].index).unwrap();
+        let o = math.glyph_index('o').unwrap();
+        let outline = table.outline(1, u32::from(o.0)).unwrap();
+        assert!(
+            outline
+                .elements()
+                .iter()
+                .any(|el| matches!(el, kurbo::PathEl::CurveTo(..)))
+        );
+        // A space has no outline; nor has a glyph or a font the table doesn't have.
+        let space = face.glyph_index(' ').unwrap();
+        assert_eq!(table.outline(0, u32::from(space.0)), None);
+        assert_eq!(table.outline(0, 70_000), None);
+        assert_eq!(table.outline(0, u32::from(face.number_of_glyphs())), None);
+        assert_eq!(table.outline(99, 1), None);
+        assert_eq!(table.units_per_em(99), None);
+    }
 
     #[test]
     fn glyphs_are_measured_from_the_fonts() {

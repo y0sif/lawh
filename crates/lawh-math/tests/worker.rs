@@ -322,6 +322,36 @@ fn layouts_of_small_items_come_back_from_the_worker() {
     );
 }
 
+/// A wait with a deadline ends there, without killing the worker or caching a failure: the
+/// compile carries on in the worker and is cached when it finishes, so an export that ran out of
+/// time doesn't mark a slow but sound formula as broken.
+#[test]
+fn a_wait_until_a_deadline_leaves_the_worker_compiling() {
+    // Nine million loop iterations: a second or so, well within this timeout.
+    let slow = "#for i in range(3000) { for j in range(3000) { } } x";
+    let engine = MathEngine::with_worker(worker()).with_timeout(Duration::from_secs(60));
+    // The worker started, so the deadline below doesn't include starting it.
+    engine.layout_blocking("x").unwrap();
+    let wait = Duration::from_millis(100);
+    let started = Instant::now();
+    assert_eq!(
+        engine.layout_until(slow, started + wait),
+        Err(MathError::Timeout)
+    );
+    let took = started.elapsed();
+    println!(
+        "waited {:.1} ms for a deadline {wait:?} away",
+        took.as_secs_f64() * 1e3
+    );
+    // Waking up takes microseconds; a busy machine can pause a thread for a while.
+    assert!(took >= wait && took < wait + NO_WAIT, "{took:?}");
+    assert_eq!(engine.request(slow), MathStatus::Pending);
+    let later = Instant::now() + Duration::from_secs(60);
+    assert!(engine.layout_until(slow, later).is_ok());
+    // One compile of each: the slow one was not started again.
+    assert_eq!(engine.compiles(), 2);
+}
+
 #[test]
 fn layout_in_worker_mode_goes_through_the_worker() {
     let engine = engine();

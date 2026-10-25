@@ -520,6 +520,43 @@ fn the_math_wait_stops_an_export() {
     );
 }
 
+/// A formula that takes longer than the whole math wait: the export stops when the wait runs
+/// out, not when the formula would be done, and the formula is not taken as failed: it goes on
+/// compiling, and an export that may wait longer draws it.
+#[test]
+fn the_math_wait_ends_on_time() {
+    // Nine million loop iterations: about a second, well within this engine's own timeout.
+    let slow = "#for i in range(3000) { for j in range(3000) { } } x";
+    let engine = lawh_math::MathEngine::new().with_timeout(Duration::from_secs(60));
+    let mut renderer = Renderer::with_math(engine);
+    let board = common::board(&format!(
+        "lawh version=1\nmath id=m1 x=0 y=0 \"{slow}\"\ncircle id=c1 x=0 y=3 r=1\n"
+    ));
+    let wait = Duration::from_millis(200);
+    let limits = ExportLimits {
+        math_wait: wait,
+        ..ExportLimits::DEFAULT
+    };
+    let started = Instant::now();
+    assert_eq!(
+        renderer.export_with_limits(&board, None, &png_options(), &limits),
+        Err(ExportError::MathWait)
+    );
+    let took = started.elapsed();
+    println!(
+        "stopped {:.1} ms after it started",
+        took.as_secs_f64() * 1e3
+    );
+    // Waking up when the wait ends takes microseconds; a busy machine can pause a thread for
+    // a while, but not for the second the formula takes.
+    assert!(
+        took >= wait && took < wait + Duration::from_millis(750),
+        "{took:?}"
+    );
+    let exported = renderer.export(&board, None, &png_options()).unwrap();
+    assert_eq!(exported.report.failed_formulas, 0);
+}
+
 #[test]
 fn the_budget_stops_an_export() {
     let board = common::area_board();
@@ -632,22 +669,29 @@ fn an_export_leaves_the_window_as_it_was() {
 }
 
 #[test]
-fn svg_and_pdf_are_not_written_yet() {
+fn pdf_is_not_written_yet() {
     let board = common::area_board();
-    for format in [ExportFormat::Svg, ExportFormat::Pdf] {
-        let options = ExportOptions {
-            format,
-            ..ExportOptions::default()
-        };
-        assert_eq!(
-            Renderer::new_trusted().export(&board, None, &options),
-            Err(ExportError::Unsupported(format))
-        );
-    }
+    let options = ExportOptions {
+        format: ExportFormat::Pdf,
+        ..ExportOptions::default()
+    };
+    assert_eq!(
+        Renderer::new_trusted().export(&board, None, &options),
+        Err(ExportError::Unsupported(ExportFormat::Pdf))
+    );
     assert_eq!(
         ExportError::Unsupported(ExportFormat::Pdf).to_string(),
         "pdf export is not available yet"
     );
+    // SVG is.
+    let options = ExportOptions {
+        format: ExportFormat::Svg,
+        ..ExportOptions::default()
+    };
+    let svg = Renderer::new_trusted()
+        .export(&board, None, &options)
+        .unwrap();
+    assert!(svg.bytes.starts_with(b"<?xml"));
 }
 
 #[test]
@@ -658,7 +702,7 @@ fn error_messages_are_short_lowercase_phrases() {
         ExportError::MathWait,
         ExportError::TooLarge { bytes: 70_000_000 },
         ExportError::Png("bad".to_owned()),
-        ExportError::Unsupported(ExportFormat::Svg),
+        ExportError::Unsupported(ExportFormat::Pdf),
     ] {
         let message = err.to_string();
         let first = message.chars().next().unwrap();

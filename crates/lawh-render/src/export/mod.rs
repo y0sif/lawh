@@ -6,11 +6,15 @@
 //! placeholder: it waits for every formula first, and a formula that fails is drawn as its source
 //! in the error colour, as on screen, and counted ([`ExportReport::failed_formulas`]).
 //!
+//! Formats: PNG (`png.rs`, drawn with `vello_cpu`) and SVG (`svg.rs`, written by hand: paths
+//! and glyph outlines only, no board text in the file). PDF is not written yet.
+//!
 //! An export is bounded however hostile the board: the formulas' compiles by
-//! [`EXPORT_MATH_WAIT`] together, the drawing by the export budget (`EXPORT_BUDGET_NS` of
-//! estimated work, as the window's frames are), a PNG's size by [`MAX_EXPORT_PIXELS`] and
-//! [`MAX_EXPORT_SIDE_PX`] (it shrinks to fit), and the file by [`MAX_EXPORT_BYTES`]. Past a cap
-//! that stops it, it returns an [`ExportError`] and no bytes. Nothing is written to disk here.
+//! [`EXPORT_MATH_WAIT`] together, the drawing (or writing) by the export budget
+//! (`EXPORT_BUDGET_NS` of estimated work, as the window's frames are), a PNG's size by
+//! [`MAX_EXPORT_PIXELS`] and [`MAX_EXPORT_SIDE_PX`] (it shrinks to fit), and the file by
+//! [`MAX_EXPORT_BYTES`]. Past a cap that stops it, it returns an [`ExportError`] and no bytes.
+//! Nothing is written to disk here.
 //!
 //! Memory: a first pass compiles each formula and keeps only its box, then objects are drawn one
 //! at a time, so an export holds one formula's layout at once, not every formula's (the math
@@ -18,6 +22,7 @@
 //! copied.
 
 mod png;
+mod svg;
 
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -38,9 +43,11 @@ use crate::{BASE_PX_PER_UNIT, Renderer, draw};
 /// What all of one export's formulas may take together, waiting for the math worker to compile
 /// them. Each formula keeps the math engine's own timeout (`lawh_math::DEFAULT_TIMEOUT`, 2 s),
 /// so a board of formulas that each take almost that long stops after about five, while a board
-/// of real formulas takes milliseconds (a cold compile is about 7 ms, `m1-measurements.md`). It
-/// is checked after each formula, so the wait for one (at most twice the engine's timeout and
-/// its 1 s restart margin) can take an export past it by that much.
+/// of real formulas takes milliseconds (a cold compile is about 7 ms, `m1-measurements.md`).
+/// Each formula's wait ends when the export's time runs out (`MathEngine::layout_until`), so an
+/// export stops within milliseconds of this however long one formula would take (200.1 ms for
+/// a limit of 200 ms and a formula of a second, `the_math_wait_ends_on_time`). A formula cut
+/// short so is not cached as failed: it carries on compiling, and the next export finds it.
 pub const EXPORT_MATH_WAIT: Duration = Duration::from_secs(10);
 
 /// Most pixels a PNG export may have, 8,000 x 8,000; past it the scale shrinks to fit. Its image
@@ -57,7 +64,10 @@ pub const MAX_EXPORT_SIDE_PX: u32 = 16_384;
 /// Largest file an export may make, in bytes (64 MiB), counted while it is written: past it the
 /// export stops and returns nothing. A PNG at the pixel caps takes a few megabytes (0.27 to
 /// 4.8 MB at 8,000 x 8,000 with the default compression, measured in release on this laptop,
-/// R2), so only a hostile image gets near it.
+/// R2), so only a hostile image gets near it. An SVG takes about 35 bytes a glyph drawn: a board
+/// at lawh-core's 40,000 characters of text is 1.2 MB, and only math near lawh-math's glyph
+/// caps reaches this (500 formulas of 22,500 glyphs stopped here after 110 ms, measured in
+/// release).
 pub const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Room around what an export frames, in grid units, on each side: a grid cell, so nothing
@@ -182,12 +192,19 @@ impl Renderer {
         limits: &ExportLimits,
     ) -> Result<Exported, ExportError> {
         let limits = limits.tightened();
-        if options.format != ExportFormat::Png {
+        if options.format == ExportFormat::Pdf {
             return Err(ExportError::Unsupported(options.format));
         }
         let mut budget = Budget::export_within(limits.budget_ns);
         let mut plan = self.plan_export(board, selection, &limits, &mut budget)?;
-        let (bytes, shrunk) = png::export(self, board, &mut plan, *options, &limits, budget)?;
+        let (bytes, shrunk) = match options.format {
+            ExportFormat::Png => png::export(self, board, &mut plan, *options, &limits, budget)?,
+            ExportFormat::Svg => (
+                svg::export(self, board, &mut plan, *options, &limits, budget)?,
+                None,
+            ),
+            ExportFormat::Pdf => return Err(ExportError::Unsupported(options.format)),
+        };
         tracing::debug!(
             bytes = bytes.len(),
             objects = plan.objects.len(),
@@ -516,17 +533,25 @@ struct MathClock {
 }
 
 impl MathClock {
-    /// Waits for `src` in `engine` ([`MathEngine::layout_blocking`]), counting the wait;
-    /// [`ExportError::MathWait`] once the waits add up to more than the limit.
+    /// Waits for `src` in `engine`, no longer than what is left of the limit
+    /// ([`MathEngine::layout_until`]), counting the wait; [`ExportError::MathWait`] once the
+    /// waits add up to the limit. A formula cut short by the limit is not cached as failed: the
+    /// math engine finishes compiling it, so the next export finds it.
     fn layout(
         &mut self,
         engine: &MathEngine,
         src: &str,
     ) -> Result<Result<Arc<MathLayout>, MathError>, ExportError> {
         let started = Instant::now();
-        let layout = engine.layout_blocking(src);
+        let left = self.limit.saturating_sub(self.waited);
+        let layout = match started.checked_add(left) {
+            Some(deadline) => engine.layout_until(src, deadline),
+            // A limit too far off to be an instant: none.
+            None => engine.layout_blocking(src),
+        };
         self.waited = self.waited.saturating_add(started.elapsed());
-        if self.waited > self.limit {
+        // A wait the deadline ended took all that was left, so the waits reach the limit.
+        if self.waited >= self.limit {
             return Err(ExportError::MathWait);
         }
         Ok(layout)

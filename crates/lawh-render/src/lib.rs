@@ -1,5 +1,5 @@
 //! Rendering for lawh: draws a board to pixels for the window and exports it
-//! to PNG ([`Renderer::export`]; SVG and PDF come next).
+//! to PNG and SVG ([`Renderer::export`]; PDF comes next).
 //!
 //! [`Renderer`] draws a [`lawh_core::Board`] through a [`Viewport`] with
 //! `vello_cpu`, headless and on the CPU. Text is laid out by parley with the
@@ -14,7 +14,8 @@
 //! [`Renderer::render_png`] of a view) wait for every formula, so they are the
 //! same every time. An export frames the whole board (or a selection) at the
 //! window's zoom-1 sizes, within caps of its own ([`EXPORT_MATH_WAIT`],
-//! [`MAX_EXPORT_PIXELS`], [`MAX_EXPORT_BYTES`], ...).
+//! [`MAX_EXPORT_PIXELS`], [`MAX_EXPORT_BYTES`], ...). An SVG is only geometry:
+//! glyphs as outlines from the bundled fonts, no board text in the file.
 //!
 //! The window and every export draw from one draw list: each object's
 //! outlines, arrowheads, glyph runs and math paths, built by the same

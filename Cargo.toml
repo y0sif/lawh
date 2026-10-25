@@ -46,6 +46,11 @@ vello_cpu = "0.3.0"
 # PNG export: the encoder vello_cpu's own PNG support uses (in the tree through it), taken
 # directly so the file can carry an sRGB chunk.
 png = "0.18.1"
+# SVG export tests: an independent rasterizer to draw exported SVGs with, and an XML parser to
+# check their structure. Pinned to the usvg and roxmltree Typst already compiles (usvg 0.47), so
+# neither is built twice; resvg without its default features draws no text and loads no fonts.
+resvg = { version = "=0.47.0", default-features = false }
+roxmltree = "=0.21.1"
 # No `system` feature: lawh never loads system fonts, and it would need fontconfig.
 parley = { version = "0.12.0", default-features = false, features = ["std", "bytemuck"] }
 bytemuck = "1.25.2"

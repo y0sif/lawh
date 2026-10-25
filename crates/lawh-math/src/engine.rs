@@ -150,8 +150,8 @@ impl From<Outcome> for MathStatus {
 /// ([`MAX_RECOMPILE_BURST`], [`RECOMPILE_INTERVAL`]), the one pushed out
 /// longest ago first, and calls the waker. So formulas that don't fit in the
 /// cache together are each drawn again in turn, but can't keep the compiler
-/// busy. [`MathEngine::layout_blocking`] always compiles again: exports need
-/// every formula.
+/// busy. [`MathEngine::layout_blocking`] and [`MathEngine::layout_until`]
+/// always compile again: exports need every formula.
 ///
 /// There are two modes:
 ///
@@ -166,8 +166,9 @@ impl From<Outcome> for MathStatus {
 ///   worker. Use this for anything that comes from a board.
 ///
 /// [`MathEngine::request`] never blocks, for the UI;
-/// [`MathEngine::layout_blocking`] waits, for exports and tests. Both work in
-/// either mode and share one cache.
+/// [`MathEngine::layout_blocking`] waits, and [`MathEngine::layout_until`]
+/// waits no later than a deadline, for exports.
+/// All work in either mode and share one cache.
 pub struct MathEngine {
     timeout: Duration,
     mode: Mode,
@@ -301,8 +302,29 @@ impl MathEngine {
     pub fn layout_blocking(&self, src: &str) -> Result<Arc<MathLayout>, MathError> {
         match self.mode {
             Mode::InProcess => self.layout_in_process(src),
-            Mode::Worker(_) => self.wait_for(src),
+            Mode::Worker(_) => self.wait_for(src, None),
         }
+    }
+
+    /// [`MathEngine::layout_blocking`] that waits no later than `deadline`:
+    /// for a caller with a time limit of its own across many formulas, such as
+    /// an export.
+    ///
+    /// A formula still compiling at `deadline` returns [`MathError::Timeout`]
+    /// at once, which is not cached: the formula didn't fail, the caller ran
+    /// out of time. Its compile carries on, and its outcome is cached when it
+    /// finishes, so asking again later finds it. A cached outcome is returned
+    /// whatever the deadline. Otherwise the waiting is
+    /// [`MathEngine::layout_blocking`]'s, and a formula that takes longer than
+    /// the engine's timeout fails on its own, cached, as there.
+    ///
+    /// In both modes the compile runs on the engine's queue thread, first in
+    /// line (in process, that is where the compile can carry on past the
+    /// deadline); so in process, a compile refused because [`MAX_WORKERS`]
+    /// timed-out compiles are still running is cached as a timeout, as
+    /// [`MathEngine::request`] caches it.
+    pub fn layout_until(&self, src: &str, deadline: Instant) -> Result<Arc<MathLayout>, MathError> {
+        self.wait_for(src, Some(deadline))
     }
 
     /// Lays out `src` (Typst math, without `$`), compiling it on first use;
@@ -326,8 +348,10 @@ impl MathEngine {
         self.shared.store(src, outcome)
     }
 
-    /// Queues `src` first in line and waits for it.
-    fn wait_for(&self, src: &str) -> Outcome {
+    /// Queues `src` first in line and waits for it, no later than `until`
+    /// when there is one. A wait that runs out returns [`MathError::Timeout`],
+    /// not cached.
+    fn wait_for(&self, src: &str, until: Option<Instant>) -> Outcome {
         let mut state = self.shared.lock();
         if let Some(hit) = state.cached(src) {
             return hit;
@@ -365,6 +389,12 @@ impl MathEngine {
             let deadline = match &state.current {
                 Some((current, started)) if current == src => started.checked_add(per_compile),
                 _ => asked.checked_add(per_compile.saturating_mul(2)),
+            };
+            // The caller's own deadline, if it comes first.
+            let deadline = match (deadline, until) {
+                (Some(deadline), Some(until)) => Some(deadline.min(until)),
+                (deadline, None) => deadline,
+                (None, until) => until,
             };
             let wait = match deadline {
                 Some(deadline) => match deadline.checked_duration_since(Instant::now()) {
@@ -1385,11 +1415,83 @@ mod tests {
             layout_bytes: one + one / 2,
             ..CacheLimits::DEFAULT
         });
-        let first = engine.wait_for("x").unwrap();
-        engine.wait_for("y").unwrap();
-        let again = engine.wait_for("x").unwrap();
+        let first = engine.wait_for("x", None).unwrap();
+        engine.wait_for("y", None).unwrap();
+        let again = engine.wait_for("x", None).unwrap();
         assert!(!Arc::ptr_eq(&first, &again));
         assert_eq!(first, again);
+    }
+
+    /// A formula that takes Typst a second or more to evaluate (nine million loop iterations),
+    /// then lays out.
+    const SLOW: &str = "#for i in range(3000) { for j in range(3000) { } } x";
+
+    /// How late a wait may end past its deadline: waking the waiting thread. It takes
+    /// microseconds, but a busy machine can pause any thread for a while.
+    const LATE: Duration = Duration::from_millis(750);
+
+    #[test]
+    fn a_wait_until_a_deadline_ends_there_and_caches_nothing() {
+        // A timeout far past the deadline, so the formula would lay out on its own.
+        let engine = MathEngine::new().with_timeout(Duration::from_secs(120));
+        let wait = Duration::from_millis(100);
+        let started = Instant::now();
+        assert_eq!(
+            engine.layout_until(SLOW, started + wait),
+            Err(MathError::Timeout)
+        );
+        let took = started.elapsed();
+        println!(
+            "waited {:.1} ms for a deadline {wait:?} away",
+            took.as_secs_f64() * 1e3
+        );
+        assert!(took >= wait && took < wait + LATE, "{took:?}");
+        // Not cached as a failure: it is still compiling, and lays out when it is done, the
+        // same compile.
+        assert_eq!(engine.request(SLOW), MathStatus::Pending);
+        let later = Instant::now() + Duration::from_secs(120);
+        let layout = engine.layout_until(SLOW, later).unwrap();
+        println!(
+            "laid out {:.0} ms after it was asked for",
+            started.elapsed().as_secs_f64() * 1e3
+        );
+        assert_eq!(engine.compiles(), 1);
+        // A cached outcome comes back whatever the deadline, even one gone by.
+        assert!(Arc::ptr_eq(
+            &engine.layout_until(SLOW, started).unwrap(),
+            &layout
+        ));
+        assert!(Arc::ptr_eq(&engine.layout_blocking(SLOW).unwrap(), &layout));
+
+        // A deadline gone by, for a formula not cached: a timeout at once, not cached either.
+        let started = Instant::now();
+        assert_eq!(engine.layout_until("y", started), Err(MathError::Timeout));
+        assert!(started.elapsed() < LATE, "{:?}", started.elapsed());
+        assert!(engine.layout_until("y", later).is_ok());
+        assert_eq!(engine.compiles(), 2);
+    }
+
+    #[test]
+    fn a_wait_until_a_far_deadline_is_a_blocking_wait() {
+        let engine = MathEngine::new();
+        let later = Instant::now() + Duration::from_secs(120);
+        let layout = engine.layout_until("A = pi r^2", later).unwrap();
+        assert_eq!(
+            *layout,
+            *MathEngine::new().layout_blocking("A = pi r^2").unwrap()
+        );
+        assert!(matches!(
+            engine.layout_until("frac(1,", later),
+            Err(MathError::Compile(_))
+        ));
+        // A formula that takes longer than the engine's timeout fails on its own, before the
+        // deadline, and that is cached.
+        let engine = MathEngine::new().with_timeout(Duration::from_millis(20));
+        let started = Instant::now();
+        assert_eq!(engine.layout_until(SLOW, later), Err(MathError::Timeout));
+        assert!(started.elapsed() < Duration::from_millis(20) + LATE);
+        assert_eq!(engine.request(SLOW), MathStatus::Failed(MathError::Timeout));
+        assert_eq!(engine.compiles(), 1);
     }
 
     #[test]
