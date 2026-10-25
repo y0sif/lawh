@@ -1477,8 +1477,10 @@ mod tests {
     }
 
     /// A formula that takes Typst a second or more to evaluate (nine million loop iterations),
-    /// then lays out.
+    /// then lays out. Each test that needs it slow takes its own: Typst caches what it evaluated
+    /// for the whole process, so once one test has compiled a formula, it is fast in the others.
     const SLOW: &str = "#for i in range(3000) { for j in range(3000) { } } x";
+    const OTHER_SLOW: &str = "#for i in range(3000) { for j in range(3000) { } } y";
 
     /// How late a wait may end past its deadline: waking the waiting thread. It takes
     /// microseconds, but a busy machine can pause any thread for a while.
@@ -1542,9 +1544,15 @@ mod tests {
         // deadline, and that is cached.
         let engine = MathEngine::new().with_timeout(Duration::from_millis(20));
         let started = Instant::now();
-        assert_eq!(engine.layout_until(SLOW, later), Err(MathError::Timeout));
+        assert_eq!(
+            engine.layout_until(OTHER_SLOW, later),
+            Err(MathError::Timeout)
+        );
         assert!(started.elapsed() < Duration::from_millis(20) + LATE);
-        assert_eq!(engine.request(SLOW), MathStatus::Failed(MathError::Timeout));
+        assert_eq!(
+            engine.request(OTHER_SLOW),
+            MathStatus::Failed(MathError::Timeout)
+        );
         assert_eq!(engine.compiles(), 1);
     }
 
