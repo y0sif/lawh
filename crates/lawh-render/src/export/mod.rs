@@ -745,7 +745,9 @@ mod tests {
     fn a_formula_that_fails_when_it_is_drawn_stops_the_export() {
         // A formula that lays out while the export is framed, then fails when it is fetched
         // again to be drawn (its layout dropped, the worker crashed compiling it again): a fresh
-        // engine whose every compile times out stands in for that second fetch.
+        // engine whose worker can't start stands in for that second fetch. Not a zero timeout:
+        // Typst has the formula cached from the plan, so compiling it again took about 150 us
+        // (measured, debug build) and sometimes finished before the engine first looked.
         let board = lawh_core::from_lawh(
             "lawh version=1\n\
              math id=m1 x=0 y=0 \"sum_(i=1)^n i\"\n\
@@ -761,7 +763,8 @@ mod tests {
                 .unwrap();
             assert_eq!(plan.failed, 0);
             assert!(matches!(plan.objects[0].look, Look::Math(_)));
-            renderer.math = MathEngine::new().with_timeout(Duration::ZERO);
+            let missing = std::env::temp_dir().join("lawh-no-such-math-worker");
+            renderer.math = MathEngine::with_worker(lawh_math::WorkerCommand::new(missing));
             let options = ExportOptions {
                 format,
                 ..ExportOptions::default()
