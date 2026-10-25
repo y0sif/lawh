@@ -44,10 +44,12 @@ fn png_bomb() -> String {
 }
 
 /// Formulas that crashed, hung or ran away with memory when Typst ran on a
-/// thread of the app (verifier repros, M1).
+/// thread of the app (verifier repros, M1). The memory ones only on Linux,
+/// where the worker's memory cap stops them: nothing caps a worker's memory
+/// elsewhere so far (`limit_resources` in `src/worker.rs`, SECURITY.md), and
+/// there some would finish within the timeout, gigabytes later.
 fn hostile() -> Vec<(&'static str, String)> {
-    [
-        // Stack overflows.
+    let stack = [
         (
             "xml_deep",
             r#"#xml(bytes("<a>" * 200000 + "</a>" * 200000)).len()"#,
@@ -64,7 +66,8 @@ fn hostile() -> Vec<(&'static str, String)> {
             "flatten_deep",
             "#let a = (); #for i in range(1000000) { a = (a,) }; #a.flatten().len()",
         ),
-        // Memory.
+    ];
+    let memory = [
         ("huge_range", "#range(100000000).len()"),
         ("huge_range2", "#range(1000000000).len()"),
         ("huge_range3", "#range(9223372036854775807).len()"),
@@ -81,6 +84,13 @@ fn hostile() -> Vec<(&'static str, String)> {
             "push_loop",
             "#let a = (); #for i in range(200000000) { a.push(i) }; #a.len()",
         ),
+    ];
+    let memory = if cfg!(target_os = "linux") {
+        &memory[..]
+    } else {
+        &[]
+    };
+    let rest = [
         // Time.
         (
             "nested_loops",
@@ -95,11 +105,14 @@ fn hostile() -> Vec<(&'static str, String)> {
             "cbor_hugearr",
             "#cbor(bytes((0x9b, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff))).len()",
         ),
-    ]
-    .into_iter()
-    .map(|(name, src)| (name, src.to_owned()))
-    .chain([("png_bomb", png_bomb())])
-    .collect()
+    ];
+    stack
+        .iter()
+        .chain(memory)
+        .chain(&rest)
+        .map(|&(name, src)| (name, src.to_owned()))
+        .chain([("png_bomb", png_bomb())])
+        .collect()
 }
 
 #[test]

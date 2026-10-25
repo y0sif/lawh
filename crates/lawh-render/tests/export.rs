@@ -899,6 +899,7 @@ fn peak_bytes() -> u64 {
 /// A board at lawh-core's caps for an export: 250 texts of 160 characters (the board's 40,000)
 /// spread over the whole coordinate range, and 250 circles a million units across, so the image
 /// is at the pixel cap and full of outlines.
+#[cfg(target_os = "linux")]
 fn hostile_board() -> Board {
     let mut src = String::from("lawh version=1\n");
     let line = "lorem ipsum dolor sit amet, consectetur adipiscing elit ".repeat(3);

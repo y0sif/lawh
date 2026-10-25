@@ -1,5 +1,9 @@
+# Files the tests read (include_str! or fs): LF on every checkout, Windows included, so every
+# platform's tests read the same bytes. CRLF in boards and lawhrc has tests of its own.
 *.lawh text eol=lf
 *.snap text eol=lf
+*.demo text eol=lf
+examples/lawhrc text eol=lf
 *.ttf binary
 *.otf binary
 *.png binary

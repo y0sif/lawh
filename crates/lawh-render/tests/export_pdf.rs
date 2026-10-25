@@ -9,6 +9,7 @@ mod common;
 
 use std::fmt::Write as _;
 use std::io::Cursor;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 use hayro::hayro_interpret::font::Glyph;
@@ -704,6 +705,7 @@ fn texts_at_the_cap() -> Board {
 
 /// 250 texts of 160 characters and 250 circles a million units across, spread over the whole
 /// coordinate range: the hostile board of the PNG and SVG measurements.
+#[cfg(target_os = "linux")]
 fn hostile_board() -> Board {
     let mut src = String::from("lawh version=1\n");
     let line = "lorem ipsum dolor sit amet, consectetur adipiscing elit ".repeat(3);
