@@ -1,8 +1,9 @@
 //! The README demo, made of the app's own frames: a key script typed into an [`App`] with no
 //! window, each frame drawn by [`compose_frame`] as the window draws it (board, overlay, status
-//! line) and written as a PNG, with a timeline for ffmpeg, `demo.json` for a video editor and
-//! the on-screen key display's text. `demo/render.sh` runs [`render_demo`] and frames the
-//! result; the script's format is in `demo/README.md`.
+//! line) and written as a PNG, with a timeline for ffmpeg and `demo.json` for a video editor
+//! and for `demo/render.sh`'s magnifier (what the status bar's left end shows on each frame).
+//! `demo/render.sh` runs [`render_demo`] and frames the result; the script's format is in
+//! `demo/README.md`.
 //!
 //! Deterministic: the output depends on the script alone. Time is the script's, not the clock's;
 //! math compiles in this process (the demo's own board, so trusted) and is resolved before each
@@ -25,12 +26,6 @@ const DEFAULT_PACE_MS: u64 = 80;
 /// Most draws of one frame: a frame's work budget may leave text out (the first frame at a
 /// size has a smaller budget, as in the window), and the next draw adds it.
 const MAX_DRAWS: usize = 4;
-
-/// Most characters the key display shows; older keys scroll out to the left behind `…`.
-const KEY_LINE_CHARS: usize = 44;
-
-/// What the key display puts between the keys of one `keys` line and the next.
-const KEY_GROUP_GAP: &str = "   ";
 
 /// Largest scale factor a script may ask for.
 const MAX_SCALE: u16 = 4;
@@ -146,11 +141,13 @@ fn parse_script(src: &str) -> Result<Script, String> {
     })
 }
 
-/// A frame written: its file, relative to the output directory, and when it starts showing.
+/// A frame written: its file, relative to the output directory, when it starts showing, and
+/// what the status bar's left end shows on it ([`status_left`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Frame {
     file: String,
     start_ms: u64,
+    status_left: String,
 }
 
 /// A key typed, and when.
@@ -168,14 +165,6 @@ struct Scene {
     end_ms: u64,
 }
 
-/// What the key display shows from `start_ms` to `end_ms`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct KeyLine {
-    start_ms: u64,
-    end_ms: u64,
-    text: String,
-}
-
 /// What a script made: the frames written, and what the outputs other than frames are made of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Recording {
@@ -185,7 +174,6 @@ struct Recording {
     frames: Vec<Frame>,
     keys: Vec<Typed>,
     scenes: Vec<Scene>,
-    key_lines: Vec<KeyLine>,
     duration_ms: u64,
 }
 
@@ -221,7 +209,6 @@ fn record(script: &Script, out: &Path) -> Recording {
     let mut frames = Frames::new(frames_dir, size);
     let mut keys = Vec::new();
     let mut scenes: Vec<Scene> = Vec::new();
-    let mut line = KeyLines::default();
     let mut now = 0;
     let mut pace = DEFAULT_PACE_MS;
     frames.add(&mut app, now);
@@ -236,15 +223,12 @@ fn record(script: &Script, out: &Path) -> Recording {
                     start_ms: now,
                     end_ms: now,
                 });
-                line.clear(now);
             }
             Step::Pace(ms) => pace = *ms,
             Step::Wait(ms) => now += ms,
             Step::Keys(typed) => {
-                line.group();
                 for &key in typed {
                     keys.push(Typed { at_ms: now, key });
-                    line.push(key, now);
                     app.feed(vec![key]);
                     assert!(!app.quitting, "the demo quit at {key}");
                     assert_eq!(
@@ -275,7 +259,6 @@ fn record(script: &Script, out: &Path) -> Recording {
     if let Some(last) = scenes.last_mut() {
         last.end_ms = now;
     }
-    line.clear(now);
     let last = frames.written.last().map_or(0, |frame| frame.start_ms);
     assert!(
         now > last,
@@ -287,9 +270,19 @@ fn record(script: &Script, out: &Path) -> Recording {
         frames: frames.written,
         keys,
         scenes,
-        key_lines: line.lines,
         duration_ms: now,
     }
+}
+
+/// What the left end of the status bar shows, as the window draws it: the command line while
+/// it is open (`:ci 3`), else the status line's left text, the mode or a message
+/// (`-- INSERT --`, `"area.pdf" exported`); empty when it shows nothing. `demo/render.sh` shows
+/// its magnifier on the frames where it isn't empty.
+fn status_left(app: &App) -> String {
+    if let Some((text, _)) = app.engine.command_line() {
+        return format!(":{text}");
+    }
+    super::status_line(&app.engine, app.message.as_deref(), app.suspended.as_ref()).left
 }
 
 /// Prints what a key left that a script's author needs: the status line, jump labels and
@@ -361,6 +354,7 @@ impl Frames {
         self.written.push(Frame {
             file,
             start_ms: now,
+            status_left: status_left(app),
         });
         self.last = pixels;
     }
@@ -409,8 +403,9 @@ fn write_png(path: &Path, rgba: &[u8], width: u32, height: u32) {
     writer.finish().unwrap();
 }
 
-/// How a key is shown on screen, and whether it is a key with no character of its own (or a
-/// chord), shown by name: `Esc`, `Enter`, `Tab`, `Ctrl+K`. A character is itself.
+/// How a key is shown in `demo.json` (`display`, for a video editor's key display), and whether
+/// it is a key with no character of its own (or a chord), shown by name: `Esc`, `Enter`, `Tab`,
+/// `Ctrl+K`. A character is itself.
 fn display(key: Key) -> (String, bool) {
     let name = match key.code {
         KeyCode::Char(c) if key.mods.is_empty() => return (c.to_string(), false),
@@ -450,80 +445,6 @@ fn display(key: Key) -> (String, bool) {
     }
     shown.push_str(&name);
     (shown, true)
-}
-
-/// The key display: the keys typed since the scene started, a named key set apart by a space
-/// and each `keys` line's keys by [`KEY_GROUP_GAP`], which takes the place of a space typed
-/// first on the line.
-#[derive(Debug, Default)]
-struct KeyLines {
-    typed: String,
-    since: u64,
-    /// The next key starts a group.
-    group: bool,
-    lines: Vec<KeyLine>,
-}
-
-impl KeyLines {
-    /// The next key starts a new group: a `keys` line.
-    fn group(&mut self) {
-        self.group = true;
-    }
-
-    fn push(&mut self, key: Key, now: u64) {
-        self.end(now);
-        self.since = now;
-        let (shown, named) = display(key);
-        if std::mem::take(&mut self.group) && !self.typed.is_empty() {
-            self.typed.truncate(self.typed.trim_end().len());
-            self.typed.push_str(KEY_GROUP_GAP);
-            if shown == " " {
-                return;
-            }
-        }
-        if named {
-            if !self.typed.is_empty() && !self.typed.ends_with(' ') {
-                self.typed.push(' ');
-            }
-            self.typed.push_str(&shown);
-            self.typed.push(' ');
-        } else {
-            self.typed.push_str(&shown);
-        }
-    }
-
-    fn clear(&mut self, now: u64) {
-        self.end(now);
-        self.typed.clear();
-        self.since = now;
-    }
-
-    /// What showed since the last change ends at `now`; it goes on what showed before it when
-    /// the two read the same.
-    fn end(&mut self, now: u64) {
-        let text = self.typed.trim_end();
-        if now > self.since && !text.is_empty() {
-            let count = text.chars().count();
-            let text = if count > KEY_LINE_CHARS {
-                let tail: String = text.chars().skip(count + 1 - KEY_LINE_CHARS).collect();
-                format!("\u{2026}{}", tail.trim_start())
-            } else {
-                text.to_owned()
-            };
-            if let Some(last) = self.lines.last_mut()
-                && last.end_ms == self.since
-                && last.text == text
-            {
-                last.end_ms = now;
-                return;
-            }
-            self.lines.push(KeyLine {
-                start_ms: self.since,
-                end_ms: now,
-                text,
-            });
-        }
-    }
 }
 
 /// `s` as a JSON string.
@@ -591,10 +512,12 @@ fn demo_json(script: &Script, rec: &Recording) -> String {
                 .get(i + 1)
                 .map_or(rec.duration_ms, |next| next.start_ms);
             format!(
-                "    {{\"file\": {}, \"start_ms\": {}, \"duration_ms\": {}}}",
+                "    {{\"file\": {}, \"start_ms\": {}, \"duration_ms\": {}, \
+                 \"status_left\": {}}}",
                 json_string(&frame.file),
                 frame.start_ms,
-                end - frame.start_ms
+                end - frame.start_ms,
+                json_string(&frame.status_left)
             )
         })
         .collect();
@@ -632,24 +555,12 @@ fn demo_json(script: &Script, rec: &Recording) -> String {
     out
 }
 
-/// The key display for ffmpeg: one line a state, `start_ms`, `end_ms` and the text, tab
-/// separated. The text holds no tab or line break (named keys are shown by name).
-fn key_lines_tsv(rec: &Recording) -> String {
-    let mut out = String::new();
-    for line in &rec.key_lines {
-        assert!(!line.text.contains(['\t', '\n', '\r']), "{line:?}");
-        writeln!(out, "{}\t{}\t{}", line.start_ms, line.end_ms, line.text).unwrap();
-    }
-    out
-}
-
-/// Renders `script` into `out`: `frames/`, `timeline.ffconcat`, `demo.json` and `keys.tsv`.
+/// Renders `script` into `out`: `frames/`, `timeline.ffconcat` and `demo.json`.
 fn render(script: &Script, out: &Path) -> Recording {
     fs::create_dir_all(out).unwrap();
     let rec = record(script, out);
     fs::write(out.join("timeline.ffconcat"), timeline(&rec)).unwrap();
     fs::write(out.join("demo.json"), demo_json(script, &rec)).unwrap();
-    fs::write(out.join("keys.tsv"), key_lines_tsv(&rec)).unwrap();
     rec
 }
 
@@ -726,36 +637,6 @@ mod tests {
         assert_eq!(json_string("a\"b\\c\u{1}"), r#""a\"b\\c\u0001""#);
     }
 
-    #[test]
-    fn the_key_display_sets_named_keys_and_key_lines_apart_and_clears_with_a_scene() {
-        let mut lines = KeyLines::default();
-        lines.group();
-        for (at, key) in (10..).step_by(10).zip(parse_keys("ab<Esc>").unwrap()) {
-            lines.push(key, at);
-        }
-        lines.group();
-        lines.push(parse_keys(" ").unwrap()[0], 40);
-        lines.push(parse_keys("c").unwrap()[0], 50);
-        lines.clear(100);
-        lines.push(parse_keys("x").unwrap()[0], 150);
-        lines.clear(200);
-        let shown: Vec<_> = lines
-            .lines
-            .iter()
-            .map(|l| (l.start_ms, l.end_ms, l.text.as_str()))
-            .collect();
-        assert_eq!(
-            shown,
-            [
-                (10, 20, "a"),
-                (20, 30, "ab"),
-                (30, 50, "ab Esc"),
-                (50, 100, "ab Esc   c"),
-                (150, 200, "x"),
-            ]
-        );
-    }
-
     /// A small script, drawn twice: the same frames, timeline and `demo.json` each time.
     #[test]
     fn a_script_renders_the_same_frames_each_time() {
@@ -770,7 +651,7 @@ mod tests {
             for frame in &rec.frames {
                 files.push(fs::read(out.join(&frame.file)).unwrap());
             }
-            for name in ["timeline.ffconcat", "demo.json", "keys.tsv"] {
+            for name in ["timeline.ffconcat", "demo.json"] {
                 files.push(fs::read(out.join(name)).unwrap());
             }
             (rec, files)
@@ -786,7 +667,7 @@ mod tests {
         assert_eq!(rec.frames[1].start_ms, 100);
         assert_eq!(rec.duration_ms, 100 + 4 * 50 + 200 + 6 * 50 + 300);
         assert_eq!((rec.width, rec.height), (320, 240));
-        let timeline = String::from_utf8(first[first.len() - 3].clone()).unwrap();
+        let timeline = String::from_utf8(first[first.len() - 2].clone()).unwrap();
         assert!(timeline.starts_with(
             "ffconcat version 1.0\nfile 'frames/frame-00001.png'\noption framerate 1000\n\
              duration 0.100\n"
@@ -796,6 +677,23 @@ mod tests {
                 "duration 0.350\nfile 'frames/frame-00011.png'\noption framerate 1000\n"
             ),
             "{timeline}"
+        );
+        // What the status bar's left end shows on each frame, for render.sh's magnifier.
+        let left: Vec<&str> = rec.frames.iter().map(|f| f.status_left.as_str()).collect();
+        let insert = "-- INSERT --";
+        assert_eq!(
+            left,
+            [
+                "", insert, insert, insert, "", ":", ":c", ":ci", ":ci ", ":ci 1", ""
+            ]
+        );
+        let json = String::from_utf8(first[first.len() - 1].clone()).unwrap();
+        assert!(
+            json.contains(
+                "{\"file\": \"frames/frame-00010.png\", \"start_ms\": 700, \"duration_ms\": 50, \
+                 \"status_left\": \":ci 1\"}"
+            ),
+            "{json}"
         );
     }
 }

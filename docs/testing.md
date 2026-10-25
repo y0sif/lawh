@@ -26,7 +26,7 @@ exported PDFs). See [tech-stack.md](tech-stack.md).
 | Worker process (Linux only) | The memory cap holds, a timed-out worker is killed, dropping the engine ends the worker, also mid-compile (killed and reaped before the drop returns) | `lawh-math/tests/worker_process.rs`, `lawh/tests/worker_process.rs` |
 | App | The command line and load errors (no window is opened); the app binary as its own math worker, its logs on stderr only; key translation, the status line and title, atomic writes and write batches, the same-file check after a write (links, hard links a write replaced), the lawhrc reader, the mapping timer, pan, zoom and following the cursor; the view jump labels go on (the window above the status bar, as it is when `s` runs); the engine keeps every drawable symbol; exports from the window (the `exporting` status line, paths, the board's own file refused, effects and keys in the engine's order, a click or a close running waiting exports first) | `lawh/tests/cli.rs`, `math_worker.rs`; unit tests in `lawh/src/*.rs` |
 | `lawh export` | The built binary, run in a directory under `target/tmp`: every format, a second run replacing the file, `--scale` and `--transparent`, a failed formula's one stderr line, a missing board, the board itself as the file, failures that write nothing, every usage error with exit 2, a board named `export`, the help; an export stopped by the math wait leaving no worker behind (it takes 10 s) | `lawh/tests/export.rs` |
-| The README demo | A demo script's parser and its errors, the key display, and a small script drawn twice giving the same frames, timeline and `demo.json`; the demo itself is an ignored test (see [The README demo](#the-readme-demo)) | `lawh/src/app/demo.rs` |
+| The README demo | A demo script's parser and its errors, how keys are named in `demo.json`, and a small script drawn twice giving the same frames, timeline and `demo.json`, with what the status bar's left end shows on each frame (for the magnifier); the demo itself is an ignored test (see [The README demo](#the-readme-demo)) | `lawh/src/app/demo.rs` |
 
 ### Differential tests
 
@@ -254,12 +254,13 @@ that `lawh.exe` imports no C runtime DLL.
 `assets/demo.gif` is made from the app's own frames: `demo/render.sh` runs an ignored test,
 `app::demo::render_demo` (`crates/lawh/src/app/demo.rs`), which types `demo/area.demo` into an
 `App` with no window, draws each frame with the code `App::redraw` uses (board, overlay, status
-line), and writes PNG frames and their timing to `demo/out/`; ffmpeg then frames them and makes
-the GIF and an mp4. The run is deterministic: time comes from the script, not the clock, math
-compiles in the test's process and every formula is ready before each frame, the view is fixed
-and no lawhrc is read, so two runs give byte-identical frames (the test
-`a_script_renders_the_same_frames_each_time` checks it on a small script). Script format and
-outputs: [demo/README.md](../demo/README.md).
+line), and writes PNG frames and their timing to `demo/out/`; ffmpeg then frames them, with a
+magnifier on the status bar's left end (the command line, the mode, messages) under the window
+while it shows something, and makes the GIF and an mp4. The run is deterministic: time comes
+from the script, not the clock, math compiles in the test's process and every formula is ready
+before each frame, the view is fixed and no lawhrc is read, so two runs give byte-identical
+frames (the test `a_script_renders_the_same_frames_each_time` checks it on a small script).
+Script format, outputs and the magnifier: [demo/README.md](../demo/README.md).
 
 ```bash
 demo/render.sh                 # needs ffmpeg 7 or later
