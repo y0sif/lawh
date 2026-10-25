@@ -4,7 +4,9 @@
 //! arrowheads included, and [`EXPORT_MARGIN_UNITS`] around them) and draws it from the shared
 //! draw list (`crate::scene`) at the window's zoom-1 sizes, without the grid, the overlay or any
 //! placeholder: it waits for every formula first, and a formula that fails is drawn as its source
-//! in the error colour, as on screen, and counted ([`ExportReport::failed_formulas`]).
+//! in the error colour, as on screen, and counted ([`ExportReport::failed_formulas`]). A formula
+//! that laid out then but fails when it is fetched again to be drawn stops the export
+//! ([`ExportError::MathFailedWhileDrawing`]): the frame was made for its box, not its source.
 //!
 //! Formats: PNG (`png.rs`, drawn with `vello_cpu`), SVG (`svg.rs`, written by hand: paths and
 //! glyph outlines only, no board text in the file) and PDF (`pdf.rs`, written with krilla: one
@@ -38,7 +40,7 @@ use lawh_math::{MathEngine, MathError, MathLayout};
 pub(crate) use self::png::encode as encode_png;
 use crate::budget::{self, Budget};
 use crate::renderer::{MathBox, layout_box, text_box, text_transform};
-use crate::scene::{self, Item, Paint, SceneObject, Sink, Space, Tally, Tools};
+use crate::scene::{self, Item, SceneObject, Sink, Space, Tally, TextRole, Tools};
 use crate::text::TextKey;
 use crate::{BASE_PX_PER_UNIT, Renderer, draw};
 
@@ -127,6 +129,13 @@ pub enum ExportError {
     /// The formulas took longer than [`EXPORT_MATH_WAIT`] to compile, together.
     #[error("export stopped: math took over {} s to compile", EXPORT_MATH_WAIT.as_secs())]
     MathWait,
+    /// A formula that laid out while the export was framed failed when it was fetched again to
+    /// be drawn: the math engine had dropped its layout since, and compiling it again failed
+    /// (the worker crashed, say). The frame was made for the formula's box, so its source drawn
+    /// in its place could be cut off; the export stops instead, and the next one frames the
+    /// formula as it is then.
+    #[error("export stopped: math failed while drawing; export again")]
+    MathFailedWhileDrawing,
     /// The file came to more than [`MAX_EXPORT_BYTES`]; `bytes` is how many it had reached when
     /// it stopped (for a PDF stopped while drawing, its content's estimate).
     #[error("export stopped: the file is over {} MiB", MAX_EXPORT_BYTES / (1024 * 1024))]
@@ -406,33 +415,28 @@ impl Renderer {
         plan: &mut ExportPlan,
         sink: &mut S,
     ) -> Result<(), ExportError> {
-        let (at, size, text, paint) = match (&object.shape, planned.look, planned.key) {
-            (Shape::Text { at, text, size }, _, Some(key)) => (*at, *size, (key, text), Paint::Ink),
-            (Shape::Math { at, src, size }, Look::Failed, Some(key)) => {
-                (*at, *size, (key, src), Paint::Error)
+        let (at, size, text, role) = match (&object.shape, planned.look, planned.key) {
+            (Shape::Text { at, text, size }, _, Some(key)) => {
+                (*at, *size, (key, text), TextRole::Text)
             }
-            (Shape::Math { at, src, size }, Look::Math(_), key) => {
+            (Shape::Math { at, src, size }, Look::Failed, Some(key)) => {
+                (*at, *size, (key, src), TextRole::Failed)
+            }
+            (Shape::Math { at, src, size }, Look::Math(_), _) => {
                 // Compiled again if the engine dropped it since; held only while it is drawn.
-                let layout = plan.math.layout(&self.math, src)?;
-                match (layout, key) {
-                    (Ok(layout), _) => {
-                        let transform =
-                            self.math_transform(Space::Board, *at, *size, layout.baseline);
-                        let mut tools = self.tools();
-                        sink.begin(&mut tools, &object.id, planned.bounds)?;
-                        for item in scene::math_items(&layout, transform) {
-                            sink.item(&mut tools, &item)?;
-                        }
-                        return Ok(());
-                    }
-                    (Err(err), Some(key)) => {
-                        // It laid out a moment ago: drawn as failed, like any other.
-                        tracing::debug!(id = %object.id, %err, "math failed when drawn for export");
-                        plan.failed += 1;
-                        (*at, *size, (key, src), Paint::Error)
-                    }
-                    (Err(_), None) => return Ok(()),
+                let layout = plan.math.layout(&self.math, src)?.map_err(|err| {
+                    // The frame was made for the formula, so its source drawn in its place could
+                    // be cut off: no file, rather than a wrong one.
+                    tracing::warn!(id = %object.id, %err, "math failed when drawn for export");
+                    ExportError::MathFailedWhileDrawing
+                })?;
+                let transform = self.math_transform(Space::Board, *at, *size, layout.baseline);
+                let mut tools = self.tools();
+                sink.begin(&mut tools, &object.id, planned.bounds)?;
+                for item in scene::math_items(&layout, transform) {
+                    sink.item(&mut tools, &item)?;
                 }
+                return Ok(());
             }
             (shape, ..) => {
                 let mut tools = self.tools();
@@ -464,6 +468,7 @@ impl Renderer {
             return Ok(());
         };
         sink.begin(&mut tools, &object.id, planned.bounds)?;
+        let paint = scene::text_paint(role);
         for item in scene::text_items(&shaped.layout, text, transform, paint) {
             sink.item(&mut tools, &item)?;
         }
@@ -617,7 +622,7 @@ fn source(object: &Object) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{Outline, Recorded, RecordedItem, Recorder};
+    use crate::scene::{Outline, Paint, Recorded, RecordedItem, Recorder};
 
     /// What exporting `selection` of `board` hands its sink, and the plan's frame and failures.
     fn record(board: &Board, selection: Option<&[ObjectId]>) -> (Vec<Recorded>, Rect, usize) {
@@ -733,6 +738,55 @@ mod tests {
             Rect::new(-1.0 - half, -1.0 - half, 21.0 + half, 1.0 + half).inflate(margin, margin);
         assert!((frame.x0 - expected.x0).abs() < 1e-9 && (frame.x1 - expected.x1).abs() < 1e-9);
         assert!((frame.y0 - expected.y0).abs() < 1e-9 && (frame.y1 - expected.y1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_formula_that_fails_when_it_is_drawn_stops_the_export() {
+        // A formula that lays out while the export is framed, then fails when it is fetched
+        // again to be drawn (its layout dropped, the worker crashed compiling it again): a fresh
+        // engine whose every compile times out stands in for that second fetch.
+        let board = lawh_core::from_lawh(
+            "lawh version=1\n\
+             math id=m1 x=0 y=0 \"sum_(i=1)^n i\"\n\
+             circle id=c1 x=5 y=0 r=1\n",
+        )
+        .unwrap();
+        let limits = ExportLimits::DEFAULT;
+        for format in [ExportFormat::Png, ExportFormat::Svg, ExportFormat::Pdf] {
+            let mut renderer = Renderer::new_trusted();
+            let mut budget = Budget::export();
+            let mut plan = renderer
+                .plan_export(&board, None, &limits, &mut budget)
+                .unwrap();
+            assert_eq!(plan.failed, 0);
+            assert!(matches!(plan.objects[0].look, Look::Math(_)));
+            renderer.math = MathEngine::new().with_timeout(Duration::ZERO);
+            let options = ExportOptions {
+                format,
+                ..ExportOptions::default()
+            };
+            let written = match format {
+                ExportFormat::Png => {
+                    png::export(&mut renderer, &board, &mut plan, options, &limits, budget)
+                }
+                ExportFormat::Svg => {
+                    svg::export(&mut renderer, &board, &mut plan, options, &limits, budget)
+                }
+                ExportFormat::Pdf => {
+                    pdf::export(&mut renderer, &board, &mut plan, options, &limits, budget)
+                }
+            };
+            assert_eq!(
+                written.map(|_| ()),
+                Err(ExportError::MathFailedWhileDrawing),
+                "{format:?}"
+            );
+            assert_eq!(plan.failed, 0, "not drawn as failed");
+        }
+        assert_eq!(
+            ExportError::MathFailedWhileDrawing.to_string(),
+            "export stopped: math failed while drawing; export again"
+        );
     }
 
     #[test]

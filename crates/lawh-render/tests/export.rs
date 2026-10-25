@@ -361,6 +361,29 @@ fn a_selection_exports_only_its_objects_framed_to_them() {
     assert_eq!(same.data, two.data);
 }
 
+/// The app draws an export from the board as the whole key that asked for it left it, as `:w`
+/// writes it, so a selection may name objects deleted since (`v:exp sel.png<CR>x` in a mapping):
+/// they are left out, and with none left there is nothing to export.
+#[test]
+fn a_selection_of_objects_deleted_since_draws_what_is_left() {
+    let mut board = common::area_board();
+    let mut renderer = Renderer::new_trusted();
+    let selection = [id("c1"), id("l1")];
+    let line_alone = renderer
+        .export(&board, Some(&[id("l1")]), &png_options())
+        .unwrap();
+    board.remove(&id("c1")).unwrap();
+    assert_eq!(
+        renderer.export(&board, Some(&selection), &png_options()),
+        Ok(line_alone)
+    );
+    board.remove(&id("l1")).unwrap();
+    assert_eq!(
+        renderer.export(&board, Some(&selection), &png_options()),
+        Err(ExportError::Empty)
+    );
+}
+
 #[test]
 fn nothing_to_export_is_an_error() {
     let mut renderer = Renderer::new_trusted();
@@ -714,6 +737,7 @@ fn error_messages_are_short_lowercase_phrases() {
         ExportError::Empty,
         ExportError::OverBudget,
         ExportError::MathWait,
+        ExportError::MathFailedWhileDrawing,
         ExportError::TooLarge { bytes: 70_000_000 },
         ExportError::Png("bad".to_owned()),
         ExportError::Pdf("glyph 70000 is not in font 1".to_owned()),

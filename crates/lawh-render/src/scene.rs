@@ -45,6 +45,31 @@ pub(crate) enum Paint {
     Rgba([u8; 4]),
 }
 
+/// What a text drawn on the board is, which decides its colour ([`text_paint`]): a text
+/// object, or a formula's source drawn in place of its math.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextRole {
+    /// A text object.
+    Text,
+    /// A formula's source while the caret is in it (the window; an export has no caret).
+    Editing,
+    /// A formula's source while it compiles (the window; an export waits for its math).
+    Compiling,
+    /// A formula's source because it failed to compile.
+    Failed,
+}
+
+/// The colour of a text drawn as `role`: the one place that picks it, for the window and every
+/// export alike, as [`shape_items`] picks the shapes' ([`Paint::Ink`]) and [`math_items`] takes
+/// math's from Typst. So a change of style here restyles the screen and the exports together.
+pub(crate) const fn text_paint(role: TextRole) -> Paint {
+    match role {
+        TextRole::Text | TextRole::Editing => Paint::Ink,
+        TextRole::Compiling => Paint::Pending,
+        TextRole::Failed => Paint::Error,
+    }
+}
+
 /// Where items are built, and so what units they are in.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Space<'v> {

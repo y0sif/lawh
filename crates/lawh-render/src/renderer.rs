@@ -17,7 +17,7 @@ use crate::export::{self, MAX_EXPORT_BYTES};
 use crate::glyphs::GlyphTable;
 use crate::overlay::Overlay;
 use crate::palette::Palette;
-use crate::scene::{self, Item, Paint, SceneObject, Sink as _, Space, Tally, Tools};
+use crate::scene::{self, Item, Paint, SceneObject, Sink as _, Space, Tally, TextRole, Tools};
 use crate::status::StatusText;
 use crate::text::{Chunk, KeyMap, Known, LAYOUT_EM, Plan, TextKey, TextShaper};
 use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
@@ -442,9 +442,11 @@ impl Renderer {
     /// time shows its source in red. Exports have a work budget too, far
     /// larger than a window frame's.
     ///
-    /// Encoded as exports are (sRGB, the default compression), within their
-    /// byte cap ([`MAX_EXPORT_BYTES`](crate::MAX_EXPORT_BYTES)). The image is
-    /// moved into the encoder, not copied; the next frame makes a new one.
+    /// Encoded as PNG exports are (`export::encode_png`): with an sRGB
+    /// chunk, compressed as the image's size calls for (zlib for small
+    /// images, fdeflate past `PNG_BALANCED_MAX_PIXELS`), within their byte
+    /// cap ([`MAX_EXPORT_BYTES`]). The image is moved into the encoder, not
+    /// copied; the next frame makes a new one.
     pub fn render_png(&mut self, board: &Board, vp: &Viewport) -> Result<Vec<u8>, RenderError> {
         if vp.width == 0 || vp.height == 0 {
             return Err(RenderError::EmptyImage {
@@ -474,7 +476,9 @@ impl Renderer {
     /// Compiles every formula on `board` that isn't compiled yet, waiting
     /// for each (up to the math engine's timeout and restart margin). After
     /// it, [`Self::board_bounds`] and [`Self::render`] see the final math.
-    /// For exports and tests; the window never waits.
+    /// For [`Self::render_png`] and tests; the window never waits, and
+    /// [`Self::export`] waits for math itself, within its own limit
+    /// ([`EXPORT_MATH_WAIT`](crate::EXPORT_MATH_WAIT)).
     pub fn resolve_math(&mut self, board: &Board) {
         for object in board.objects() {
             if let Shape::Math { src, .. } = &object.shape {
@@ -928,7 +932,8 @@ impl Renderer {
             | Shape::Arrow { .. }) => fits(self.draw_shape(shown, shape, vp, clip, budget)),
             Shape::Text { at, text, size } => match seen.key {
                 Some(key) => {
-                    self.draw_text(shown, *at, *size, key, text, Paint::Ink, vp, clip, budget)
+                    let paint = scene::text_paint(TextRole::Text);
+                    self.draw_text(shown, *at, *size, key, text, paint, vp, clip, budget)
                 }
                 None => Outcome::Pending,
             },
@@ -941,14 +946,16 @@ impl Renderer {
                 (Some(MathStatus::Evicted(_)), _) => Outcome::Evicted,
                 (Some(MathStatus::Failed(err)), Some(key)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");
-                    self.draw_text(shown, *at, *size, key, src, Paint::Error, vp, clip, budget)
+                    let paint = scene::text_paint(TextRole::Failed);
+                    self.draw_text(shown, *at, *size, key, src, paint, vp, clip, budget)
                 }
                 (Some(MathStatus::Pending) | None, Some(key)) => {
-                    let paint = if seen.edited {
-                        Paint::Ink
+                    let role = if seen.edited {
+                        TextRole::Editing
                     } else {
-                        Paint::Pending
+                        TextRole::Compiling
                     };
+                    let paint = scene::text_paint(role);
                     self.draw_text(shown, *at, *size, key, src, paint, vp, clip, budget)
                 }
                 (_, None) => Outcome::Pending,
@@ -1031,12 +1038,13 @@ impl Renderer {
         true
     }
 
-    /// Draws text of size `size` with its top-left corner at `at` in `paint`, if its estimated
-    /// cost fits in `budget`: only the lines whose baseline is near `clip`, and of those only the
-    /// glyph runs and glyphs that can reach into it. The estimate comes from the text's plan, at
-    /// the text's pixels per em, so a text over the budget is never walked and larger text costs
-    /// more; the glyph runs drawn are handed to the window's sink as the scene's items
-    /// (`scene::run_item`). [`Outcome::Pending`] when the text has no layout cached.
+    /// Draws text of size `size` with its top-left corner at `at` in `paint` (its role's, from
+    /// `scene::text_paint`), if its estimated cost fits in `budget`: only the lines whose
+    /// baseline is near `clip`, and of those only the glyph runs and glyphs that can reach into
+    /// it. The estimate comes from the text's plan, at the text's pixels per em, so a text over
+    /// the budget is never walked and larger text costs more; the glyph runs drawn are handed to
+    /// the window's sink as the scene's items (`scene::run_item`). [`Outcome::Pending`] when the
+    /// text has no layout cached.
     #[expect(
         clippy::too_many_arguments,
         reason = "the object, the text, where and how to draw it, and the budget"

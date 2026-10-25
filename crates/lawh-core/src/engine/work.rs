@@ -266,8 +266,8 @@ impl Engine {
         true
     }
 
-    /// The key being run has run out of work, or asked for too many writes (see
-    /// [`Engine::charge`], [`Engine::charge_write`]).
+    /// The key being run has run out of work, or asked for too many writes or exports (see
+    /// [`Engine::charge`], [`Engine::charge_write`], [`Engine::charge_export`]).
     pub(super) fn out_of_work(&self) -> bool {
         self.work.over
     }

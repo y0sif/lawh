@@ -285,17 +285,22 @@ fn failures_exit_1_and_write_nothing() {
 
 /// An export the math wait stops while a formula is still compiling kills and reaps the math
 /// worker before `lawh export` exits: stderr, which the worker shares, closes with the exit and
-/// holds only the error, no line from a worker left writing to it after the shell is back.
-/// Takes the math wait, 10 s.
+/// holds only the error, after the warnings lawh logs for each formula that timed out before
+/// it; no line from a worker left writing to it after the shell is back. Takes the math wait,
+/// 10 s.
 #[test]
 fn an_export_stopped_by_the_math_wait_leaves_no_worker_behind() {
     let dir = Dir::new("math-wait");
-    // Formulas of a second or so each (under the 2 s timeout): the wait ends during one.
+    // Formulas that would loop for 10^12 turns, so each runs past the 2 s timeout on any
+    // machine (`lawh_math::DEFAULT_TIMEOUT`): four time out in about 8 s, and the 10 s wait
+    // ends during the fifth, while it compiles. A sixth leaves room. Each is different, so none
+    // is a failure cached from the one before.
     let mut board = String::from("lawh version=1\n");
-    for i in 1..=12 {
+    for i in 1..=6 {
         writeln!(
             board,
-            "math id=m{i} x=0 y={} \"#{{ let x = {i}; for i in range(6500000) {{ x += i }}; x }}\"",
+            "math id=m{i} x=0 y={} \"#for i in range(10000) {{ for j in range(10000) {{ for k in \
+             range(10000) {{ }} }} }} x_{i}\"",
             i * 3
         )
         .unwrap();
@@ -322,10 +327,19 @@ fn an_export_stopped_by_the_math_wait_leaves_no_worker_behind() {
     let exited = Instant::now();
     let (text, closed) = reader.join().unwrap();
     assert_eq!(status.code(), Some(1), "{text}");
+    let (warnings, error) = text.trim_end().rsplit_once('\n').unwrap_or(("", &text));
     assert_eq!(
-        text,
-        "lawh: cannot export \"out.png\": export stopped: math took over 10 s to compile\n"
+        error.trim_end(),
+        "lawh: cannot export \"out.png\": export stopped: math took over 10 s to compile",
+        "{text}"
     );
+    // The formulas that timed out before the wait ran out: four here, fewer where the worker
+    // takes long to start. Each kill is logged twice, by lawh itself.
+    let timed_out = |line: &str| {
+        line.contains(" WARN lawh_math::process: math worker killed: compile too slow")
+            || line.contains(" WARN lawh_math::engine: math compile failed outcome=\"timeout\"")
+    };
+    assert!(warnings.lines().all(timed_out), "{text}");
     let late = closed.saturating_duration_since(exited);
     assert!(
         late < Duration::from_millis(500),

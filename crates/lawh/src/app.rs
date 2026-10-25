@@ -140,8 +140,11 @@ struct LeftPress {
 /// the effects and keys that waited, in order. So everything happens in the order the engine
 /// asked for it, and the board doesn't change before the export draws it.
 ///
-/// Meanwhile keys are queued behind the ones waiting; a click or a close request runs the
-/// export first (and what waited with it), then itself. If no frame comes within
+/// Meanwhile keys are queued behind the ones waiting. A click, a close request, or a failure
+/// that ends the app does not wait for frames: it first runs every export waiting and all that
+/// waited with them, the exports those keys ask for in turn too, in the engine's order
+/// ([`App::finish_exports`]), then itself. So a click lands on the board those keys leave, and
+/// closing or failing drops no export or write typed before it. If no frame comes within
 /// [`EXPORT_FRAME_WAIT`] (a hidden window), the export runs without one.
 #[derive(Debug)]
 struct Suspended {
@@ -251,9 +254,19 @@ impl App {
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, err: anyhow::Error) {
+        self.failed(err);
+        event_loop.exit();
+    }
+
+    /// A failure that ends the event loop, such as a frame that could not be presented: logged
+    /// and kept for [`App::into_result`], once every export waiting and what waited with it have
+    /// run ([`App::finish_exports`]). Keys typed before the failure did all they asked for before
+    /// exports waited for frames, so they still do: `:exp a.png<CR>:w<CR>` gets its file and its
+    /// write.
+    fn failed(&mut self, err: anyhow::Error) {
         tracing::error!("{err:#}");
         self.error.get_or_insert(err);
-        event_loop.exit();
+        self.finish_exports();
     }
 
     fn request_redraw(&self) {
@@ -407,7 +420,8 @@ impl App {
     /// writes it with the window's renderer ([`export::export_to`]), reports it to the engine
     /// ([`Engine::export_done`]), then does the effects that came after it and types the keys
     /// that waited, as if it had run when the engine asked for it. The caller leaves the event
-    /// loop if that quits.
+    /// loop if that quits. One of those keys may ask for another export, which then waits for a
+    /// frame of its own; [`App::finish_exports`] runs them all at once.
     fn run_export(&mut self) {
         let Some(Suspended {
             job, effects, keys, ..
@@ -429,6 +443,20 @@ impl App {
         self.apply(effects);
         self.sync_view();
         self.type_keys(keys);
+    }
+
+    /// Runs exports waiting ([`App::run_export`]) until none is left or the engine quits: the
+    /// one waiting, then any the keys that waited with it ask for, and so on, with the effects
+    /// and keys between them, in the engine's order. For what can't wait for their frames: a
+    /// click, which must land on the board those keys leave, and a close request or a failure,
+    /// which must not drop them.
+    ///
+    /// It ends: a new export can only come from the keys that waited (one key asks for at most
+    /// one), so each turn leaves fewer of them.
+    fn finish_exports(&mut self) {
+        while self.suspended.is_some() && !self.quitting {
+            self.run_export();
+        }
     }
 
     /// A frame was presented, or the window has nothing to present one on: an export waiting
@@ -475,17 +503,22 @@ impl App {
     /// The window's close button, the system's close shortcut, or Cmd+Q on macOS
     /// ([`keys::is_close_request`]).
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
-        // An export waiting for its frame was asked for before the close: it runs first.
-        self.run_export();
-        if self.quitting {
+        if self.close() {
             event_loop.exit();
-            return;
         }
-        if self.close_or_warn() {
-            event_loop.exit();
-        } else {
-            self.request_redraw();
+    }
+
+    /// A close request: true when the window closes now. The exports waiting for their frames
+    /// were asked for before the close, so they run first, with what waited with them
+    /// ([`App::finish_exports`]); then the window closes if that quit (a `:wq` that waited),
+    /// else as [`App::close_or_warn`] says.
+    fn close(&mut self) -> bool {
+        self.finish_exports();
+        if self.quitting || self.close_or_warn() {
+            return true;
         }
+        self.request_redraw();
+        false
     }
 
     /// A close request: true when the window closes now ([`close_now`]), else the status line
@@ -556,10 +589,11 @@ impl App {
     }
 
     /// A left click at `at` (physical pixels): the engine's cursor goes to the object there, or
-    /// to the grid point nearest it. A click on the status bar does nothing. An export waiting
-    /// for its frame runs first, and the keys that waited with it.
+    /// to the grid point nearest it. A click on the status bar does nothing. Every export waiting
+    /// for its frame runs first, with the keys that waited ([`App::finish_exports`]), so the click
+    /// lands on the board they leave.
     fn click(&mut self, at: Point) {
-        self.run_export();
+        self.finish_exports();
         if self.quitting {
             return;
         }
@@ -826,7 +860,7 @@ impl ApplicationHandler<MathReady> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 self.mouse_input(state, button);
-                // A click runs an export waiting for its frame first, which may quit.
+                // A click runs the exports waiting for their frames first, which may quit.
                 if self.quitting {
                     event_loop.exit();
                 }
@@ -1852,6 +1886,151 @@ mod tests {
         );
         assert!(app.engine.board().is_empty());
         assert_eq!(app.engine.cursor(), &Cursor::Grid(Point::ZERO));
+    }
+
+    /// Two circles: `c1` on the origin, where the cursor starts, and `c2` 5 units right of it,
+    /// at (600, 300) in [`origin_view`].
+    const TWO_CIRCLES: &str = "lawh version=1\n\
+                               circle id=c1 x=0 y=0 r=1\n\
+                               circle id=c2 x=5 y=0 r=1\n";
+
+    fn object(name: &str) -> Cursor {
+        Cursor::Object(ObjectId::new(name).unwrap())
+    }
+
+    #[test]
+    fn a_click_runs_every_waiting_export_and_their_keys_first() {
+        let dir = TestDir::new("export-click-all");
+        dir.write("a.lawh", TWO_CIRCLES);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        assert_eq!(app.engine.cursor(), &object("c1"));
+        // Typed fast: the second export and `x` wait behind the first.
+        app.feed(keys(":exp one.png<CR>:exp two.png<CR>x"));
+        assert_eq!(waiting(&app).keys, keys(":exp two.png<CR>x"));
+        // A click on `c2`: both exports run, and `x` deletes `c1`, before the click moves the
+        // cursor.
+        app.click(Point::new(600.0, 300.0));
+        assert!(app.suspended.is_none());
+        let one = fs::read(dir.path("one.png")).unwrap();
+        assert!(one.starts_with(PNG_SIGNATURE));
+        assert_eq!(
+            fs::read(dir.path("two.png")).unwrap(),
+            one,
+            "both drew the board before `x`"
+        );
+        let ids: Vec<_> = app
+            .engine
+            .board()
+            .objects()
+            .iter()
+            .map(|o| o.id.as_str())
+            .collect();
+        assert_eq!(ids, ["c2"]);
+        assert_eq!(app.engine.cursor(), &object("c2"));
+    }
+
+    #[test]
+    fn a_close_runs_every_waiting_export_and_their_keys_first() {
+        let dir = TestDir::new("export-close");
+        dir.write("a.lawh", TWO_CIRCLES);
+        // No changes: the window closes, after both exports.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.feed(keys(":exp one.png<CR>:exp two.svg<CR>"));
+        assert!(app.suspended.is_some());
+        assert!(app.close());
+        assert!(app.suspended.is_none());
+        assert!(
+            fs::read(dir.path("one.png"))
+                .unwrap()
+                .starts_with(PNG_SIGNATURE)
+        );
+        assert!(fs::read(dir.path("two.svg")).unwrap().starts_with(b"<?xml"));
+
+        // Changes: both exports run, then the close warns, and the next one closes.
+        let mut app = changed_app_in(dir.root(), "a.lawh");
+        app.feed(keys(":exp three.pdf<CR>:exp four.pdf<CR>"));
+        assert!(!app.close());
+        assert!(dir.path("three.pdf").exists() && dir.path("four.pdf").exists());
+        assert_eq!(app.message.as_deref(), Some(CLOSE_MODIFIED));
+        assert!(app.close());
+
+        // A `:wq` that waited behind an export closes the window once it has written the board.
+        let mut app = changed_app_in(dir.root(), "a.lawh");
+        app.feed(keys(":exp five.png<CR>:exp six.png<CR>:wq<CR>"));
+        assert!(app.close());
+        assert!(app.quitting);
+        assert!(dir.path("six.png").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path("a.lawh")).unwrap(),
+            to_lawh(app.engine.board())
+        );
+    }
+
+    #[test]
+    fn a_failure_that_ends_the_app_runs_every_waiting_export_and_write_first() {
+        let dir = TestDir::new("export-fail");
+        dir.write("a.lawh", TWO_CIRCLES);
+        let mut app = changed_app_in(dir.root(), "a.lawh");
+        app.feed(keys(":exp a.png<CR>:w<CR>:exp b.svg<CR>"));
+        assert!(app.suspended.is_some());
+        app.failed(anyhow!("could not present a frame: the display is gone"));
+        assert!(app.suspended.is_none());
+        assert!(
+            fs::read(dir.path("a.png"))
+                .unwrap()
+                .starts_with(PNG_SIGNATURE)
+        );
+        assert!(fs::read(dir.path("b.svg")).unwrap().starts_with(b"<?xml"));
+        assert_eq!(
+            fs::read_to_string(dir.path("a.lawh")).unwrap(),
+            to_lawh(app.engine.board())
+        );
+        assert!(!app.engine.is_modified());
+        assert_eq!(
+            app.into_result().unwrap_err().to_string(),
+            "could not present a frame: the display is gone"
+        );
+    }
+
+    #[test]
+    fn an_export_draws_the_board_as_its_whole_key_left_it() {
+        // As `:w` writes it: a command after `:exp` in the same key changes what is drawn.
+        let dir = TestDir::new("export-key-left");
+        dir.write("a.lawh", TWO_CIRCLES);
+        let mapped = |rhs: &str| {
+            let mut app = opened_app_in(dir.root(), "a.lawh");
+            assert_eq!(app.engine.source(&format!("nnoremap Q {rhs}\n")), []);
+            app.feed(keys("Q"));
+            assert_eq!(app.engine.board().len(), 1, "`x` deleted `c1`");
+            app
+        };
+
+        // The selection names `c1`, which `x` deleted: nothing of it is left to draw.
+        let mut app = mapped("v:exp sel.png<CR>x");
+        assert_eq!(
+            waiting(&app).job.selection,
+            Some(vec![ObjectId::new("c1").unwrap()])
+        );
+        app.run_export();
+        let message = app.engine.message().unwrap();
+        assert!(message.error);
+        assert_eq!(message.text, "cannot export \"sel.png\": nothing to export");
+        assert!(!dir.path("sel.png").exists());
+
+        // The whole board: `c2` alone is drawn.
+        let mut app = mapped(":exp out.svg<CR>x");
+        app.run_export();
+        assert_eq!(app.engine.message().unwrap().text, "\"out.svg\" exported");
+        let alone = from_lawh("lawh version=1\ncircle id=c2 x=5 y=0 r=1\n").unwrap();
+        let options = ExportOptions {
+            format: lawh_core::ExportFormat::Svg,
+            ..ExportOptions::default()
+        };
+        let expected = Renderer::new_trusted()
+            .export(&alone, None, &options)
+            .unwrap();
+        assert_eq!(fs::read(dir.path("out.svg")).unwrap(), expected.bytes);
     }
 
     /// The copy runs in the app crate, outside lawh-render's bench; see the dev profile in the

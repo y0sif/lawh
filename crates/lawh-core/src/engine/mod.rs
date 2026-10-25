@@ -133,10 +133,15 @@ pub enum Effect {
     /// it reports every write, in order.
     Write { path: String, quit_after: bool },
     /// Export the board to `path` (`:exp`): draw it, or only the objects of `selection` when it
-    /// is `Some` (the Visual selection `:exp` was typed from, in z-order, never empty), into a
-    /// file of `options.format` with the rest of `options` (`:set exportbg`, `:set pngscale`),
-    /// write that atomically, then report back with [`Engine::export_done`]. The board itself
-    /// is not written, and the export neither names it nor marks it saved.
+    /// is `Some` (the ids of the Visual selection `:exp` was typed from, in z-order, never
+    /// empty), into a file of `options.format` with the rest of `options` (`:set exportbg`,
+    /// `:set pngscale`), write that atomically, then report back with [`Engine::export_done`].
+    /// The board itself is not written, and the export neither names it nor marks it saved.
+    ///
+    /// The app draws the board as the whole key left it, as [`Effect::Write`] writes it: what
+    /// the key does after `:exp` (in a mapping, `:exp out.png<CR>x`) is in the file. So the
+    /// selection may name objects the key deleted since; those are not drawn, and with none
+    /// left the export reports `nothing to export`.
     ///
     /// One key or timeout asks for at most [`MAX_EXPORTS_PER_KEY`] exports, each counted as a
     /// write against [`MAX_WRITES_PER_KEY`] too, and the board does not change while the app
