@@ -10,7 +10,7 @@ mod common;
 use common::{board, run, run_engine, trace};
 use insta::assert_snapshot;
 use lawh_core::board::{MAX_COORDINATE, MAX_OBJECTS};
-use lawh_core::engine::{Effect, Engine, FixedMeasure};
+use lawh_core::engine::{Effect, Engine, FixedMeasure, Measure};
 use lawh_core::{Board, Cursor, Mode, Object, ObjectId, Point, Rect, Shape};
 
 /// Three rows, written out of reading order:
@@ -571,6 +571,98 @@ fn new_objects_get_ids_by_kind() {
     let script =
         ":ci 1<CR>:el 1 2<CR>:el 2 2<CR>:re 1 1<CR>:li 1 1<CR>:ar 1 1<CR>:te a<CR>:ma b<CR>";
     assert_snapshot!(run(Board::new(), script).snapshot());
+}
+
+// `:te` and `:ma` on an object: below it, by the place rule.
+
+#[test]
+fn text_typed_on_an_object_goes_below_it() {
+    // `:te Big` on "hey there" went exactly on top of it, at its anchor. Now each block goes
+    // half a unit below the one before (0.6 high, 1.2 at size 2), left edges lined up.
+    let script = "2l3j:te hey there<CR>:te ++size=2 Big<CR>:ma x^2<CR>";
+    assert_snapshot!(run(Board::new(), script).snapshot());
+}
+
+#[test]
+fn a_block_on_an_object_goes_past_what_is_in_the_way() {
+    // The circle under the title is in the way: the text goes half a unit below the circle.
+    let start = board("text id=t1 x=0 y=0 \"title\"\ncircle id=c1 x=1 y=2 r=1\n");
+    assert_snapshot!(run(start, "gg:te below<CR>").snapshot());
+}
+
+#[test]
+fn a_block_on_a_shape_goes_below_its_bounds() {
+    // Below the circle's box, its left edge, not at its centre (the circle's anchor).
+    assert_snapshot!(run(Board::new(), ":ci 2<CR>:ma A = pi r^2<CR>").snapshot());
+}
+
+#[test]
+fn a_placed_block_undoes_to_the_object_and_at_colon_stacks_more() {
+    let mut r = run(Board::new(), ":te a<CR>:te b<CR>");
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("t2")));
+    r.feed("u");
+    assert_eq!(r.engine.board().len(), 1);
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("t1")));
+    r.feed("<C-r>");
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("t2")));
+    // `@:` runs `:te b` on `t2`: below it, and so on down.
+    r.feed("@:@:");
+    assert_eq!(
+        lawh_core::to_lawh(r.engine.board()),
+        "lawh version=1\n\
+         text id=t1 x=0 y=0 \"a\"\n\
+         text id=t2 x=0 y=1.1 \"b\"\n\
+         text id=t3 x=0 y=2.2 \"b\"\n\
+         text id=t4 x=0 y=3.3 \"b\"\n"
+    );
+}
+
+#[test]
+fn no_room_below_an_object_at_the_edge() {
+    let edge = || {
+        board(&format!(
+            "text id=t1 x=0 y={} \"edge\"\n",
+            MAX_COORDINATE - 0.5
+        ))
+    };
+    for (script, message) in [
+        ("gg:te a<CR>", "no room for a new text block"),
+        ("gg:ma a<CR>", "no room for a new math block"),
+    ] {
+        let r = run(edge(), script);
+        assert_eq!(r.engine.board(), &edge(), "{script}");
+        assert_eq!(r.engine.cursor(), &Cursor::Object(id("t1")), "{script}");
+        let shown = r.engine.message().unwrap();
+        assert!(shown.error, "{script}");
+        assert_eq!(shown.text, message, "{script}");
+    }
+}
+
+#[test]
+fn the_measured_box_is_placed_not_the_anchor() {
+    /// Math boxes start a quarter unit above their anchor, as the renderer's can when a
+    /// formula's ink rises past the text line it sits on.
+    struct Raised;
+    impl Measure for Raised {
+        fn bounds(&mut self, object: &Object) -> Option<Rect> {
+            let b = FixedMeasure.bounds(object)?;
+            Some(match object.shape {
+                Shape::Math { .. } => Rect::new(b.x0, b.y0 - 0.25, b.x1, b.y1 - 0.25),
+                _ => b,
+            })
+        }
+    }
+    let mut engine = Engine::new(Board::new());
+    for key in lawh_core::parse_keys(":te hey<CR>:ma x<CR>").unwrap() {
+        engine.feed(key, &mut Raised);
+    }
+    // The text is 0.6 high: the formula's box starts at 1.1, its anchor a quarter below.
+    assert_eq!(
+        lawh_core::to_lawh(engine.board()),
+        "lawh version=1\n\
+         text id=t1 x=0 y=0 \"hey\"\n\
+         math id=m1 x=0 y=1.35 \"x\"\n"
+    );
 }
 
 // Writing and quitting.

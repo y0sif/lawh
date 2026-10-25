@@ -591,8 +591,8 @@ fn set_shows_and_changes_options() {
     assert_eq!(
         message(&r),
         Some(
-            "escape=board  jumplabels=asdfghjklqwertyuiopzxcvbnm  leader=<Bslash>  size=1  \
-             timeoutlen=1000"
+            "escape=board  exportbg=paper  jumplabels=asdfghjklqwertyuiopzxcvbnm  \
+             leader=<Bslash>  pngscale=2  size=1  timeoutlen=1000"
         )
     );
     r.feed(":se tm=300 leader=<lt>Space> escape=block<CR>:set tm leader? escape<CR>");

@@ -9,7 +9,7 @@ use lawh_core::engine::{
     MAX_SYM_QUERY_CHARS, MAX_TIMEOUTLEN, MapKey, MapMode, OptionName, OptionValue, Segment, SetArg,
     SizeChange, parse_command,
 };
-use lawh_core::{Key, parse_keys};
+use lawh_core::{ExportBackground, ExportFormat, Key, parse_keys};
 
 fn parsed(line: &str) -> Command {
     parse_command(line).unwrap_or_else(|e| panic!("{line:?}: {e}"))
@@ -33,6 +33,7 @@ fn every_short_form_names_its_command() {
         ("arrow", 2, "ar 1 2"),
         ("circle", 2, "ci 1"),
         ("ellipse", 2, "el 1 2"),
+        ("export", 3, "exp a.png"),
         ("line", 2, "li 1 2"),
         ("math", 2, "ma x"),
         ("quit", 1, "q"),
@@ -383,6 +384,94 @@ fn write_and_quit_forms() {
 }
 
 #[test]
+fn export_takes_a_file_whose_extension_is_its_format() {
+    let export = |file: &str, format| Command::Export {
+        file: file.to_owned(),
+        format,
+    };
+    assert_eq!(parsed("exp a.png"), export("a.png", ExportFormat::Png));
+    assert_eq!(parsed("export! a.svg"), export("a.svg", ExportFormat::Svg));
+    assert_eq!(
+        parsed("expo   my board.PDF  "),
+        export("my board.PDF", ExportFormat::Pdf)
+    );
+    assert_eq!(
+        parsed("exp C:\\out\\b.Png"),
+        export("C:\\out\\b.Png", ExportFormat::Png)
+    );
+    // `:ex` is not `:export`: it stays free for Vim's `:edit`.
+    assert_messages(&[
+        ("ex a.png", "unknown command `:ex`"),
+        ("exports a.png", "unknown command `:exports`"),
+        (
+            "exp",
+            "missing the file: `:exp[ort] <file>`, with .svg, .png or .pdf",
+        ),
+        (
+            "exp!",
+            "missing the file: `:exp[ort] <file>`, with .svg, .png or .pdf",
+        ),
+        ("exp a", "export needs .svg, .png or .pdf"),
+        ("exp a.jpeg", "export needs .svg, .png or .pdf"),
+        ("exp a.lawh", "export needs .svg, .png or .pdf"),
+        ("exp .svg", "export needs .svg, .png or .pdf"),
+        ("exp dir.png/", "export needs .svg, .png or .pdf"),
+        (
+            "exp !convert",
+            "writing to a command or appending to a file is not supported: `:exp !convert`",
+        ),
+        (
+            "export! >>a.png",
+            "writing to a command or appending to a file is not supported: `:export! >>a.png`",
+        ),
+    ]);
+}
+
+#[test]
+fn write_refuses_a_file_named_for_an_export() {
+    assert_messages(&[
+        (
+            "w out.png",
+            "`:w` writes lawh boards: use `:export out.png` for .png",
+        ),
+        (
+            "write a.SVG",
+            "`:write` writes lawh boards: use `:export a.SVG` for .svg",
+        ),
+        (
+            "w!  b c.pdf ",
+            "`:w!` writes lawh boards: use `:export b c.pdf` for .pdf",
+        ),
+        (
+            "wq x.png",
+            "`:wq` writes lawh boards: use `:export x.png` for .png",
+        ),
+        (
+            "wq! x.pdf",
+            "`:wq!` writes lawh boards: use `:export x.pdf` for .pdf",
+        ),
+        (
+            "x x.svg",
+            "`:x` writes lawh boards: use `:export x.svg` for .svg",
+        ),
+        (
+            "xit! ~/x.png",
+            "`:xit!` writes lawh boards: use `:export ~/x.png` for .png",
+        ),
+    ]);
+    // Other names are files to write, the format's name in a directory too.
+    for file in ["a.lawh", "a", "a.png.lawh", "png", ".png", "dir.pdf/a"] {
+        assert_eq!(
+            parsed(&format!("w {file}")),
+            Command::Write {
+                file: Some(file.to_owned())
+            },
+            "{file}"
+        );
+    }
+}
+
+#[test]
 fn errors_say_what_is_wrong() {
     let cases = [
         ("", "type a command after `:`"),
@@ -622,7 +711,9 @@ fn keys_alone_show_mappings_and_unmap_takes_keys() {
 
 #[test]
 fn set_takes_options() {
-    use OptionName::{Escape as EscapeOption, JumpLabels, Leader, Size, TimeoutLen};
+    use OptionName::{
+        Escape as EscapeOption, ExportBg, JumpLabels, Leader, PngScale, Size, TimeoutLen,
+    };
     let set = |line: &str| match parsed(line) {
         Command::Set(args) => args,
         other => panic!("{other:?}"),
@@ -670,6 +761,24 @@ fn set_takes_options() {
             SetArg::Assign(OptionValue::Size(200)),
             SetArg::Show(Size),
             SetArg::Reset(Size),
+        ]
+    );
+    // The export's options: a scale in hundredths from 0.25 to 8, the background by name.
+    assert_eq!(
+        set(
+            "set pngscale=.25 pngscale:8 pngscale=1.5 pngscale? pngscale& exportbg=none \
+             exportbg:paper exportbg exportbg&"
+        ),
+        vec![
+            SetArg::Assign(OptionValue::PngScale(25)),
+            SetArg::Assign(OptionValue::PngScale(800)),
+            SetArg::Assign(OptionValue::PngScale(150)),
+            SetArg::Show(PngScale),
+            SetArg::Reset(PngScale),
+            SetArg::Assign(OptionValue::ExportBg(ExportBackground::None)),
+            SetArg::Assign(OptionValue::ExportBg(ExportBackground::Paper)),
+            SetArg::Show(ExportBg),
+            SetArg::Reset(ExportBg),
         ]
     );
     // Jump labels: the characters as typed, `=` and `"` inside a word too.
@@ -845,6 +954,44 @@ fn set_errors_say_what_is_wrong() {
             format!(
                 "bad value `{value}` for `size`: it takes a size from 0.25 to 16, with at most two \
                  decimals"
+            ),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn export_option_errors_say_what_is_wrong() {
+    let cases = [
+        (
+            "set exportbg=transparent",
+            "bad value `transparent` for `exportbg`: it takes `paper` or `none`",
+        ),
+        (
+            "set exportbg=NONE",
+            "bad value `NONE` for `exportbg`: it takes `paper` or `none`",
+        ),
+        ("set pngscalex=2", "unknown option `pngscalex`"),
+        ("set png=2", "unknown option `png`"),
+    ];
+    assert_messages(&cases);
+    // PNG scales out of range, with more than two decimals, or not numbers.
+    for value in [
+        "0.24",
+        "8.01",
+        "0",
+        "-1",
+        "1.005",
+        "2e0",
+        "x2",
+        "",
+        "99999999999",
+    ] {
+        assert_eq!(
+            error(&format!("set pngscale={value}")),
+            format!(
+                "bad value `{value}` for `pngscale`: it takes a scale from 0.25 to 8, with at \
+                 most two decimals"
             ),
             "{value}"
         );

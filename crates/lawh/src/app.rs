@@ -755,6 +755,10 @@ fn do_writes(
                         .is_some_and(|name| same_file(&written, &target(name)));
                 queue.extend(engine.write_done(&path, result, own));
             }
+            Effect::Export { path, .. } => {
+                // Lane L6 runs exports; until then each one is reported as failed.
+                engine.export_done(&path, Err("export is not wired up yet".to_owned()));
+            }
             Effect::Quit => {
                 after.quit = true;
                 break;

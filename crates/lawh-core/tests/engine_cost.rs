@@ -91,6 +91,17 @@ fn texts() -> Board {
     board(&objects)
 }
 
+/// `n` texts of 80 characters, one a unit below the other: [`texts`] is 500 of them.
+fn texts_n(n: usize) -> Board {
+    let mut objects = String::new();
+    let line = "lorem ipsum ".repeat(7);
+    let line = &line[..80];
+    for i in 0..n {
+        writeln!(objects, "text id=t{i} x=0 y={i} \"{line}\"").unwrap();
+    }
+    board(&objects)
+}
+
 /// 499 circles, `c1` to `c499`: the next circle's id is the 500th tried.
 fn circles() -> Board {
     let mut objects = String::new();
@@ -302,6 +313,14 @@ fn cases() -> Vec<Case> {
             }),
         ),
         (
+            ":exp then itself, 500 texts",
+            Box::new(|| timed(&rc_repeating(":exp a.png<CR>", 1), texts(), "ggQ")),
+        ),
+        (
+            ":te x below the cursor's text then itself, 250 texts",
+            Box::new(|| timed(&rc_repeating(":te x<CR>", 1), texts_n(250), "ggQ")),
+        ),
+        (
             "lawhrc of 1 MiB, map and unmap at the front of 999 mappings",
             Box::new(|| {
                 let rc = crafted_rc();
@@ -370,6 +389,34 @@ fn a_mapping_that_undoes_and_redoes_a_deep_history_stops_within_the_work_budget(
         r.feed("10000u");
     }
     assert_eq!(r.engine.board(), &start);
+}
+
+#[test]
+fn a_mapping_of_text_blocks_below_an_object_stops_within_the_work_budget() {
+    // Each `:te` on an object measures the board for the place rule, and the board grows.
+    let (mut r, elapsed) = timed(&rc_repeating(":te x<CR>", 1), texts_n(250), "ggQ");
+    let added = r.engine.board().len() - 250;
+    // Each new block went below the one before, and the key stopped well before the board's
+    // cap on objects.
+    assert!((50..250).contains(&added), "{added}");
+    assert_stopped(&mut r, elapsed);
+}
+
+#[test]
+fn a_mapping_of_exports_stops_at_the_first_export() {
+    let (r, elapsed) = timed(&rc_repeating(":exp a.png<CR>", 1), texts(), "ggQ");
+    assert!(elapsed < bound(), "{elapsed:?}");
+    let exports = r
+        .effects
+        .iter()
+        .filter(|e| matches!(e, lawh_core::Effect::Export { .. }))
+        .count();
+    assert_eq!(exports, 1);
+    assert_eq!(
+        message(&r),
+        Some("that key asked for more than 1 export; the rest of it was dropped")
+    );
+    assert!(r.engine.key_work() < MAX_KEY_WORK / 100);
 }
 
 #[test]
@@ -770,7 +817,17 @@ fn the_work_a_measure_reports_counts_against_the_key() {
     assert_eq!(engine.key_work(), 0);
     // Every command that measures counts it: Visual mode, its motions, `d` and `y` in it,
     // jump labels, puts, and new blocks beside an object.
-    for script in ["v", "vj", "vjd", "vjy", "s", "xp", "o"] {
+    for script in [
+        "v",
+        "vj",
+        "vjd",
+        "vjy",
+        "s",
+        "xp",
+        "o",
+        ":te x<CR>",
+        ":ma x<CR>",
+    ] {
         let mut costly = Costly::new(MAX_KEY_WORK / 1000);
         let mut engine = run_measured(texts(), "gg", &mut costly);
         for key in parse_keys(script).unwrap() {
@@ -904,6 +961,26 @@ fn the_costliest_single_commands_fit_in_the_work_budget() {
     r.feed("<CR>");
     check(&r);
     assert_eq!(sizes(&r), vec![0.25; 500]);
+    // An export of the whole board selected in Visual mode.
+    let mut r = run(texts(), "ggvG:exp a.png");
+    r.feed("<CR>");
+    check(&r);
+    assert!(matches!(
+        r.effects.as_slice(),
+        [lawh_core::Effect::Export { selection: Some(ids), .. }] if ids.len() == 500
+    ));
+    // A text below the top of a column of 499: the place rule tries past every one of them.
+    let mut r = run(texts_n(499), "gg:te x");
+    r.feed("<CR>");
+    check(&r);
+    assert_eq!(r.engine.board().len(), 500);
+    assert_eq!(
+        r.engine
+            .board()
+            .get(&id("t499"))
+            .map(|o| lawh_core::engine::anchor(&o.shape)),
+        Some(lawh_core::Point::new(0.0, 499.1))
+    );
 }
 
 #[test]
@@ -1197,6 +1274,30 @@ fn work_unit_costs() {
             column(),
             "ggs".into(),
             "Z",
+        ),
+        (
+            "<CR> on :exp over 500 texts",
+            texts(),
+            "gg:exp out.png".into(),
+            "<CR>",
+        ),
+        (
+            "<CR> on :exp of nothing selected, 500 texts",
+            texts(),
+            "gg700jv:exp out.png".into(),
+            "<CR>",
+        ),
+        (
+            "<CR> on :exp from Visual over 500 texts",
+            texts(),
+            "ggvG:exp out.png".into(),
+            "<CR>",
+        ),
+        (
+            "<CR> on :te below the top of 499 texts",
+            texts_n(499),
+            "gg:te x".into(),
+            "<CR>",
         ),
     ];
     let ls = rc_repeating("l", 255);

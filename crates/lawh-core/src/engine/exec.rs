@@ -1,23 +1,27 @@
-//! Running `:` commands: the command line's keys, shapes, text and math at the cursor, writing
-//! and quitting. Mapping commands and `:set` run in `keymap.rs` and `settings.rs`, `:si` in
-//! `size.rs`, `:sym` and its completions in `sym.rs`.
+//! Running `:` commands: the command line's keys, shapes at the cursor, text and math at the
+//! cursor or below the current object, writing, exporting and quitting. Mapping commands and
+//! `:set` run in `keymap.rs` and `settings.rs`, `:si` in `size.rs`, `:sym` and its completions
+//! in `sym.rs`.
 
+use std::fmt::Write as _;
 use std::path::{Component, Path};
 
 use kurbo::Point;
 
 use super::cmdline::Outcome;
 use super::command::{Command, CommandError, Segment, parse_command};
+use super::place::{Side, place, translate};
 use super::register::id_prefix;
 use super::size;
 use super::sym::is_sym_command;
 use super::undo::Edit;
-use super::work::PARSE_WORK;
-use super::{Cursor, Effect, Engine, MAX_COMMAND_LINE_CHARS, Mode};
+use super::work::{EXPORT_OBJECT_WORK, EXPORT_WORK, MEASURE_WORK, PARSE_WORK, PLACE_WORK};
+use super::{Cursor, Effect, Engine, MAX_COMMAND_LINE_CHARS, Measure, Mode, bounds};
 use crate::board::{
     BoardError, MAX_BOARD_TEXT_CHARS, MAX_COORDINATE, MAX_OBJECTS, MAX_SIZE, MAX_TEXT_CHARS,
-    MAX_TEXT_LINES, Object, Shape,
+    MAX_TEXT_LINES, Object, ObjectId, Shape,
 };
+use crate::export::{ExportFormat, ExportReport};
 use crate::key::Key;
 
 /// Most writes one typed key (or a timeout) may ask for: 4.
@@ -53,6 +57,33 @@ pub const MAX_WRITES_PER_KEY: usize = 4;
 /// as a write the engine did not ask for, which neither names the board, nor marks it saved,
 /// nor quits, the safe side.
 pub const MAX_PENDING_WRITES: usize = MAX_WRITES_PER_KEY;
+
+/// Most exports one typed key (or a timeout) may ask for: 1. Each also counts as a write
+/// against [`MAX_WRITES_PER_KEY`], since the app writes its file the same way.
+///
+/// For each export the app draws the whole board (or the selection) into the file's bytes on
+/// the window's thread, then writes them: it waits for every formula to compile (up to 10 s
+/// for them all, `EXPORT_MATH_WAIT` in lawh-render) and may draw for up to 2 s of estimated
+/// work (`EXPORT_BUDGET_NS`). Measured in release: `examples/area.lawh` as a PNG at scale 2 in
+/// 11 to 42 ms, a PDF in about 1 ms; the limits board as a PNG shrunk to 64 million pixels in
+/// 0.46 to 0.5 s; 500 formulas of 22,500 glyphs as a PDF 1.1 s before it was refused for its
+/// size. So one export may hold the window for seconds, and a mapping that exports twice
+/// (`:exp a.png<CR>:exp b.pdf<CR>`) or runs itself would hold it for as many times that.
+///
+/// An export past the cap is refused, and the key stops as at [`MAX_WRITES_PER_KEY`]: nothing
+/// more runs for it, the typeahead is dropped and the message says so. The exports and writes
+/// asked for before it still go. The count starts again with the next typed key, timeout or
+/// click.
+pub const MAX_EXPORTS_PER_KEY: usize = 1;
+
+/// Why `:exp` asks for no export: the board, or the selection it was typed from, is empty.
+const NOTHING_TO_EXPORT: &str = "nothing to export";
+
+/// The smallest shrink factor [`Engine::export_done`] names: a factor below it shows as
+/// `shrunk to fit`, with no number. A board within its caps never gets there: the smallest
+/// factor is a PNG at scale 8 of a square board 4,000,000 units across, from `MAX_COORDINATE`
+/// to `-MAX_COORDINATE` and a size beyond, shrunk to 64 million pixels, about 0.000006.
+const MIN_SHOWN_SHRINK: f64 = 1e-6;
 
 /// A write the engine asked the app for, until the app reports back.
 #[derive(Debug, Clone)]
@@ -136,10 +167,50 @@ impl Engine {
         vec![Effect::Quit]
     }
 
+    /// The app exported the board to `path` (as an [`Effect::Export`] asked), or failed to with
+    /// `result`'s error. This only sets the message: an export never names the board nor marks
+    /// it saved, since the file it writes is a picture, not a board to open again.
+    ///
+    /// A good export says `"out.pdf" exported`, then `, 1 formula failed` or
+    /// `, 2 formulas failed` when formulas were drawn as their source, in the error colour (as on
+    /// screen), and `, shrunk to 0.5x to fit` when the renderer made it smaller than asked to fit
+    /// a size cap. The factor has two significant digits, rounded down, so it never reads as 1:
+    /// 0.995 is `0.99x`, 0.000164 is `0.00016x`. A failure is the error
+    /// `cannot export "out.pdf": {error}`.
+    ///
+    /// The report becomes the message as [`Engine::write_done`]'s does (see [`Message`]): a
+    /// failure is an error and replaces any message, while a good export does not replace an
+    /// error the key left, such as a key refused for asking a second export.
+    ///
+    /// [`Message`]: super::Message
+    pub fn export_done(&mut self, path: &str, result: Result<ExportReport, String>) {
+        let report = match result {
+            Ok(report) => report,
+            Err(error) => return self.error(format!("cannot export \"{path}\": {error}")),
+        };
+        let mut text = format!("\"{path}\" exported");
+        match report.failed_formulas {
+            0 => {}
+            1 => text.push_str(", 1 formula failed"),
+            n => {
+                let _ = write!(text, ", {n} formulas failed");
+            }
+        }
+        if let Some(factor) = report.shrunk {
+            match shown_factor(factor) {
+                Some(factor) => {
+                    let _ = write!(text, ", shrunk to {factor}x to fit");
+                }
+                None => text.push_str(", shrunk to fit"),
+            }
+        }
+        self.info(text);
+    }
+
     /// A key on the command line: the completion keys of a `:sym` line, else editing, `<Esc>`
     /// and `<CR>`. A line opened by `<C-k>` from Insert mode runs only `:sym`, and goes back to
     /// Insert mode (see `sym.rs`).
-    pub(super) fn command_line_key(&mut self, key: Key) -> Vec<Effect> {
+    pub(super) fn command_line_key(&mut self, key: Key, measure: &mut dyn Measure) -> Vec<Effect> {
         if self.completion_key(key) {
             return Vec::new();
         }
@@ -160,7 +231,7 @@ impl Engine {
             }
             Outcome::Run(line) if self.session.is_some() => {
                 if is_sym_command(&line) {
-                    self.execute_line(&line);
+                    self.execute_line(&line, measure);
                 } else if parse_command(&line) != Err(CommandError::Empty) {
                     self.error("from Insert mode the command line runs only `:sym`");
                 }
@@ -169,7 +240,7 @@ impl Engine {
             }
             Outcome::Run(line) => {
                 self.mode = Mode::Normal;
-                let effects = self.execute_line(&line);
+                let effects = self.execute_line(&line, measure);
                 self.leave_command_line();
                 effects
             }
@@ -198,8 +269,9 @@ impl Engine {
 
     /// Reads and runs a `:` line, keeping it for `@:` (unless it is empty). Reading it counts as
     /// work (see [`MAX_KEY_WORK`](super::MAX_KEY_WORK)): `@:` runs a line of thousands of
-    /// characters for two keys. Once the key has run out, the line does not run.
-    pub(super) fn execute_line(&mut self, line: &str) -> Vec<Effect> {
+    /// characters for two keys. Once the key has run out, the line does not run. `measure` is
+    /// for `:te`, `:ma` and `:sym` on an object, which place their block below it.
+    pub(super) fn execute_line(&mut self, line: &str, measure: &mut dyn Measure) -> Vec<Effect> {
         if !self.charge(PARSE_WORK.saturating_mul(line.len())) {
             return Vec::new();
         }
@@ -208,7 +280,7 @@ impl Engine {
             self.last_command_line = Some(line.to_owned());
         }
         match command {
-            Ok(command) => self.run_command(&command),
+            Ok(command) => self.run_command(&command, measure),
             // `:` then `<CR>` does nothing, as in Vim.
             Err(CommandError::Empty) => Vec::new(),
             Err(error) => {
@@ -218,7 +290,7 @@ impl Engine {
         }
     }
 
-    fn run_command(&mut self, command: &Command) -> Vec<Effect> {
+    fn run_command(&mut self, command: &Command, measure: &mut dyn Measure) -> Vec<Effect> {
         let at = self.cursor_point();
         let new_size = self.settings.size();
         let or_at =
@@ -247,18 +319,24 @@ impl Engine {
                 let (a, b) = ends(segment, at);
                 self.add_shape(Shape::Arrow { a, b });
             }
-            Command::Text { text, size } => self.add_shape(Shape::Text {
-                at,
-                text: text.clone(),
-                size: size.unwrap_or(new_size),
-            }),
-            Command::Math { src, size } => self.add_shape(Shape::Math {
-                at,
-                src: src.clone(),
-                size: size.unwrap_or(new_size),
-            }),
+            Command::Text { text, size } => {
+                let shape = Shape::Text {
+                    at,
+                    text: text.clone(),
+                    size: size.unwrap_or(new_size),
+                };
+                self.add_block(shape, measure);
+            }
+            Command::Math { src, size } => {
+                let shape = Shape::Math {
+                    at,
+                    src: src.clone(),
+                    size: size.unwrap_or(new_size),
+                };
+                self.add_block(shape, measure);
+            }
             Command::Size(change) => self.size_command(*change),
-            Command::Sym { query } => self.pick_symbol(query),
+            Command::Sym { query } => self.pick_symbol(query, measure),
             Command::Write { file } => return self.write(file.as_deref(), None),
             Command::WriteQuit { file, force } => return self.write(file.as_deref(), Some(*force)),
             Command::Exit { file, force } => {
@@ -268,6 +346,7 @@ impl Engine {
                     vec![Effect::Quit]
                 };
             }
+            Command::Export { file, format } => return self.export(file, *format),
             Command::Quit { force } => {
                 if *force || !self.is_modified() {
                     return vec![Effect::Quit];
@@ -317,6 +396,46 @@ impl Engine {
         vec![Effect::Write { path, quit_after }]
     }
 
+    /// `:exp[ort]`: asks the app to export the board to `path` in `format`, with the `exportbg`
+    /// and `pngscale` options, or only the objects selected when the command line was opened
+    /// from Visual mode (as `:si` takes them). An empty board, or an empty selection, has
+    /// nothing to export: the message says so and no export is asked for.
+    ///
+    /// The key's exports are counted, each as a write too: past [`MAX_EXPORTS_PER_KEY`] (or
+    /// [`MAX_WRITES_PER_KEY`]) the export is refused and the key stops. The work counted is
+    /// `EXPORT_WORK`, and `EXPORT_OBJECT_WORK` for each object selected.
+    fn export(&mut self, path: &str, format: ExportFormat) -> Vec<Effect> {
+        let selection = if self.visual_command {
+            if !self.charge(EXPORT_OBJECT_WORK.saturating_mul(self.selection.len())) {
+                return Vec::new();
+            }
+            let ids: Vec<ObjectId> = self
+                .selection
+                .iter()
+                .filter(|id| self.board.contains(id))
+                .cloned()
+                .collect();
+            Some(ids)
+        } else {
+            None
+        };
+        if selection
+            .as_ref()
+            .map_or(self.board.is_empty(), Vec::is_empty)
+        {
+            self.error(NOTHING_TO_EXPORT);
+            return Vec::new();
+        }
+        if !self.charge(EXPORT_WORK) || !self.charge_export() {
+            return Vec::new();
+        }
+        vec![Effect::Export {
+            path: path.to_owned(),
+            options: self.settings.export_options(format),
+            selection,
+        }]
+    }
+
     /// The file `:w` with no name writes: the board's own. An unnamed board has none, unless
     /// writes that would name it wait for their reports: then the oldest one's file, so that a
     /// mapping such as `:w a.lawh<CR>:wq<CR>` writes `a.lawh` and quits, as if the first write
@@ -339,9 +458,75 @@ impl Engine {
             return;
         }
         let id = self.board.fresh_id(id_prefix(&shape));
+        self.insert_object(Object::new(id, shape));
+    }
+
+    /// `:te`, `:ma` and `:sym` on the board: a new text or math block, `shape`, made as
+    /// [`Engine::add_shape`] makes one. On a grid point it goes there (`shape` is at the cursor
+    /// point already). On an object it goes below it by the place rule, as `o` opens a block:
+    /// half a unit under the object, left edges lined up, past any object in the way (see
+    /// `place.rs`), so it never lands on the object as it did at the object's anchor. The
+    /// block's own bounds, as measured with its text, are the box placed.
+    ///
+    /// Measuring the board and the block, finding the id and the place rule's looks count as
+    /// work: when the key runs out, no block is made. With no room below within
+    /// [`MAX_COORDINATE`], the message says so.
+    pub(super) fn add_block(&mut self, shape: Shape, measure: &mut dyn Measure) {
+        let Cursor::Object(current) = &self.cursor else {
+            return self.add_shape(shape);
+        };
+        let current = current.clone();
+        let own_work = MEASURE_WORK.saturating_mul(shape.content_chars().saturating_add(1));
+        let work = self
+            .layout_work()
+            .saturating_add(own_work)
+            .saturating_add(self.id_work());
+        if !self.charge(work) {
+            return;
+        }
+        let obstacles = self.layout(measure);
+        if self.out_of_work() {
+            return;
+        }
+        let Some(reference) = self
+            .index_of(&current)
+            .and_then(|i| obstacles.get(i).copied())
+        else {
+            // The engine keeps an object cursor on an object; at its point, as a fallback.
+            return self.add_shape(shape);
+        };
+        let object = Object::new(self.board.fresh_id(id_prefix(&shape)), shape);
+        let own = bounds(&object, measure);
+        if !self.charge_measured(measure) {
+            return;
+        }
+        let mut looked = 0;
+        let at = place(reference, own.size(), &obstacles, Side::Below, &mut looked);
+        if !self.charge(PLACE_WORK.saturating_mul(looked)) {
+            return;
+        }
+        let placed = at
+            .map(|at| {
+                let by = at - own.origin();
+                translate(&object.shape, by.x, by.y)
+            })
+            .filter(Shape::coordinates_in_range);
+        match placed {
+            Some(shape) => self.insert_object(Object::new(object.id, shape)),
+            None => self.error(match object.shape {
+                Shape::Math { .. } => "no room for a new math block",
+                _ => "no room for a new text block",
+            }),
+        }
+    }
+
+    /// Puts `object` on top of the board as one undo step and makes it the current object. A
+    /// refusal becomes the message.
+    fn insert_object(&mut self, object: Object) {
+        let id = object.id.clone();
         let edit = Edit::Insert {
             index: self.board.len(),
-            object: Object::new(id.clone(), shape),
+            object,
         };
         if let Err(error) = edit.apply(&mut self.board) {
             return self.error(refusal(&error));
@@ -349,6 +534,29 @@ impl Engine {
         let before = std::mem::replace(&mut self.cursor, Cursor::Object(id));
         self.commit(vec![edit], before);
     }
+}
+
+/// A shrink factor as [`Engine::export_done`] shows it: two significant digits, rounded down so
+/// that it never reads as 1 (0.995 is `0.99`), with no exponent (`0.00016`) and no trailing
+/// zeros (`0.5`). `None` outside [`MIN_SHOWN_SHRINK`] to 1, 1 left out, and for a factor that
+/// is not finite.
+fn shown_factor(factor: f64) -> Option<String> {
+    if !(MIN_SHOWN_SHRINK..1.0).contains(&factor) {
+        return None;
+    }
+    // Twelve decimals are six significant digits or more down to `MIN_SHOWN_SHRINK`, and round
+    // away binary noise (0.29 is 0.28999999999999998 in binary). A factor within that rounding
+    // of 1 is still at least 0.99.
+    let decimals = format!("{factor:.12}");
+    let Some(digits) = decimals.strip_prefix("0.") else {
+        return Some("0.99".to_owned());
+    };
+    let zeros = digits.len() - digits.trim_start_matches('0').len();
+    let kept = digits
+        .get(..zeros + 2)
+        .unwrap_or(digits)
+        .trim_end_matches('0');
+    Some(format!("0.{kept}"))
 }
 
 /// `a` and `b` name the same file as far as their text tells: the same parts once `.` parts
@@ -420,6 +628,38 @@ pub(super) fn refusal(error: &BoardError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shrink_factors_show_two_digits_rounded_down() {
+        for (factor, shown) in [
+            (0.5, "0.5"),
+            (0.25, "0.25"),
+            (0.29, "0.29"),
+            (0.1, "0.1"),
+            (0.96, "0.96"),
+            (0.995, "0.99"),
+            (0.999_999_999_999_9, "0.99"),
+            (0.333_333, "0.33"),
+            (0.000_164, "0.00016"),
+            (0.000_16, "0.00016"),
+            (0.000_006_25, "0.0000062"),
+            (MIN_SHOWN_SHRINK, "0.000001"),
+            (0.01, "0.01"),
+        ] {
+            assert_eq!(shown_factor(factor).as_deref(), Some(shown), "{factor}");
+        }
+        for factor in [
+            1.0,
+            1.5,
+            0.0,
+            -0.5,
+            MIN_SHOWN_SHRINK / 2.0,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            assert_eq!(shown_factor(factor), None, "{factor}");
+        }
+    }
 
     #[test]
     fn same_file_works_out_dots_without_the_file_system() {

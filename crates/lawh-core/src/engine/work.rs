@@ -8,9 +8,10 @@
 //! (the `*_WORK` weights below): objects measured, put in reading order, looked at by
 //! `H J K L` and the place rule, taken, put, resized, labelled for a jump, and edited by undo
 //! and redo, jump labels looked through, symbol names matched for `:sym`, fresh ids looked for,
-//! the bytes of `:` lines run, and the bytes of a text block that a key copies, scans, splits
-//! into graphemes or walks. The measure adds what it costs to lay out text it has not laid out
-//! before ([`Measure::take_work`]): the app's renderer reports it.
+//! the bytes of `:` lines run, exports asked for and the objects they take, and the bytes of a
+//! text block that a key copies, scans, splits into graphemes or walks. The measure adds what it
+//! costs to lay out text it has not laid out before ([`Measure::take_work`]): the app's renderer
+//! reports it.
 //!
 //! Counts never multiply a command that makes no progress: motions stop where they cannot go
 //! on, undo and redo at the ends of the history, a put that does not fit is refused whole (before
@@ -27,11 +28,12 @@
 //! caps on text). Nothing more runs for that key: the typeahead is dropped and the message says
 //! so. The budget starts again with the next typed key, timeout or click.
 //!
-//! Writes are counted apart, since the app does them and they cost it far more than they cost
-//! the engine: a key may ask for at most [`MAX_WRITES_PER_KEY`], and one past it stops the key
+//! Writes and exports are counted apart, since the app does them and they cost it far more than
+//! they cost the engine: a key may ask for at most [`MAX_WRITES_PER_KEY`] writes, every export
+//! counting as one, and at most [`MAX_EXPORTS_PER_KEY`] exports; one past either stops the key
 //! the same way.
 
-use super::exec::MAX_WRITES_PER_KEY;
+use super::exec::{MAX_EXPORTS_PER_KEY, MAX_WRITES_PER_KEY};
 use super::text_motion::{Line, indicators_before, line_at};
 use super::{Engine, Measure};
 
@@ -134,6 +136,18 @@ pub(super) const SYM_CHAR_WORK: usize = 11;
 /// against a name it fits in (`n` rows of `m - n + 1` for a word of `n` characters and a name of
 /// `m`): 32 `a`s over 4,096 names of 64 characters took 23.8 ms, two words of 31 `a`s 47 ms.
 pub(super) const SYM_CELL_WORK: usize = 5;
+/// Asking for an export (`:exp`) once its line is read: the options, the path and the effect.
+/// `<CR>` on `:exp out.png` over 500 texts took 4.2 to 4.6 us a key averaged over 2,000 keys,
+/// the line's reading included (0.36 us in release), and 15 to 18 us once alone in
+/// `work_unit_costs`; refused with `nothing to export`, the same key took 4.1 to 4.4 us, so most
+/// of it is any key's own.
+pub(super) const EXPORT_WORK: usize = 5_000;
+/// Taking one selected object into an export from Visual mode (`:` in Visual mode, then
+/// `:exp`): looking it up on the board and copying its id. `<CR>` on `:exp out.png` with 500
+/// texts selected took 190 us a key averaged over 2,000 keys, 169 us more than a `:set` line
+/// from the same selection (closing the line drops the selection either way): 338 ns an object,
+/// 50 ns in release.
+pub(super) const EXPORT_OBJECT_WORK: usize = 350;
 
 /// The message when a key runs out of work.
 const TOO_MUCH_WORK: &str = "that key did too much work; the rest of it was dropped";
@@ -143,13 +157,28 @@ fn too_many_writes() -> String {
     format!("that key asked for more than {MAX_WRITES_PER_KEY} writes; the rest of it was dropped")
 }
 
+/// The message when a key asks for one export too many.
+fn too_many_exports() -> String {
+    let exports = if MAX_EXPORTS_PER_KEY == 1 {
+        "export"
+    } else {
+        "exports"
+    };
+    format!(
+        "that key asked for more than {MAX_EXPORTS_PER_KEY} {exports}; the rest of it was dropped"
+    )
+}
+
 /// The work done for the key being run.
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct Work {
     spent: usize,
-    /// Writes asked for (see [`MAX_WRITES_PER_KEY`]).
+    /// Writes asked for, exports included (see [`MAX_WRITES_PER_KEY`]).
     writes: usize,
-    /// The key ran out of work, or asked for too many writes: nothing more runs for it.
+    /// Exports asked for (see [`MAX_EXPORTS_PER_KEY`]).
+    exports: usize,
+    /// The key ran out of work, or asked for too many writes or exports: nothing more runs for
+    /// it.
     over: bool,
 }
 
@@ -213,6 +242,27 @@ impl Engine {
             return false;
         }
         self.work.writes += 1;
+        true
+    }
+
+    /// Counts an export for the key being run, as one of its exports and one of its writes.
+    /// False when the key has asked for [`MAX_EXPORTS_PER_KEY`] exports already, or
+    /// [`MAX_WRITES_PER_KEY`] writes, or has run out of work: then nothing is counted and the
+    /// key stops as [`Engine::charge_write`] stops it, with the message of the cap it passed.
+    pub(super) fn charge_export(&mut self) -> bool {
+        if self.work.over {
+            return false;
+        }
+        if self.work.exports >= MAX_EXPORTS_PER_KEY {
+            self.work.over = true;
+            self.keymap.flush();
+            self.error(too_many_exports());
+            return false;
+        }
+        if !self.charge_write() {
+            return false;
+        }
+        self.work.exports += 1;
         true
     }
 

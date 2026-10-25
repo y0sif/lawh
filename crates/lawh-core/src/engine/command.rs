@@ -19,6 +19,10 @@
 //! `:sy[m]` takes a query: everything after the first space, without spaces at its ends, at most
 //! [`MAX_SYM_QUERY_CHARS`] characters (see `sym.rs`).
 //!
+//! `:w[rite]`, `:wq` and `:x[it]` take a file name, the rest of the line without spaces at its
+//! ends; one ending in `.svg`, `.png` or `.pdf` is refused, naming `:export`. `:exp[ort]` takes
+//! a file name the same way, which must end in one of them (any case): its format.
+//!
 //! The mapping commands take Vim's: `:map`, `:noremap`, `:unmap` and `:mapclear` with a mode
 //! letter in front (`:nnoremap`, `:iunmap`) or `!` after (`:map!` for Insert and command-line
 //! mode). The map arguments `<silent>` (no effect) and `<nowait>` may come first; then the keys
@@ -31,6 +35,7 @@ use super::keymap::{IC, MAX_MAP_KEYS, MapKey, MapMode, NVO};
 use super::settings::{SetArg, parse_set_arg};
 use super::sym::MAX_SYM_QUERY_CHARS;
 use crate::board::{MAX_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE, is_valid_text_size};
+use crate::export::ExportFormat;
 use crate::key::{KeyParseError, parse_keys};
 
 /// A parsed `:` command. Shape coordinates the user left out are `None`: the engine fills them
@@ -84,6 +89,9 @@ pub enum Command {
     /// `:x[it] [file]` and `:x! [file]`: write only when the board has changes, then quit, as
     /// [`Command::WriteQuit`].
     Exit { file: Option<String>, force: bool },
+    /// `:exp[ort] <file>` and `:exp! <file>` (the same): draw the board, or the selection when
+    /// `:` was typed in Visual mode, into `file`, in the `format` its extension names.
+    Export { file: String, format: ExportFormat },
     /// `:u[ndo]`.
     Undo,
     /// `:red[o]`.
@@ -205,6 +213,18 @@ pub enum CommandError {
     /// the command as typed, with its `!` (`w`, `x`, `wq!`).
     #[error("writing to a command or appending to a file is not supported: `:{command} {file}`")]
     UnsupportedFile { command: String, file: String },
+    /// `:w`, `:wq` or `:x` to a file that ends in `.svg`, `.png` or `.pdf` (`extension`, in
+    /// lowercase), which would hold the board's `.lawh` text under an image's name; `command`
+    /// is the command as typed, with its `!`.
+    #[error("`:{command}` writes lawh boards: use `:export {file}` for .{extension}")]
+    WriteToExport {
+        command: String,
+        file: String,
+        extension: &'static str,
+    },
+    /// `:export` to a file whose extension names no format it writes.
+    #[error("export needs .svg, .png or .pdf")]
+    ExportFormat,
     /// Keys of a mapping that are not Vim key notation.
     #[error("in `{keys}`: {error}")]
     BadKeys { keys: String, error: KeyParseError },
@@ -279,6 +299,12 @@ const COMMANDS: &[Row] = &[
         name: "ellipse",
         min: 2,
         parse: ellipse,
+    },
+    // Three letters: `:ex` is Vim's `:edit`, and `:exe`, `:exi` and `:exu` other commands.
+    Row {
+        name: "export",
+        min: 3,
+        parse: export,
     },
     Row {
         name: "imap",
@@ -708,21 +734,32 @@ fn sym(args: Args<'_>) -> Result<Command, CommandError> {
 }
 
 fn write(args: Args<'_>) -> Result<Command, CommandError> {
-    Ok(Command::Write { file: file(args)? })
+    Ok(Command::Write {
+        file: board_file(args)?,
+    })
 }
 
 fn write_quit(args: Args<'_>) -> Result<Command, CommandError> {
     Ok(Command::WriteQuit {
-        file: file(args)?,
+        file: board_file(args)?,
         force: args.bang,
     })
 }
 
 fn exit(args: Args<'_>) -> Result<Command, CommandError> {
     Ok(Command::Exit {
-        file: file(args)?,
+        file: board_file(args)?,
         force: args.bang,
     })
+}
+
+/// `:exp[ort] <file>`: a file name whose extension names its format. `!` changes nothing.
+fn export(args: Args<'_>) -> Result<Command, CommandError> {
+    let file = file(args)?.ok_or(CommandError::MissingBody(
+        "the file: `:exp[ort] <file>`, with .svg, .png or .pdf",
+    ))?;
+    let format = ExportFormat::from_path(&file).ok_or(CommandError::ExportFormat)?;
+    Ok(Command::Export { file, format })
 }
 
 fn quit(args: Args<'_>) -> Result<Command, CommandError> {
@@ -733,21 +770,41 @@ fn quit(args: Args<'_>) -> Result<Command, CommandError> {
     }
 }
 
-/// The file name after `:w`, `:wq` or `:x`: the rest of the line without spaces at its ends,
-/// or `None` when there is none.
+/// The file name after `:w`, `:wq`, `:x` or `:exp`: the rest of the line without spaces at its
+/// ends, or `None` when there is none.
 fn file(args: Args<'_>) -> Result<Option<String>, CommandError> {
     let name = args.rest.trim();
     if name.is_empty() {
         Ok(None)
     } else if name.starts_with('!') || name.starts_with(">>") {
-        let bang = if args.bang { "!" } else { "" };
         Err(CommandError::UnsupportedFile {
-            command: format!("{}{bang}", args.typed),
+            command: typed_command(args),
             file: name.to_owned(),
         })
     } else {
         Ok(Some(name.to_owned()))
     }
+}
+
+/// The file name after `:w`, `:wq` or `:x`, as [`file`] reads it, unless its extension is one
+/// `:export` writes: the board's text would go into a file named as an image or a PDF, which no
+/// viewer of those opens, and an unnamed board would take that name.
+fn board_file(args: Args<'_>) -> Result<Option<String>, CommandError> {
+    let file = file(args)?;
+    match file.as_deref().and_then(ExportFormat::from_path) {
+        Some(format) => Err(CommandError::WriteToExport {
+            command: typed_command(args),
+            file: file.unwrap_or_default(),
+            extension: format.extension(),
+        }),
+        None => Ok(file),
+    }
+}
+
+/// The command's name as typed, with its `!`: `w`, `wq!`.
+fn typed_command(args: Args<'_>) -> String {
+    let bang = if args.bang { "!" } else { "" };
+    format!("{}{bang}", args.typed)
 }
 
 fn undo(args: Args<'_>) -> Result<Command, CommandError> {

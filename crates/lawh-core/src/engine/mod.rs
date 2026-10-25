@@ -11,7 +11,7 @@
 //! `yy` and `x`, puts (`p`, `P`), Visual mode (`v`), `.` and `@:`, undo and redo (`u`,
 //! `<C-r>`), the size keys (`<C-a>`, `<C-x>`), all with counts, jump labels (`s`, see
 //! [`Engine::jump_labels`]) and `:` for the command line (shapes, text, math, sizes, symbols by
-//! name with completions, write and quit).
+//! name with completions, write, export and quit).
 //!
 //! Text and math objects are text blocks: `i a I A o O` type into one in Insert mode, `<CR>`
 //! enters one in block-Normal mode, Vim's Normal mode inside the text (see
@@ -24,9 +24,9 @@
 //! [`Engine::source`] reads both from a lawhrc.
 //!
 //! One typed key may set off many commands, through mappings, `.` and counts. It does at most
-//! [`MAX_KEY_WORK`] work (see `work.rs`) and asks for at most [`MAX_WRITES_PER_KEY`] writes:
-//! past either, the command under way stops where it is and the rest of the key's keys are
-//! dropped, with a message.
+//! [`MAX_KEY_WORK`] work (see `work.rs`), asks for at most [`MAX_WRITES_PER_KEY`] writes and
+//! at most [`MAX_EXPORTS_PER_KEY`] export: past any of them, the command under way stops where
+//! it is and the rest of the key's keys are dropped, with a message.
 
 mod block;
 mod cmdline;
@@ -61,7 +61,7 @@ use nucleo_matcher::Matcher;
 pub use cmdline::MAX_COMMAND_LINE_CHARS;
 pub use command::{Command, CommandError, End, Segment, SizeChange, parse_command};
 pub use cursor::{Cursor, anchor, round3};
-pub use exec::{MAX_PENDING_WRITES, MAX_WRITES_PER_KEY};
+pub use exec::{MAX_EXPORTS_PER_KEY, MAX_PENDING_WRITES, MAX_WRITES_PER_KEY};
 pub use jump::{
     DEFAULT_JUMP_LABELS, JumpLabel, LabelChars, MAX_LABEL_CHARS, MAX_LABEL_KEYS, MIN_LABEL_CHARS,
 };
@@ -73,7 +73,9 @@ pub use motion::ROW_TOLERANCE;
 pub use place::PLACE_GAP;
 pub use rc::{MAX_RC_BYTES, MAX_RC_WARNINGS, RcWarning};
 pub use repeat::MAX_REPEAT_KEYS;
-pub use settings::{Escape, MAX_TIMEOUTLEN, OptionName, OptionValue, SetArg, Settings};
+pub use settings::{
+    Escape, MAX_TIMEOUTLEN, OptionName, OptionValue, SetArg, Settings, parse_png_scale,
+};
 pub use size::SIZE_STEPS;
 pub use sym::{MAX_SYM_QUERY_CHARS, MAX_SYMBOLS, SYM_ROWS, Symbol};
 pub use text::TextCursor;
@@ -92,6 +94,7 @@ use self::text::{Block, Session};
 use self::undo::{Edit, History, Step};
 use self::work::{EDIT_WORK, Work};
 use crate::board::{Board, Object, ObjectId};
+use crate::export::ExportOptions;
 use crate::key::{Key, KeyCode};
 
 /// Largest count before a command; typing more digits keeps it here. Both counts of `2d3w`
@@ -129,6 +132,20 @@ pub enum Effect {
     /// change while the app does them: the app may write each file once for them all, as long as
     /// it reports every write, in order.
     Write { path: String, quit_after: bool },
+    /// Export the board to `path` (`:exp`): draw it, or only the objects of `selection` when it
+    /// is `Some` (the Visual selection `:exp` was typed from, in z-order, never empty), into a
+    /// file of `options.format` with the rest of `options` (`:set exportbg`, `:set pngscale`),
+    /// write that atomically, then report back with [`Engine::export_done`]. The board itself
+    /// is not written, and the export neither names it nor marks it saved.
+    ///
+    /// One key or timeout asks for at most [`MAX_EXPORTS_PER_KEY`] exports, each counted as a
+    /// write against [`MAX_WRITES_PER_KEY`] too, and the board does not change while the app
+    /// does them.
+    Export {
+        path: String,
+        options: ExportOptions,
+        selection: Option<Vec<ObjectId>>,
+    },
     /// Quit the app. Only sent when quitting is allowed.
     Quit,
     /// Keys wait for a longer mapping: call [`Engine::timeout`] after `ms` milliseconds,
@@ -141,13 +158,14 @@ pub enum Effect {
 /// ([`Engine::timeout`]) runs keys typed before it and keeps the message they left.
 ///
 /// One key may leave several messages: each command it sets off may (through mappings, `.` and
-/// counts), and so may the reports of its writes ([`Engine::write_done`]), which come after all
-/// its commands. Information never replaces an error, so a mapping such as
-/// `:w copy.lawh<CR>:w<CR>` whose copy fails ends on the failure, not on `"a.lawh" written`, and
-/// one refused for asking too many writes ends on the refusal, not on its writes' reports. An
-/// error replaces any message, an earlier error too: the last error is the one that stopped the
-/// key (a recursive mapping, too much work, a refused write), or a write that failed after the
-/// key's commands, the news the status line must not lose.
+/// counts), and so may the reports of its writes and exports ([`Engine::write_done`],
+/// [`Engine::export_done`]), which come after all its commands. Information never replaces an
+/// error, so a mapping such as `:w copy.lawh<CR>:w<CR>` whose copy fails ends on the failure,
+/// not on `"a.lawh" written`, and one refused for asking too many writes ends on the refusal,
+/// not on its writes' reports. An error replaces any message, an earlier error too: the last
+/// error is the one that stopped the key (a recursive mapping, too much work, a refused write or
+/// export), or a write or export that failed after the key's commands, the news the status line
+/// must not lose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub text: String,
@@ -290,7 +308,7 @@ impl Engine {
         match self.mode {
             Mode::Normal => self.normal_key(key, measure),
             Mode::Visual => self.visual_key(key, measure),
-            Mode::CommandLine => self.command_line_key(key),
+            Mode::CommandLine => self.command_line_key(key, measure),
             Mode::Insert => self.insert_key(key, measure),
             Mode::BlockNormal => self.block_key(key, measure),
         }

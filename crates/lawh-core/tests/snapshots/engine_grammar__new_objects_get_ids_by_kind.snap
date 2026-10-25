@@ -10,5 +10,5 @@ circle id=c2 x=0 y=0 r=2
 rect id=r1 x=0 y=0 w=1 h=1
 line id=l1 x1=0 y1=0 x2=1 y2=1
 arrow id=a1 x1=0 y1=0 x2=1 y2=1
-text id=t1 x=0 y=0 "a"
-math id=m1 x=0 y=0 "b"
+text id=t1 x=0 y=2.5 "a"
+math id=m1 x=0 y=3.6 "b"

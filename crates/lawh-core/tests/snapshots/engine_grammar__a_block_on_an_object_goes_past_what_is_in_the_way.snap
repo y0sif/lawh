@@ -1,0 +1,9 @@
+---
+source: crates/lawh-core/tests/engine_grammar.rs
+expression: "run(start, \"gg:te below<CR>\").snapshot()"
+---
+// mode=normal cursor=object(t2) keys=12
+lawh version=1
+text id=t1 x=0 y=0 "title"
+circle id=c1 x=1 y=2 r=1
+text id=t2 x=0 y=3.5 "below"

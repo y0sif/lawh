@@ -285,6 +285,38 @@ fn enter_on_the_board_makes_a_math_block_of_the_name_at_the_cursor() {
 }
 
 #[test]
+fn a_pick_on_an_object_goes_below_it_as_ma_does() {
+    // On `t1` (0.6 high): half a unit below it, left edges lined up, not on its anchor; then
+    // below the new block, as `:ma alpha` would put them.
+    let r = sym_run(text("hey there"), "gg:sym alpha<CR>:sym pi<CR>");
+    assert_snapshot!(snapshot(&r));
+    let ma = run(text("hey there"), "gg:ma alpha<CR>:ma pi<CR>");
+    assert_eq!(r.engine.board(), ma.engine.board());
+    // Undo takes the last one back, the cursor back on the block it went below.
+    let mut r = r;
+    r.feed("u");
+    assert_eq!(r.engine.cursor(), &Cursor::Object(id("m1")));
+    assert_eq!(r.engine.board().len(), 2);
+}
+
+#[test]
+fn ctrl_k_still_puts_the_pick_into_the_block_being_typed() {
+    // `<C-k>` from Insert mode on a block: into it, no new block, wherever the block is.
+    for (board, kind) in [(text("x"), "t1"), (math("x"), "m1")] {
+        let r = sym_run(board, "ggA<C-k>alpha<CR>");
+        assert_eq!(r.engine.mode(), Mode::Insert, "{kind}");
+        assert_eq!(r.engine.board().len(), 1, "{kind}");
+        let expected = if kind == "t1" { "xα" } else { "x alpha" };
+        assert_eq!(source(&r, kind), expected, "{kind}");
+        assert_eq!(r.engine.cursor(), &Cursor::Object(id(kind)), "{kind}");
+    }
+    // A new block typed on a grid point, far from anything: into it too.
+    let r = sym_run(text("hey"), "5ji<C-k>pi<CR>");
+    assert_eq!(r.engine.board().len(), 2);
+    assert_eq!(source(&r, "t2"), "π");
+}
+
+#[test]
 fn enter_takes_the_exact_name_else_the_row_selected_else_the_best_match() {
     let picked = |script: &str| {
         let r = sym_run(Board::new(), script);

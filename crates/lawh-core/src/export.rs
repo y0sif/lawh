@@ -47,6 +47,16 @@ pub enum ExportBackground {
     None,
 }
 
+impl ExportBackground {
+    /// The value as `:set exportbg` takes it: `paper` or `none`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Paper => "paper",
+            Self::None => "none",
+        }
+    }
+}
+
 /// How to export a board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExportOptions {
@@ -155,5 +165,11 @@ mod tests {
         );
         assert_eq!(ExportReport::default().failed_formulas, 0);
         assert_eq!(ExportReport::default().shrunk, None);
+    }
+
+    #[test]
+    fn backgrounds_have_the_names_set_takes() {
+        assert_eq!(ExportBackground::Paper.name(), "paper");
+        assert_eq!(ExportBackground::None.name(), "none");
     }
 }

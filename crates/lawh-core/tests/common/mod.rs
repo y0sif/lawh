@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use lawh_core::engine::{Cursor, Effect, Engine, FixedMeasure, Mode, Symbol};
 use lawh_core::key::format_keys;
-use lawh_core::{Board, ObjectId, Point, from_lawh, parse_keys, to_lawh};
+use lawh_core::{Board, ExportReport, ObjectId, Point, from_lawh, parse_keys, to_lawh};
 
 /// An engine after a key script.
 pub struct Run {
@@ -206,6 +206,12 @@ impl Run {
             .engine
             .write_done(path, result.map_err(str::to_owned), true);
         self.effects.extend(effects);
+        self
+    }
+
+    /// Tells the engine the app exported to `path`, with its report, or failed to.
+    pub fn export_done(&mut self, path: &str, result: Result<ExportReport, &str>) -> &mut Self {
+        self.engine.export_done(path, result.map_err(str::to_owned));
         self
     }
 

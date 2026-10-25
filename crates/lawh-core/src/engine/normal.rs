@@ -389,7 +389,7 @@ impl Engine {
             }
             Normal::Visual => self.enter_visual(measure),
             Normal::Repeat => return self.repeat_change(count, measure),
-            Normal::RepeatCommandLine => return self.repeat_command_line(),
+            Normal::RepeatCommandLine => return self.repeat_command_line(measure),
             Normal::Undo => self.undo(n),
             Normal::Redo => self.redo(n),
             Normal::CommandLine => self.open_command_line(),
@@ -556,9 +556,9 @@ impl Engine {
     }
 
     /// `@:`: runs the last `:` line again. Counts are ignored.
-    fn repeat_command_line(&mut self) -> Vec<Effect> {
+    fn repeat_command_line(&mut self, measure: &mut dyn Measure) -> Vec<Effect> {
         if let Some(line) = self.last_command_line.clone() {
-            self.execute_line(&line)
+            self.execute_line(&line, measure)
         } else {
             self.error("no command line to repeat yet");
             Vec::new()

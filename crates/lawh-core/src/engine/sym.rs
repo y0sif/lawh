@@ -23,8 +23,8 @@
 //!   it where the text after starts with a letter or digit, so Typst reads it as a name of its
 //!   own (`xalpha`, `x2alpha` and `alpha2` are other names; `2alpha` is 2 times alpha).
 //! - In a text block: the value goes in at the cursor.
-//! - On the board: a new math block of the name at the cursor, at the `size` option's size, as
-//!   `:ma name` makes it.
+//! - On the board: a new math block of the name, at the `size` option's size, as `:ma name`
+//!   makes it: at the cursor's grid point, or below the current object by the place rule.
 //!
 //! In block-Normal mode the text goes in before the character under the cursor, as `i` would
 //! type it, and the cursor ends on its last character, as after `i...<Esc>`. That is one undo
@@ -62,7 +62,7 @@ use super::command::CommandError;
 use super::text_motion::{after_insert, content};
 use super::undo::Edit;
 use super::work::{COPY_WORK, SCAN_WORK, SYM_CELL_WORK, SYM_CHAR_WORK, SYM_WORK};
-use super::{Engine, Mode};
+use super::{Engine, Measure, Mode};
 use crate::board::Shape;
 use crate::key::{Key, KeyCode, Mods};
 
@@ -395,8 +395,9 @@ impl Engine {
     }
 
     /// `:sym` picks for `query` (see the module docs): the symbol named `query`, else the best
-    /// match, into the block being edited, or as a new math block on the board.
-    pub(super) fn pick_symbol(&mut self, query: &str) {
+    /// match, into the block being edited, or as a new math block on the board (placed as `:ma`
+    /// places one, which measures the board when the cursor is on an object).
+    pub(super) fn pick_symbol(&mut self, query: &str, measure: &mut dyn Measure) {
         let Some(symbol) = self.find_symbol(query) else {
             return;
         };
@@ -408,7 +409,7 @@ impl Engine {
             src: symbol.name,
             size: self.settings.size(),
         };
-        self.add_shape(shape);
+        self.add_block(shape, measure);
     }
 
     /// The symbol named `query`, else the best match for it: from the completions when they
