@@ -57,7 +57,7 @@ but no modal grammar, and its SDK needs a licence key for production
 ([README](https://github.com/tldraw/tldraw#license), checked 2026-10-25). lawh is a native,
 MIT-licensed, Vim-first app. Sources for each point: [comparison.md](comparison.md#lawh-vs-tldraw).
 
-### Why not build it as a plugin for Excalidraw or Obsidian?
+### Why not build on Excalidraw, tldraw, AFFiNE or Obsidian?
 
 We looked, on 2026-10-10, and checked again on 2026-10-25. tldraw needs a licence key in
 production ([LICENSE.md](https://github.com/tldraw/tldraw/blob/main/LICENSE.md)), which an
@@ -87,11 +87,11 @@ math   id=m1 x=5 y=0 "A = pi r^2"
 
 ### Is opening someone else's board safe?
 
-It is meant to be, and a way around it is a vulnerability ([SECURITY.md](../SECURITY.md) says how
-to report one). Files are read by a parser that checks every limit as it goes. Math is compiled
+It is meant to be. Files are read by a parser that checks every limit as it goes. Math is compiled
 with Typst in a separate process, with no file access, no network, no clock and only bundled
 fonts, and it is killed if a formula takes more than 2 seconds. On Linux that process also has a
-memory cap; on macOS and Windows it doesn't yet. The threat model is in
+memory cap; on macOS and Windows it doesn't yet. Anything that gets a board past these limits is
+a vulnerability ([SECURITY.md](../SECURITY.md) says how to report one). The threat model is in
 [architecture.md](architecture.md#threat-model).
 
 ### Can several people edit the same board?

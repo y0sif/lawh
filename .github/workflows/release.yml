@@ -21,8 +21,10 @@ jobs:
     name: Tag matches the version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master branch as of 2026-10-16
+        with:
+          toolchain: stable
       # v{version} or v{version}-{suffix}, the suffix made of what a SemVer pre-release may hold.
       - name: Compare the tag with lawh's version
         run: |
@@ -54,8 +56,10 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master branch as of 2026-10-16
+        with:
+          toolchain: stable
       - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-about@0.9.2
@@ -81,7 +85,7 @@ jobs:
             printf '\n\n' >> "$out"
             cat assets/licenses/EMBEDDED-NOTICES.txt >> "$out"
           done
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: third-party-licences
           path: licences/
@@ -108,11 +112,12 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master branch as of 2026-10-16
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
       # Windows: the C runtime is linked into lawh.exe (+crt-static), so it runs without the
@@ -184,7 +189,7 @@ jobs:
           floor="$(objdump -T "target/$TARGET/release/lawh" | awk '$2 != "w"' | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
           echo "lawh for $TARGET needs ${floor:?no GLIBC symbol versions found} or newer"
           echo "- \`$TARGET\`: needs glibc ${floor#GLIBC_} or newer" >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: third-party-licences
           path: licences
@@ -209,7 +214,7 @@ jobs:
             tar czf "$name.tar.gz" "$name"
           fi
           rm -r "$name"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: lawh-${{ matrix.target }}
           path: dist/*
@@ -222,7 +227,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: lawh-*
           path: dist

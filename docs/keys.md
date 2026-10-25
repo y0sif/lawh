@@ -75,9 +75,9 @@ cursor on an object; on a grid point the status line says "no object under the c
 
 A grid motion after `d` or `y` cancels it. After a delete the cursor is the grid point where the
 first deleted object was, so `dd` then `p` puts it back. After a put the cursor is on the first
-object put. Moving an object is the same, as in Vim: take it with `x`, go to where it belongs,
-and put it with `p` (below the current object, or at the cursor on a grid point) or `P` (above). Text deleted inside a block with `x` puts as a new text block, at the `size` option's
-size.
+object put. To move an object, do as in Vim: take it with `x`, go where it belongs, and put it
+with `p` (below the current object, or at the cursor on a grid point) or `P` (above). Text
+deleted inside a block with `x` puts as a new text block, at the `size` option's size.
 
 **Where `p`, `P`, `o` and `O` put things** (the place rule): half a unit below (or above) the
 current object, left edges lined up, moved further down (or up) past any object in the way, with

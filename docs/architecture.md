@@ -121,11 +121,9 @@ arrow id=a1 x1=0 y1=0 x2=3 y2=0
 
 **Sizes.** `text` and `math` take an optional `size=` after `x y`: a number from 0.25 to 16, the
 multiplier on the text height. The writer gives it only when the size is not exactly 1, so a
-board without sizes writes the same bytes it did in milestone 2, and the header stays
-`lawh version=1`. A size out of range stops the read
-(``2:20: property `size` must be between 0.25 and 16``), as does a size on a shape or one given
-twice. A build from milestone 2 refuses a file that gives a size, since its reader rejects
-properties it doesn't know.
+board without sizes has no `size=` in it, and the header stays `lawh version=1`. A size out of
+range stops the read (``2:20: property `size` must be between 0.25 and 16``), as does a size on a
+shape or one given twice.
 
 ### Reader
 
@@ -617,8 +615,8 @@ directly. `tests/scene.rs` holds the two together: a window frame at zoom 1 agai
 at `pngscale` 1, which maps the board the same way, differs in 0 of 292,754 pixels compared (the
 pixels around grid dots left out, since only the window draws the grid); and the objects, item
 kinds and counts the window's sink is handed match the export's. Every golden of the window
-drawn before milestone 4 passes unchanged, and its benches take the same time (measured against
-the tree before milestone 4, [research/m4-measurements.md](research/m4-measurements.md)).
+drawn before export passes unchanged, and its benches take the same time (measured against the
+tree before export, [research/m4-measurements.md](research/m4-measurements.md)).
 
 ### The palette
 
@@ -1305,7 +1303,8 @@ window.
 - **Bounded reader:** lawh reads `.lawh` files with its own parser, in one pass and without
   recursion, so no nesting can overflow the stack. Every limit is checked while reading, so the
   time and memory a file costs follow what a board may hold, not the length of the file. The
-  worst hostile file found took 32 ms to read.
+  worst hostile file found took 32 ms to read (measured,
+  [research/m1-measurements.md](research/m1-measurements.md#hostile-1-mib-files-before-and-after-lawhs-own-parser)).
 - **Caps:** at most 500 objects, 6 entries per node, 64 KiB per string or number in the file,
   5,000 characters and 500 lines per text or formula, 40,000 characters of text on a board, ids of
   64 characters, coordinates and sizes within 1,000,000 grid units, text and math sizes from 0.25
@@ -1382,25 +1381,32 @@ as a vulnerability and report it.
   (`MAX_RC_BYTES`; a larger file is refused from its size, unread), 1,000 mappings a mode
   (`MAX_MAPS`), 256 keys on each side of a mapping (`MAX_MAP_KEYS`). The slowest lawhrc the caps
   allow, 1 MiB of mappings made and dropped at the front of 999 others, loads in 676 ms in release
-  and 1.7 s in debug (measured).
+  and 1.7 s in debug (measured, [research/m2-measurements.md](research/m2-measurements.md#lawhrc)).
 - **One key can't cause unbounded work.** Mappings, `.` and counts let one key run many commands,
   so each typed key, mapping timeout or click has a budget, reset at the next:
   - at most 1,000 mapping expansions (`MAX_MAP_DEPTH`) and 30,000 keys set off
     (`MAX_EXPANDED_KEYS`);
-  - at most 100 million units of work (`MAX_KEY_WORK`), each kind of work weighted by what it
-    costs: spending it all takes about 0.1 s in debug and 10 ms in release (derived from the
-    measured cost of a unit; 30 ms in release when it was matching `:sym` names, 66 ms over names
-    of 64 characters, measured). Text the renderer lays out to measure it for a key counts too
-    (`Measure::take_work`): before it did, a mapping that typed into a long text and then showed
-    jump labels (the short labels `s` puts on objects to jump to) or moved froze the window for
-    1.9 to 6.4 s in release; now it stops within 46 to 99 ms (measured);
-  - at most 4 writes (`MAX_WRITES_PER_KEY`): about 11 ms, derived from 2.76 ms a write
-    (measured, build not recorded).
+  - at most 100 million units of work (`MAX_KEY_WORK`), each kind of work weighted by what it costs:
+    spending it all takes about 0.1 s in debug and 10 ms in release (derived from the measured cost
+    of a unit, [research/m2-measurements.md](research/m2-measurements.md); 30 ms in release when it
+    was matching `:sym` names, 66 ms over names of 64 characters, measured,
+    [research/m3-measurements.md](research/m3-measurements.md#matching)). Text the renderer lays out
+    to measure it for a key counts too (`Measure::take_work`): before it did, a mapping that typed
+    into a text of 3,800 characters and then showed jump labels (the short labels `s` puts on
+    objects to jump to) or moved with `w` and `b` froze the window for 1.9 s (words) to 6.4 s (a
+    script changing at every character) in release; now it stops within 54 to 55 ms over words (46
+    to 47 ms moving) and 95 to 99 ms over the changing script (93 to 95 ms moving), in release
+    (measured,
+    [research/m3-measurements.md](research/m3-measurements.md#text-layout-charged-to-the-key));
+  - at most 4 writes (`MAX_WRITES_PER_KEY`): about 11 ms, derived from 2.76 ms a write (measured,
+    build not recorded, [research/m2-measurements.md](research/m2-measurements.md)).
 
   Past any of them the key stops with a message, its remaining keys are dropped, and the board is
   left consistent, as after any command. Before these caps, crafted mappings froze the window for
-  1.8 s to 858 s in release (measured). In a fuzz of 4,000 random key scripts during review, the
-  slowest key took 35 ms in release (measured).
+  1.8 s to 858 s in release (measured,
+  [research/m2-measurements.md](research/m2-measurements.md#what-one-key-may-cost)). In a fuzz of
+  4,000 random key scripts during review, the slowest key took 35 ms in release (measured,
+  [research/m2-measurements.md](research/m2-measurements.md#fuzzing)).
 
   Jump labels and `:sym` have caps of their own: jump labels of at most 2 characters
   (`MAX_LABEL_KEYS`) from an alphabet of 2 to 52 (`MIN_LABEL_CHARS`, `MAX_LABEL_CHARS`); at most
@@ -1437,7 +1443,8 @@ with caps of its own. The full table is in
   export takes about 10 s of waiting for math and 2 s of estimated work at most (derived; the
   calibrations hold real work to 1.2 times its estimate), plus writing the file. The slowest
   hostile boards measured took 10.04 s (stopped by the math wait) and 8.6 s (slow math, then
-  refused for its drawing), and the most memory 395 MB (an image at the pixel cap), in release.
+  refused for its drawing), and the most memory 395 MB (an image at the pixel cap), in release
+  ([research/m4-measurements.md](research/m4-measurements.md#hostile-boards)).
 - **One export per key** (`MAX_EXPORTS_PER_KEY`), which also counts as one of the key's 4
   writes, so a mapping can't run exports in a loop.
 - **Nothing partial:** past a cap that stops it, the export returns nothing and no file is

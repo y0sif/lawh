@@ -44,16 +44,17 @@ LAWH_PROPTEST_CASES=200000 nice -n 19 cargo test --release -p lawh-core --lib pa
 
 The known differences are written down in the test (`agree_with_kdl`) and in
 [architecture.md](architecture.md#reader): lawh rejects slashdash chains and keywords glued to the
-next token, and reads past a slashdashed raw string that reads as a lone `"`. Counts from M1 runs
-are in [research/m1-measurements.md](research/m1-measurements.md#differential-testing).
+next token, and reads past a slashdashed raw string that reads as a lone `"`. Case counts from past
+runs are in [research/m1-measurements.md](research/m1-measurements.md#differential-testing).
 
 ### Golden images
 
 The overlay goldens draw the area board with the cursor, a selection, a caret, jump labels,
-`:sym` rows or the status line over it, through `Renderer::render_with`. Milestone 3 added
-`sizes`, `text_symbols`, `overlay_labels`, `overlay_labels_typed` and `overlay_completions`, and
-regenerated `area`, `area_zoom3`, `overlay_normal`, `overlay_visual`, `overlay_command_line` and
-`overlay_error`, since math is now drawn 1.27 times larger and on the text baseline.
+`:sym` rows or the status line over it, through `Renderer::render_with`. Sizes, jump labels and
+`:sym` added `sizes`, `text_symbols`, `overlay_labels`, `overlay_labels_typed` and
+`overlay_completions`, and regenerated `area`, `area_zoom3`, `overlay_normal`, `overlay_visual`,
+`overlay_command_line` and `overlay_error`, since math is now drawn 1.27 times larger and on the
+text baseline.
 
 At most 0.01 % of pixels (100 in a million) may differ from the golden by more than 3 in any
 channel. The tolerance absorbs last-bit float differences between machines (x86 and ARM) along
@@ -66,8 +67,8 @@ LAWH_UPDATE_GOLDEN=1 cargo test -p lawh-render --test golden
 
 A failing comparison writes the actual image to Cargo's test temp directory and names it.
 
-The `export_*` goldens are whole PNG exports, compared the same way. Milestone 4 changed none of
-the window's goldens. To rewrite the export goldens, then look at each:
+The `export_*` goldens are whole PNG exports, compared the same way. Export changed none of the
+window's goldens. To rewrite the export goldens, then look at each:
 
 ```bash
 LAWH_UPDATE_GOLDEN=1 cargo test -p lawh-render --test export
@@ -199,7 +200,7 @@ Other measurements, also `#[ignore]`:
 | `measure_png_peak` | Peak memory of compressing noise at the pixel cap, stopped by the byte cap | `cargo test --release -p lawh-render --lib -- --ignored --nocapture --test-threads=1 measure_png_peak` |
 | `math_and_text_share_x_height_and_baseline` (not ignored) | How far math's baseline and x-height are from text's, at four sizes | `cargo test -p lawh-render --test render -- --nocapture math_and_text_share` |
 
-Put `nice -n 19` in front of each on the laptop.
+On a machine you are using at the same time, put `nice -n 19` in front of each.
 
 **Calibrations are sensitive to machine load.** They compare measured time with an estimate, so a
 busy machine makes them fail where a quiet one passes. Run them on a quiet machine, and read the
@@ -212,10 +213,11 @@ whether it was measured or derived ([research/m1-measurements.md](research/m1-me
 ### In CI
 
 `bench.yml` runs the calibrations and benches in release on GitHub's Linux runner. It runs only
-when triggered by hand (`gh workflow run bench.yml`, `workflow_dispatch`), since its numbers are
-there to be read. `calibrate_text_memory` has its own step, so it doesn't
-run after the other calibrations in one process. Every step runs even when an earlier one fails.
-The limits were measured on the maintainer's laptop, so a slower or noisier runner can fail them.
+when triggered by hand (`gh workflow run bench.yml`, `workflow_dispatch`), because its timings
+need a quiet machine and someone to read them. `calibrate_text_memory` has its own step, so it
+doesn't run after the other calibrations in one process. Every step runs even when an earlier one
+fails. The limits were measured on the maintainer's laptop, so a slower or noisier runner can fail
+them.
 
 Then it runs what one key may cost: `engine_cost` in release (`key_costs` and `work_unit_costs`),
 `work_unit_costs` again in debug (the weights are debug timings, so a unit should stay about a
@@ -361,7 +363,7 @@ the key count: 62 keys, counting each `<...>` as one, make `examples/area.lawh` 
 ## Later
 
 - **Fuzzing:** `cargo-fuzz` targets for the `.lawh` reader and the `:` command parser, since boards
-  come from other people (see the [threat model](architecture.md#threat-model)). Milestone 2's review ran a
+  come from other people (see the [threat model](architecture.md#threat-model)). A review ran a
   4,000-script random key fuzz by hand (no panic; numbers in
   [research/m2-measurements.md](research/m2-measurements.md)); it isn't in the repo.
 

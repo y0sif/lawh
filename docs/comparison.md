@@ -33,11 +33,11 @@ hand-drawn style and an established user base.
 
 ## lawh vs tldraw
 
-tldraw has the best keyboard navigation of the big canvases: Tab and Ctrl+Arrow move the selection
-between shapes
+tldraw moves the selection between shapes from the keyboard: Tab and Ctrl+Arrow
 ([`SelectTool/childStates/Idle.ts`](https://github.com/tldraw/tldraw/blob/main/packages/tldraw/src/lib/tools/SelectTool/childStates/Idle.ts)),
 and since March 2026 AI agents can draw on it through an
-[MCP app](https://tldraw.dev/blog/tldraw-mcp-app). Its keys pick tools, with no modal grammar
+[MCP app](https://tldraw.dev/blog/tldraw-mcp-app) (a tool they call through the Model Context
+Protocol). Its keys pick tools, with no modal grammar
 ([shortcut list](https://github.com/tldraw/tldraw/blob/main/packages/tldraw/src/lib/ui/components/KeyboardShortcutsDialog/DefaultKeyboardShortcutsDialogContent.tsx)).
 Math is an example in its SDK, not a feature
 ([`keyboard-math-input`](https://github.com/tldraw/tldraw/tree/main/apps/examples/src/examples/shapes/tools/keyboard-math-input)).

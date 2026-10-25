@@ -41,7 +41,7 @@ to SVG, PNG or PDF. The demo above builds the "area of a circle" board and expor
 - **Editing:** delete, yank and put, undo and redo, `.` to repeat, counts everywhere, Vim editing inside text and math blocks
 - **Moving:** take an object with `x` (or `dd`) and put it with `p` below another or `P` above it, as in Vim; on a grid point, `p` puts it at the cursor
 - **Sizes:** text and math from 0.25 to 16 times the default size, with `<C-a>` and `<C-x>`, `:size 2`, or `size=2` in the file; math is drawn to match the height of the text beside it
-- **Jump labels:** `s` puts a one- or two-character label on every other object in view; type one to jump there, or `ds` and a label to delete a far object without moving
+- **Jump labels:** `s` puts a one- or two-character label on every object in view except the current one; type one to jump there, or `ds` and a label to delete a far object without moving
 - **Symbol search:** `:sym integral` finds a math symbol by its Typst name, with the best matches shown as you type (fuzzy matching: a name matches when it holds the query's letters in order, not necessarily side by side)
 - **Placing:** put objects or a new block below or above another, clear of the rest (`p`, `P`, `o`, `O`, and `:text` or `:math` with the cursor on an object)
 - **Files:** plain-text `.lawh` boards that diff cleanly in git, saved atomically with `:w`
@@ -69,9 +69,9 @@ Each [release](https://github.com/y0sif/lawh/releases) has an archive for each p
 | Windows x86_64 | `lawh-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
 
 Each holds the `lawh` binary, this README, `LICENSE`, `THIRD-PARTY-LICENSES.txt` and the licences
-of the two bundled fonts. `SHA256SUMS`, next to the archives, lists their checksums
-(`sha256sum -c SHA256SUMS --ignore-missing` checks the one you downloaded). Put `lawh` somewhere
-on your `PATH`.
+of the two bundled fonts. `SHA256SUMS`, next to the archives, lists their checksums:
+`sha256sum -c SHA256SUMS --ignore-missing` (or `shasum -a 256 -c SHA256SUMS --ignore-missing` on
+macOS) checks the one you downloaded. Put `lawh` somewhere on your `PATH`.
 
 **Linux** needs no extra packages: lawh loads the X11 or Wayland libraries your desktop already
 has when it starts. The Linux archives are built on Ubuntu 24.04, whose glibc is 2.39
@@ -86,15 +86,18 @@ release workflow run that built it.
 - **macOS 15 and later:** open lawh once and let macOS block it, then go to System Settings,
   Privacy & Security, and click "Open Anyway". Control-click, Open no longer skips the check
   since macOS 15 ([Apple, 2024-08-06](https://developer.apple.com/news/?id=saqachfa), checked
-  2026-10-25). Or remove
-  the download's quarantine flag in a terminal: `xattr -d com.apple.quarantine lawh`.
+  2026-10-25). Or remove the download's quarantine flag in a terminal:
+  `xattr -d com.apple.quarantine lawh`.
+- **macOS 14 and earlier:** Control-click lawh in Finder, then Open
+  ([Apple's macOS Sonoma 14 guide](https://support.apple.com/guide/mac-help/open-a-mac-app-from-an-unknown-developer-mh40616/14.0/mac/14.0),
+  checked 2026-10-25).
 - **Windows:** for an unsigned app, SmartScreen says "Windows protected your PC" and you must
   choose "Run anyway" before it runs; an organisation's policy can block it entirely
   ([Microsoft Learn](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation),
   checked 2026-10-25). "Run anyway" shows after you click "More info"
   ([Microsoft, 2013](https://learn.microsoft.com/en-us/archive/blogs/vsnetsetup/windows-smartscreen-prevented-an-unrecognized-app-from-running-running-this-app-might-put-your-pc-at-risk)).
-  On Windows 11, Smart App Control blocks unsigned apps, and it can only be turned off as a
-  whole, not for one app
+  On Windows 11, Smart App Control can block unsigned apps (when its cloud service can't vouch
+  for the app), and it can only be turned off as a whole, not for one app
   ([Microsoft](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003),
   checked 2026-10-25).
 
@@ -116,10 +119,11 @@ cd lawh
 cargo run -p lawh -- examples/area.lawh
 ```
 
-Needs Rust 1.95 or newer. No system packages are needed to build on Linux: the X11 and Wayland
-libraries are loaded when lawh starts. A cold debug build takes several minutes: 479 s on the
-maintainer's laptop on 2026-10-11, before export added more crates (measured, see
-[docs/research/m1-measurements.md](docs/research/m1-measurements.md#dev-profile)).
+Needs Rust 1.95 or newer and a C compiler (for `psm`, through Typst). Nothing else to install on
+Linux: the X11 and Wayland libraries are loaded when lawh starts. A cold debug build takes several
+minutes: 479 s on the maintainer's laptop for commit `64c6bf4` (2026-10-10), before export added
+more crates (measured, see
+[docs/research/m1-measurements.md](https://github.com/y0sif/lawh/blob/main/docs/research/m1-measurements.md#dev-profile)).
 
 ## Command line
 
@@ -141,13 +145,16 @@ the extension. It reads no lawhrc, so a board exports the same on every machine.
 | `-h`, `--help` | Print the help |
 | `-V`, `--version` | Print the version |
 
+`lawh export` exits with:
+
 | Exit | When |
 |---|---|
 | 0 | The file is written |
 | 1 | Nothing is written: the board can't be read, the export stopped at a cap, the file is the board itself, or the file can't be written |
 | 2 | The arguments are wrong |
 
-Details, and the message each case prints: [docs/keys.md](docs/keys.md#exporting-without-a-window).
+Details, and the message each case prints:
+[docs/keys.md](https://github.com/y0sif/lawh/blob/main/docs/keys.md#exporting-without-a-window).
 
 ## Quick start
 
@@ -198,11 +205,12 @@ cp examples/lawhrc ~/.config/lawh/lawhrc
 ```
 
 That path is for Linux and macOS; Windows and the file's format are in
-[docs/keys.md](docs/keys.md#lawhrc).
+[docs/keys.md](https://github.com/y0sif/lawh/blob/main/docs/keys.md#lawhrc).
 
 ## Controls
 
-The essentials. Every key and command: [docs/keys.md](docs/keys.md).
+The essentials. Every key and command:
+[docs/keys.md](https://github.com/y0sif/lawh/blob/main/docs/keys.md).
 
 | Keys | Does |
 |---|---|
@@ -282,7 +290,8 @@ The `:` commands use the same names, so `:circle r=3` reads like the line it cre
 ```
 
 `lawh-core` has no rendering or windowing code, so the Vim engine is tested as plain functions:
-keys in, board out. See [docs/architecture.md](docs/architecture.md).
+keys in, board out. See
+[docs/architecture.md](https://github.com/y0sif/lawh/blob/main/docs/architecture.md).
 
 ## Project structure
 
@@ -308,12 +317,13 @@ lawh/
 | Vim grammar on the canvas | Yes | No | No | No | No (Vim-style keys for tools) |
 | Shapes made and sized from the keyboard | Yes | No | No | No | No |
 | Math | Typst | Not built in | SDK example only | LaTeX block | LaTeX |
-| Plain-text files | Yes | JSON | JSON | No | JSON |
+| File format | Plain-text KDL | JSON | JSON | Yjs (CRDT) documents | JSON |
 | Runs as | Native app | Web | Web / SDK | Web / desktop | Web |
 | License | MIT | MIT | Source-available | MIT, except the backend | MIT |
 
-Sources for each cell, and more tools, in [docs/comparison.md](docs/comparison.md); see also
-[docs/faq.md](docs/faq.md).
+Sources for each cell, and more tools, in
+[docs/comparison.md](https://github.com/y0sif/lawh/blob/main/docs/comparison.md); see also
+[docs/faq.md](https://github.com/y0sif/lawh/blob/main/docs/faq.md).
 
 ## Development
 
@@ -325,7 +335,8 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 `demo/render.sh` renders the demo above from the app's own frames (needs ffmpeg; see
-[demo/README.md](demo/README.md)). See [CONTRIBUTING.md](CONTRIBUTING.md).
+[demo/README.md](https://github.com/y0sif/lawh/blob/main/demo/README.md)). See
+[CONTRIBUTING.md](https://github.com/y0sif/lawh/blob/main/CONTRIBUTING.md).
 
 ## License
 

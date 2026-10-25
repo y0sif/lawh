@@ -53,7 +53,7 @@ dependencies the app builds is 1.92, for Typst 0.15 and krilla 0.8.
 
 | Tool | Where | Why |
 |---|---|---|
-| `cargo-deny` | CI (`EmbarkStudios/cargo-deny-action@v2`), or `cargo deny check` | Blocks GPL-family licences, unknown sources and known advisories. |
+| `cargo-deny` | CI (`EmbarkStudios/cargo-deny-action` v2.1.1, pinned by commit), or `cargo deny check` | Blocks GPL-family licences, unknown sources and known advisories. |
 | `cargo-insta` | Local | `cargo insta review` accepts or rejects changed snapshots. |
 | `actionlint` | Local, `uvx --from actionlint-py actionlint` | Lints the GitHub workflows. |
 | `cargo-about` 0.9.2 (MIT OR Apache-2.0) | CI's `licence-file` job and `release.yml`, installed with `taiki-e/install-action` (v2.87.31, pinned by commit); locally `cargo install cargo-about --version 0.9.2 --locked` | Writes `THIRD-PARTY-LICENSES.txt` for each release archive from `about.toml` and `about.hbs`. A tool, not a dependency: nothing of it is in the binary. |
@@ -116,7 +116,8 @@ checked on crates.io on 2026-10-10.
 | Accessibility | `accesskit` | 0.25.1 | MIT OR Apache-2.0 | Screen-reader tree for winit apps. |
 
 `vello_gpu` (0.3.0) is the upgrade path if the CPU renderer gets too slow; a release frame of
-`examples/area.lawh` takes about 1.1 ms today.
+`examples/area.lawh` at 1920x1080 took about 1.1 ms on the maintainer's laptop in October 2026
+(measured, [research/m1-measurements.md](research/m1-measurements.md#frames)).
 
 `nucleo-matcher` is MPL-2.0, a file-level copyleft: fine as an unmodified dependency of an MIT
 app, but changes to its own files would have to stay MPL.
@@ -126,9 +127,9 @@ app, but changes to its own files would have to stay MPL.
 | Option | Why not |
 |---|---|
 | Tauri | A webview in a desktop window, not native rendering. That's the web stack, which we chose against. |
-| egui | Bidirectional text support is still an open issue, and an Arabic cursor bug is open (Sep 2026). Immediate mode fights a retained board model. |
+| egui | Bidirectional text support has been an open issue since 2021 ([#1016](https://github.com/emilk/egui/issues/1016)), and a caret bug in Arabic and Hebrew text since September 2026 ([#8576](https://github.com/emilk/egui/issues/8576)), both open on 2026-10-25. Immediate mode fights a retained board model. |
 | iced | A full framework that owns the event loop and app structure. A Vim app's chrome is a status line and a command line, which we draw ourselves. |
-| GPUI (Zed) | Pre-1.0, its README warns of frequent breaking changes, and the crates.io release lags Zed's. |
+| GPUI (Zed) | Pre-1.0, and [its README](https://github.com/zed-industries/zed/blob/main/crates/gpui/README.md) warns of frequent breaking changes. The crates.io release lags Zed's: [`gpui`](https://crates.io/crates/gpui) 0.2.2 is from 2025-10-22, and Zed's `crates/gpui` has had 89 commits since 2026-09-01 (checked 2026-10-25). |
 | xilem / masonry | Early (0.4), and we don't need a widget toolkit. |
 | `vello` (compute) | Now labelled experimental by its own README. |
 | `kdl` as the `.lawh` reader | Parses the whole document before anything can be checked, so a hostile 1 MiB file took up to 2 s and 459 MB. lawh's own parser checks every cap while reading. kdl stays as the test oracle. |
@@ -139,4 +140,4 @@ app, but changes to its own files would have to stay MPL.
 | System fonts (parley's `system` feature) | Needs fontconfig, makes boards look different per machine, and lets a board probe what is installed. |
 | LaTeX via `mitex` | Needs a LaTeX → Typst conversion step, and its crates.io copy is from 2024. Typst syntax directly is simpler. |
 | KaTeX / MathJax | JavaScript. Would need an embedded JS engine in a native app. |
-| Building on Excalidraw, tldraw, AFFiNE or Obsidian | tldraw needs a licence key in production, the Obsidian Excalidraw plugin is AGPL-3.0, AFFiNE's editor (BlockSuite) has had no npm release since 2025-07-01, and Excalidraw has no math element. Sources in [faq.md](faq.md#why-not-build-it-as-a-plugin-for-excalidraw-or-obsidian). |
+| Building on Excalidraw, tldraw, AFFiNE or Obsidian | tldraw needs a licence key in production, the Obsidian Excalidraw plugin is AGPL-3.0, AFFiNE's editor (BlockSuite) has had no npm release since 2025-07-01, and Excalidraw has no math element. Sources in [faq.md](faq.md#why-not-build-on-excalidraw-tldraw-affine-or-obsidian). |

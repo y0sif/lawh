@@ -70,5 +70,5 @@ body:
     id: logs
     attributes:
       label: Logs
-      description: Run with `RUST_LOG=debug lawh` and paste the output around the problem.
+      description: Run with `RUST_LOG=debug lawh` (in PowerShell, `$env:RUST_LOG="debug"; lawh`) and paste the output around the problem.
       render: shell

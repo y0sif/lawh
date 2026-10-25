@@ -11,7 +11,9 @@ cd lawh
 cargo build
 ```
 
-Needs Rust 1.95 or newer. `rust-toolchain.toml` pins the stable channel with rustfmt and clippy.
+Needs Rust 1.95 or newer and a C compiler (for `psm`, through Typst). Nothing else to install on
+Linux: the X11 and Wayland libraries are loaded when lawh starts. `rust-toolchain.toml` pins the
+stable channel with rustfmt and clippy.
 
 ## Before you open a pull request
 
@@ -21,16 +23,17 @@ cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-All three must pass. CI runs them on Linux, macOS and Windows for every pull request, together
-with `cargo deny` (licences and advisories), a check on Rust 1.95, and a job that generates the
-third-party licence file the release archives carry (see [Licence notices](#licence-notices)).
+All three must pass. For every pull request CI runs clippy and the tests on Linux (x86_64 and
+arm64), macOS and Windows, and the format check on Linux, together with `cargo deny` (licences
+and advisories), a check on Rust 1.95, and a job that generates the third-party licence file the
+release archives carry (see [Licence notices](#licence-notices)).
 
 ## Where code goes
 
 - `lawh-core`: the board model, the `.lawh` reader and writer, and the Vim engine (`:` commands,
   undo, key maps, lawhrc parsing). It must not depend on rendering, windowing or Typst. Engine
   changes should come with a test that feeds keys and checks the resulting board
-  (`tests/common/mod.rs`).
+  (`crates/lawh-core/tests/common/mod.rs`).
 - `lawh-math`: Typst math, compiled in a worker process. Keep the Typst world sandboxed: no file
   system, no network, no clock, bundled fonts only (see
   [the sandbox](docs/architecture.md#the-sandbox)).
@@ -39,8 +42,8 @@ third-party licence file the release archives carry (see [Licence notices](#lice
 
 Limits on what a board, a formula or a frame may cost are named constants, documented where they
 are defined (most with their reason, and measurements where a cost was measured). If you change
-one, a cost in the frame budget or a work weight in `lawh-core/src/engine/work.rs`, rerun the
-calibrations and benches in [docs/testing.md](docs/testing.md#calibrations-and-benches).
+one, a cost in the frame budget or a work weight in `crates/lawh-core/src/engine/work.rs`, rerun
+the calibrations and benches in [docs/testing.md](docs/testing.md#calibrations-and-benches).
 
 See [docs/architecture.md](docs/architecture.md) for the design and
 [docs/tech-stack.md](docs/tech-stack.md) before adding a dependency.
