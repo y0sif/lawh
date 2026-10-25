@@ -380,14 +380,14 @@ left out of `sel.png`, and with none left the status line says
 
 ### Exporting: `:exp`
 
-`:exp[ort] {file}` draws the board into an SVG, PNG or PDF file. The extension names the format,
+`:exp[ort] <file>` draws the board into an SVG, PNG or PDF file. The extension names the format,
 in any case: `:exp board.pdf`, `:exp board.PNG`. `:exp!` is the same as `:exp`. (`:ex` is not
 `:exp`: in Vim it is `:edit`.)
 
 | Command | Does |
 |---|---|
-| `:exp[ort] {file}` | Export the whole board |
-| `:exp {file}` from Visual mode (`v`, a selection, then `:`) | Export only the objects selected, framed to them |
+| `:exp[ort] <file>` | Export the whole board |
+| `:exp <file>` from Visual mode (`v`, a selection, then `:`) | Export only the objects selected, framed to them |
 
 What the file holds:
 
@@ -406,7 +406,7 @@ What the file holds:
 | SVG | 40 pixels a grid unit. A side past 16,384 pixels is shown at 16,384 (the message says by how much), the drawing unchanged | Paths only. Every glyph is its outline from the bundled fonts, so no text of the board is in the file (it can't be searched or copied), and the file refers to nothing outside itself |
 | PDF | One page at 30 pt a grid unit: the board at zoom 1, seen at 100 % in a viewer. A side past 14,400 pt (200 inches, PDF's limit for a page) is shrunk to fit, and the message says by how much | Board text is real text, in subsets of the bundled fonts, so it can be searched and copied. Math is drawn as shapes and can't be copied |
 
-**The file.** As `:w {file}`: a relative path is taken from the directory lawh was started in, a
+**The file.** As `:w <file>`: a relative path is taken from the directory lawh was started in, a
 leading `~` is your home directory, an existing file is replaced without asking, and the write is
 atomic (the file is either the old one or the new one). An export onto the board's own file is
 refused, however the path is typed (`./`, `~/`, an absolute path, a link to it):
@@ -417,8 +417,8 @@ refused.
 file is written. Keys typed meanwhile wait and run after it, in order. A click or a close request
 right after `:exp` runs the export first (and the keys waiting behind it), then itself: the click
 lands where you clicked, and the status line keeps the message the export (or a key after it)
-left. When an export that a close ran fails, the window stays open with the error; close again
-(with unwritten changes, the warning comes next, then the close).
+left. When an export a close ran, or a key that waited behind it, leaves an error, the window
+stays open with it; close again (with unwritten changes, the warning comes next, then the close).
 
 **Messages.**
 
@@ -597,10 +597,11 @@ Options may come before, between or after the two files, but not after `--`.
 |---|---|---|
 | 0 | The file is written | Nothing, or one line when there is more to know: `lawh: "out.png" exported, 2 formulas failed` (and `, shrunk to 0.5x to fit`) |
 | 1 | Nothing is written: the board is missing or can't be read (`lawh: missing.lawh: No such file or directory (os error 2)`), the export stopped (`lawh: cannot export "out.png": export stopped: drawing it costs too much`), the file is the board itself (`lawh: cannot export "b.svg": that is the board's own file`), or the file can't be written | One line |
-| 2 | The arguments are wrong: no files, a file to write without `.svg`, `.png` or `.pdf`, `--scale` for an SVG or a PDF, a bad scale, an unknown option | The problem, then the usage |
+| 2 | The arguments are wrong: not exactly two files, a file to write without `.svg`, `.png` or `.pdf`, a `--scale` that is missing its value, not a scale from 0.25 to 8 with at most two decimals, or used for an SVG or a PDF, an unknown option | The problem, then the usage |
 
-A missing board is an error, never a new board. Nothing is ever printed on stdout. Logs share
-stderr: at the default level a formula that times out logs warnings before the line above.
+A missing board is an error, never a new board. An export prints nothing on stdout; only `--help`
+and `--version` do. Logs share stderr: at the default level a formula that times out logs
+warnings before the line above.
 
 `lawh export` exports; it doesn't open a file named `export`. To open a board of that name, type
 `lawh ./export` or `lawh -- export`.

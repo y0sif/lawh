@@ -29,7 +29,7 @@ symbol list in lawh-math and passes it in with `Engine::set_symbols`).
 ```bash
 nice -n 19 cargo build
 nice -n 19 cargo run -p lawh -- examples/area.lawh
-nice -n 19 cargo run -p lawh -- export examples/area.lawh area.pdf   # no window
+nice -n 19 cargo run -p lawh -- export examples/area.lawh target/area.pdf   # no window
 nice -n 19 cargo test -p lawh-core      # fast loop: no Typst, no renderer
 cargo fmt --all --check
 nice -n 19 cargo clippy --all-targets -- -D warnings
@@ -130,7 +130,8 @@ the constant, not a copy:
   compression `export/png.rs` (`PNG_BALANCED_MAX_PIXELS` = 2,000,000: zlib up to it, fdeflate
   past it; `PNG_NS_PER_BYTE_BALANCED` = 100, `PNG_NS_PER_BYTE_FAST` = 6.5; `PNG_CHUNK_BYTES` =
   256 KiB); the SVG and PDF writers' weights `SVG_NS_*` (`export/svg.rs`), `PDF_NS_*` and
-  `PDF_BYTES_*` (`export/pdf.rs`).
+  `PDF_BYTES_*` (`export/pdf.rs`); the SVG writer's `CHUNK_BYTES` = 384, how far an SVG may
+  pass the byte cap (`export/svg.rs`).
 - Overlay: `crates/lawh-render/src/budget.rs` (`HIGHLIGHT_BUDGET_NS`, which jump labels' cost comes
   out of first), `status.rs` (`STATUS_WINDOW_CHARS`, `STATUS_CACHE_ENTRIES` = 40), `overlay.rs`
   (`STATUS_BAR_PX`); bench target `OVERLAY_TARGET` in `tests/bench.rs`.

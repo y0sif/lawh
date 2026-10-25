@@ -65,10 +65,12 @@ pub const MAX_PENDING_WRITES: usize = MAX_WRITES_PER_KEY;
 /// the window's thread, then writes them: it waits for every formula to compile (up to 10 s
 /// for them all, `EXPORT_MATH_WAIT` in lawh-render) and may draw for up to 2 s of estimated
 /// work (`EXPORT_BUDGET_NS`), its PNG encoding included. Measured in release (lawh-render's
-/// `measure_exports` and `measure_pdf_exports`): `examples/area.lawh` as a PNG at scale 2 in 11
-/// to 42 ms, a PDF in about 1 ms; the limits board as a PNG shrunk to 64 million pixels in 0.40
-/// to 0.41 s; 500 formulas of 22,500 glyphs as a PDF 1.1 s before it was refused for its size. So one export may hold the window for seconds, and a mapping that exports twice
-/// (`:exp a.png<CR>:exp b.pdf<CR>`) or runs itself would hold it for as many times that.
+/// `measure_exports` and `measure_pdf_exports`, `docs/research/m4-measurements.md`):
+/// `examples/area.lawh` as a PNG at scale 2 in 10 to 41 ms, a PDF in about 1 ms; the limits
+/// board as a PNG shrunk to 64 million pixels in 0.39 to 0.41 s; 500 formulas of 22,500 glyphs
+/// as a PDF 1.1 s before it was refused for its size. So one export may hold the window for
+/// seconds, and a mapping that exports twice (`:exp a.png<CR>:exp b.pdf<CR>`) or runs itself
+/// would hold it for as many times that.
 ///
 /// An export past the cap is refused, and the key stops as at [`MAX_WRITES_PER_KEY`]: nothing
 /// more runs for it, the typeahead is dropped and the message says so. The exports and writes

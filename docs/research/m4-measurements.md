@@ -96,12 +96,13 @@ smaller: 20 such formulas are 28.5 MB of content and a 1.55 MB file (`calibrate_
 
 ### Why `MAX_PDF_PAGE_PT` is 14,400
 
-From the doc comment of `MAX_PDF_PAGE_PT` (`crates/lawh-render/src/export/mod.rs`), measured on
-scratch PDFs during M4's research (not in the repo): 14,400 pt is PDF 1.x's implementation limit
-for a page side (ISO 32000-1, Annex C, which Acrobat keeps). Reader warns that a larger page is
-out of range, Ghostscript fails on a page of 1.2e8 pt, and PDF/A-2 refuses one (veraPDF rule
-6.1.13-11), though krilla writes any size. A board up to 480 units across, margin included, keeps
-30 pt a unit (derived: 14,400 / 30).
+Ghostscript 10.08.0 (`gs -sDEVICE=nullpage`) fails on a page of 1.2e8 pt
+(`/undefined in --runpdf--`) and reads one of 14,400 pt (measured 2026-10-25 on the area board's
+PDF with its MediaBox edited). Reader's warning and veraPDF rule 6.1.13-11 come from M4's
+research notes (not in the repo, not re-measured): Reader warns that a page past 14,400 pt is out
+of range, and PDF/A-2 refuses one. 14,400 pt is PDF 1.x's implementation limit for a page side
+(ISO 32000-1, Annex C, which Acrobat keeps), though krilla writes any size. A board up to 480
+units across, margin included, keeps 30 pt a unit (derived: 14,400 / 30).
 
 ## PNG compression
 
@@ -253,6 +254,19 @@ with a wait of 200 ms and a formula of about a second stopped after 200.1 ms
 `EXPORT_MATH_WAIT`). Dropping a math engine while its worker compiles took 1.7 to 2.4 ms over 4
 runs, the worker killed and reaped (`dropping_the_engine_mid_compile_kills_and_reaps_the_worker_at_once`
 in `crates/lawh-math/tests/worker_process.rs`, release, 08:38 to 08:48).
+
+## SVG viewers: rsvg
+
+`rsvg-convert` 2.63.2 (librsvg), measured 2026-10-25 on scratch SVGs (not in the repo):
+
+| What | Result | Kind |
+|---|---|---|
+| An SVG 32,767 pixels wide; 32,768 | drawn; refused: "The resulting image would be larger than 32767 pixels on either dimension" | measured |
+| `<text>` in a font embedded as an `@font-face` data URL (Libertinus Math, base64) | a PNG byte-identical to the same SVG without the font, though `font-family="serif"` draws a different one: the embedded font is ignored | measured |
+| ImageMagick 7.1.2's SVG reader (`magick -list format`) | `SVG`, `SVGZ` and `RSVG` are drawn by RSVG 2.63.2 (`MSVG` is ImageMagick's own renderer) | measured |
+
+So an SVG export can't count on viewers using a font it embeds, and its `width` and `height` stay
+within 16,384 a side, below rsvg's 32,767.
 
 ## The window on the shared draw list
 
