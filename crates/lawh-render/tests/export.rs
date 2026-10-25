@@ -584,8 +584,9 @@ fn the_math_wait_ends_on_time() {
 fn the_budget_stops_an_export() {
     let board = common::area_board();
     // The area board at the default scale (970 x 802) draws in a few ms, but its image is
-    // charged first: 0.6 ns a pixel, and encoding it at its worst, 100 ns a byte (233 ms).
-    for budget_ns in [0.0, 1e5, 2e5, 2e8] {
+    // charged first: 0.6 ns a pixel (0.47 ms), and encoding it with fdeflate at its worst, 6.5 ns
+    // a byte (15.2 ms).
+    for budget_ns in [0.0, 1e5, 2e5, 1e7] {
         let limits = ExportLimits {
             budget_ns,
             ..ExportLimits::DEFAULT
@@ -596,11 +597,18 @@ fn the_budget_stops_an_export() {
             "{budget_ns}"
         );
     }
-    let limits = ExportLimits {
-        budget_ns: 3e8,
-        ..ExportLimits::DEFAULT
+    // zlib at its worst, 100 ns a byte (233 ms), doesn't fit 0.2 s: fdeflate encodes it. With
+    // 0.3 s, zlib does, as with the whole budget.
+    let fdeflate = |budget_ns| {
+        let limits = ExportLimits {
+            budget_ns,
+            ..ExportLimits::DEFAULT
+        };
+        zlib_flags(&export_with(&board, &limits).unwrap().bytes) == FDEFLATE
     };
-    assert!(export_with(&board, &limits).is_ok());
+    assert!(fdeflate(2e8));
+    assert!(!fdeflate(3e8));
+    assert_eq!(zlib_flags(&export(&board).bytes), ZLIB_DEFAULT);
     // 500 circles one inside the other, filling a 2,000 x 2,000 image with outlines: about
     // 85 ms of drawing estimated, over the 40 ms the 120 ms given here leave once the image and
     // its encoding (fdeflate's worst, 6.5 ns a byte: 2.4 and 78 ms) are paid.
@@ -626,6 +634,117 @@ fn the_budget_stops_an_export() {
         ExportError::OverBudget.to_string(),
         "export stopped: drawing it costs too much"
     );
+}
+
+/// The zlib header's flag byte for zlib's default level (`Compression::Balanced`).
+const ZLIB_DEFAULT: u8 = 0x9C;
+/// The zlib header's flag byte fdeflate writes (`Compression::Fast`).
+const FDEFLATE: u8 = 0x01;
+
+/// The flag byte of the zlib header that starts a PNG's image data (its first `IDAT` chunk):
+/// which compressor wrote it.
+fn zlib_flags(png: &[u8]) -> u8 {
+    let mut at = 8;
+    while at + 8 <= png.len() {
+        let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+        if &png[at + 4..at + 8] == b"IDAT" {
+            assert_eq!(png[at + 8], 0x78, "a zlib stream with a 32K window");
+            return png[at + 9];
+        }
+        at += 12 + len;
+    }
+    panic!("no IDAT chunk");
+}
+
+/// The cost review's repro: a board whose image is 1.86 million pixels at `pngscale` 2 (zlib's
+/// worst case charged 0.56 s) and 2.05 million at 2.1 (fdeflate). Under a budget that fits
+/// fdeflate but not zlib, 2.1 was written and 2 refused. Now every budget refuses a smaller scale
+/// only if it refuses every larger one too, and a smaller image zlib doesn't fit is encoded with
+/// fdeflate.
+#[test]
+fn a_smaller_scale_is_never_refused_where_a_larger_one_is_written() {
+    // 15 units and the outline, with the margin: 17.05 units, 1,364 px a side at 80 px a unit,
+    // 1,433 at 84.
+    let board = common::board("lawh version=1\nrect id=r1 x=0 y=0 w=15 h=15\n");
+    let mut renderer = Renderer::new_trusted();
+    let scales = [190, 200, 205, 210, 220];
+    for budget_ns in [1e6, 3e7, 5e7, 1e8, 3e8, 5.6e8, 6e8, 1e9] {
+        let limits = ExportLimits {
+            budget_ns,
+            ..ExportLimits::DEFAULT
+        };
+        let written: Vec<bool> = scales
+            .iter()
+            .map(|&hundredths| {
+                match renderer.export_with_limits(&board, None, &scaled(hundredths), &limits) {
+                    Ok(_) => true,
+                    Err(ExportError::OverBudget) => false,
+                    Err(other) => panic!("{hundredths} {budget_ns}: {other:?}"),
+                }
+            })
+            .collect();
+        // Written up to some scale, refused past it.
+        assert!(
+            written.windows(2).all(|pair| pair[0] || !pair[1]),
+            "{budget_ns}: {written:?} for {scales:?}"
+        );
+    }
+    // The repro's budget, 0.1 s: both are written, 2 with fdeflate, as 2.1 is.
+    let limits = ExportLimits {
+        budget_ns: 1e8,
+        ..ExportLimits::DEFAULT
+    };
+    let at = |renderer: &mut Renderer, hundredths, limits: &ExportLimits| {
+        renderer
+            .export_with_limits(&board, None, &scaled(hundredths), limits)
+            .unwrap()
+            .bytes
+    };
+    let pixels = |image: &Decoded| u64::from(image.width) * u64::from(image.height);
+    let tight = at(&mut renderer, 200, &limits);
+    assert_eq!(zlib_flags(&tight), FDEFLATE);
+    let image = decode(&tight);
+    assert!((1_850_000..=2_000_000).contains(&pixels(&image)));
+    let larger = at(&mut renderer, 210, &limits);
+    assert_eq!(zlib_flags(&larger), FDEFLATE);
+    assert!(pixels(&decode(&larger)) > 2_000_000);
+    // With the whole budget, zlib, and the same pixels.
+    let full = at(&mut renderer, 200, &ExportLimits::DEFAULT);
+    assert_eq!(zlib_flags(&full), ZLIB_DEFAULT);
+    assert!(full.len() < tight.len());
+    assert_eq!(decode(&full).data, image.data);
+}
+
+/// An image under the zlib threshold whose drawing leaves too little of the budget for zlib's
+/// worst case is encoded with fdeflate, not refused, even when zlib's charge alone would fit.
+#[test]
+fn a_drawing_that_leaves_no_room_for_zlib_is_encoded_with_fdeflate() {
+    // 500 circles one inside the other, shrunk to 1,378 x 1,378 (1.9 million pixels), tens of
+    // ms of drawing estimated.
+    let mut src = String::from("lawh version=1\n");
+    for i in 0..500 {
+        writeln!(src, "circle id=c{i} x=0 y=0 r={}", 10 + i).unwrap();
+    }
+    let piled = common::board(&src);
+    let limits = ExportLimits {
+        max_pixels: 1_900_000,
+        ..ExportLimits::DEFAULT
+    };
+    let full = export_with(&piled, &limits).unwrap().bytes;
+    assert_eq!(zlib_flags(&full), ZLIB_DEFAULT);
+    let image = decode(&full);
+    let (w, h) = (f64::from(image.width), f64::from(image.height));
+    assert!(w * h <= 1.9e6 && w * h > 1.85e6, "{w}x{h}");
+    // The image (0.6 ns a pixel) and zlib's worst case (100 ns a byte) with 1 ms to spare: zlib
+    // alone fits, but not beside the drawing. fdeflate's 37 ms does.
+    let zlib_alone = 0.6 * w * h + 100.0 * (3.0 * w + 1.0) * h;
+    let limits = ExportLimits {
+        budget_ns: zlib_alone + 1e6,
+        ..limits
+    };
+    let tight = export_with(&piled, &limits).unwrap().bytes;
+    assert_eq!(zlib_flags(&tight), FDEFLATE);
+    assert_eq!(decode(&tight).data, image.data);
 }
 
 #[test]

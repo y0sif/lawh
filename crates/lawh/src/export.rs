@@ -91,7 +91,7 @@ fn export_file(
 /// What to say after a good export, in the window's words ([`Engine::export_done`]:
 /// `"out.png" exported, 2 formulas failed, shrunk to 0.5x to fit`), when the export has more to
 /// report than the file being written: formulas that failed (drawn as their source in red), or
-/// a PNG or PDF shrunk to fit its caps. `None` for a clean export, which prints nothing.
+/// a PNG, SVG or PDF shrunk to fit its caps. `None` for a clean export, which prints nothing.
 fn note(name: &str, report: ExportReport) -> Option<String> {
     if report.failed_formulas == 0 && report.shrunk.is_none() {
         return None;

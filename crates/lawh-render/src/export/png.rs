@@ -1,13 +1,15 @@
 //! PNG export: the frame drawn with `vello_cpu` at the export's scale, then encoded with the
 //! `png` crate (sRGB chunk) and streamed through the byte cap.
 //!
-//! Encoding is charged to the export's budget with the drawing, before anything is drawn. What
-//! compressing an image costs depends on what is in it (paper and text compress fast; random
-//! pixels of a few values make deflate search longest), so it is charged at its worst: images
-//! up to [`PNG_BALANCED_MAX_PIXELS`] are compressed with zlib's default level
+//! Encoding is charged to the export's budget with the drawing. What compressing an image costs
+//! depends on what is in it (paper and text compress fast; random pixels of a few values make
+//! deflate search longest), so it is charged at its worst: images up to
+//! [`PNG_BALANCED_MAX_PIXELS`] are compressed with zlib's default level
 //! (`Compression::Balanced`: smaller files, [`PNG_NS_PER_BYTE_BALANCED`] at worst), larger ones
 //! with fdeflate (`Compression::Fast`: [`PNG_NS_PER_BYTE_FAST`] at worst), so the worst image at
-//! the pixel caps costs about a second to encode, not ten.
+//! the pixel caps costs about a second to encode, not ten. fdeflate's charge is taken before
+//! anything is drawn, and zlib's extra once the drawing is paid, when it fits; when it doesn't,
+//! fdeflate encodes the image (`Compression::within`), so zlib never refuses an export.
 
 use std::io::{self, Write as _};
 
@@ -25,9 +27,10 @@ use crate::scene::{Glyphs, Item, Sink, Tools, uniform_scale};
 use crate::{BASE_PX_PER_UNIT, Renderer};
 
 /// Most pixels a PNG is compressed with zlib's default level (`Compression::Balanced`); a
-/// larger image is compressed with fdeflate (`Compression::Fast`). 2,000,000 pixels, a board of
-/// about 17 x 17 units at the default `pngscale` of 2: zlib's worst case there is charged 0.6 s
-/// of the export's 2 s (0.8 s with transparency), leaving the drawing more than half. Below it
+/// larger image is compressed with fdeflate (`Compression::Fast`), and so is a smaller one whose
+/// drawing leaves too little of the budget for zlib's worst case (`Compression::within`).
+/// 2,000,000 pixels, a board of about 17 x 17 units at the default `pngscale` of 2: zlib's worst
+/// case there is charged 0.6 s of the export's 2 s (0.8 s with transparency). Below it
 /// files are smaller: the area board at `pngscale` 2 (970 x 802) is 32 KB with zlib and 47 KB
 /// with fdeflate, at 8 (3,879 x 3,208) 163 KB and 322 KB, and zlib took 6 and 72 to 75 ms there
 /// (`calibrate_png_encoding`, see [`PNG_NS_PER_BYTE_BALANCED`]). fdeflate's worst at the pixel
@@ -77,6 +80,27 @@ impl Compression {
         }
     }
 
+    /// How an export compresses an image of `pixels` pixels and `data` bytes of image data, once
+    /// fdeflate's charge for it is paid and the image drawn: the compression its size calls for
+    /// ([`Compression::for_pixels`]) when what that costs above fdeflate fits what `budget` has
+    /// left (taken from it), else [`Compression::Fast`].
+    ///
+    /// So zlib never refuses an export: where its worst case doesn't fit, the image is encoded
+    /// with fdeflate (a larger file), as a slightly larger image past
+    /// [`PNG_BALANCED_MAX_PIXELS`] would be. Charging zlib's worst case before drawing refused a
+    /// 1.86 million pixel image (0.56 s of zlib) under a budget that wrote the same board at 2.05
+    /// million pixels with fdeflate; falling back to fdeflate only there would still refuse an
+    /// image whose drawing fits beside fdeflate's charge but not beside zlib's.
+    pub(crate) fn within(pixels: u64, data: f64, budget: &mut Budget) -> Self {
+        let chosen = Self::for_pixels(pixels);
+        let more = chosen.cost(data) - Self::Fast.cost(data);
+        if chosen == Self::Fast || budget.spend(more) {
+            chosen
+        } else {
+            Self::Fast
+        }
+    }
+
     /// The estimated cost of compressing `data` bytes of image data this way, whatever is in it.
     pub(crate) fn cost(self, data: f64) -> f64 {
         data * match self {
@@ -121,7 +145,8 @@ struct Drawn {
     compression: Compression,
 }
 
-/// Sizes the image, charges it and its encoding to `budget`, and draws `plan` into it.
+/// Sizes the image, charges it and its encoding to `budget` (fdeflate's charge first, zlib's
+/// extra after the drawing if it fits: [`Compression::within`]), and draws `plan` into it.
 fn draw(
     renderer: &mut Renderer,
     board: &Board,
@@ -138,14 +163,15 @@ fn draw(
     let size = fit(frame, full, limits).ok_or(ExportError::Empty)?;
     let shrunk = (size.px_per_unit < full).then(|| size.px_per_unit / full);
     let pixels = u64::from(size.width) * u64::from(size.height);
-    let compression = Compression::for_pixels(pixels);
     // RGB when every pixel is opaque, which opaque paper makes sure of; else RGBA.
     let opaque = options.background == ExportBackground::Paper
         && renderer.palette.paper.components[3] >= 1.0;
     let channels = if opaque { 3 } else { 4 };
-    let image = budget::image(pixels as f64);
-    let encoding = compression.cost(image_data(size.width, size.height, channels));
-    if !budget.spend(image + encoding) {
+    let data = image_data(size.width, size.height, channels);
+    // fdeflate's charge first: only an image that even fdeflate can't encode within the budget
+    // is refused, so a smaller scale is never refused where a larger one is written (see
+    // `Compression::within`).
+    if !budget.spend(budget::image(pixels as f64) + Compression::Fast.cost(data)) {
         return Err(ExportError::OverBudget);
     }
     // The frame centred in the image, which is a whole number of pixels.
@@ -162,6 +188,7 @@ fn draw(
         target.ctx.fill_rect(&target.clip);
     }
     renderer.draw_export(board, plan, &mut target)?;
+    let compression = Compression::within(pixels, data, &mut target.budget);
     Ok(Drawn {
         pixmap: target.finish(),
         shrunk,
@@ -676,6 +703,35 @@ mod tests {
         let fast = Compression::Fast.cost(image_data(8_000, 8_000, 4));
         assert!(image + fast < 0.9 * budget, "{fast}");
         assert!((image_data(10, 2, 3) - 62.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn zlib_is_used_only_when_its_extra_charge_fits() {
+        // 1,000 x 1,000 RGB: 3,001,000 bytes, fdeflate 19.5 ms and zlib 300.1 ms at worst.
+        let data = image_data(1_000, 1_000, 3);
+        let more = Compression::Balanced.cost(data) - Compression::Fast.cost(data);
+        let small = 1_000_000;
+        let mut budget = Budget::export_within(more + 1.0);
+        assert_eq!(
+            Compression::within(small, data, &mut budget),
+            Compression::Balanced
+        );
+        assert!((budget.left() - 1.0).abs() < 1e-6, "{}", budget.left());
+        // Too little left: fdeflate, and nothing more is taken.
+        let mut budget = Budget::export_within(more - 1.0);
+        assert_eq!(
+            Compression::within(small, data, &mut budget),
+            Compression::Fast
+        );
+        assert!((budget.left() - (more - 1.0)).abs() < 1e-6);
+        // Past the threshold it is fdeflate whatever is left, with nothing more taken.
+        let large = PNG_BALANCED_MAX_PIXELS + 1;
+        let mut budget = Budget::export();
+        assert_eq!(
+            Compression::within(large, data, &mut budget),
+            Compression::Fast
+        );
+        assert!((budget.left() - budget::EXPORT_BUDGET_NS).abs() < 1e-6);
     }
 
     #[test]

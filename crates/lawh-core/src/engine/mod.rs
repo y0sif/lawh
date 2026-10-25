@@ -345,6 +345,14 @@ impl Engine {
         }
     }
 
+    /// Makes `message` the message again, in place of any, after a [`Engine::click`] dropped
+    /// it: for the app, which may first run keys and an export's report that waited for a frame
+    /// ([`Effect::Export`]) when the user clicks, so their message comes just before the click and
+    /// nobody has seen it yet. It lasts as any message does, until the next typed key or click.
+    pub fn restore_message(&mut self, message: Message) {
+        self.message = Some(message);
+    }
+
     pub fn mode(&self) -> Mode {
         self.mode
     }
@@ -554,4 +562,43 @@ fn bounds(object: &Object, measure: &mut dyn Measure) -> Rect {
         let p = anchor(&object.shape);
         Rect::from_points(p, p)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::export::ExportReport;
+
+    #[test]
+    fn a_message_restored_after_a_click_lasts_until_the_next_key() {
+        let board = crate::from_lawh("lawh version=1\ncircle id=c1 x=0 y=0 r=1\n").unwrap();
+        let mut engine = Engine::new(board);
+        for (result, error) in [
+            (Err("No such file or directory".to_owned()), true),
+            (Ok(ExportReport::default()), false),
+        ] {
+            engine.export_done("out.png", result);
+            let message = engine.message().cloned().unwrap();
+            assert_eq!(message.error, error);
+            engine.click(Point::new(3.2, 0.0), None, &mut FixedMeasure);
+            assert_eq!(engine.message(), None);
+            assert_eq!(engine.cursor(), &Cursor::Grid(Point::new(3.0, 0.0)));
+            engine.restore_message(message.clone());
+            assert_eq!(engine.message(), Some(&message));
+            engine.feed(Key::char(':'), &mut FixedMeasure);
+            assert_eq!(engine.message(), None, "a key drops it");
+            engine.feed(Key::named(KeyCode::Esc), &mut FixedMeasure);
+            engine.restore_message(message.clone());
+            engine.click(Point::ZERO, None, &mut FixedMeasure);
+            assert_eq!(engine.message(), None, "and so does a click");
+        }
+        // It replaces any message, an error too.
+        engine.export_done("a.png", Err("nope".to_owned()));
+        let info = Message {
+            text: "\"b.png\" exported".to_owned(),
+            error: false,
+        };
+        engine.restore_message(info.clone());
+        assert_eq!(engine.message(), Some(&info));
+    }
 }

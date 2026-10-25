@@ -143,8 +143,10 @@ struct LeftPress {
 /// Meanwhile keys are queued behind the ones waiting. A click, a close request, or a failure
 /// that ends the app does not wait for frames: it first runs every export waiting and all that
 /// waited with them, the exports those keys ask for in turn too, in the engine's order
-/// ([`App::finish_exports`]), then itself. So a click lands on the board those keys leave, and
-/// closing or failing drops no export or write typed before it. If no frame comes within
+/// ([`App::finish_exports`]), then itself. So a click lands on the board those keys leave (at
+/// the point the user clicked, through the view they saw), and closing or failing drops no
+/// export or write typed before it; their report is not lost to the click or to the close
+/// warning ([`App::click`], [`App::close`]). If no frame comes within
 /// [`EXPORT_FRAME_WAIT`] (a hidden window), the export runs without one.
 #[derive(Debug)]
 struct Suspended {
@@ -452,11 +454,15 @@ impl App {
     /// which must not drop them.
     ///
     /// It ends: a new export can only come from the keys that waited (one key asks for at most
-    /// one), so each turn leaves fewer of them.
-    fn finish_exports(&mut self) {
+    /// one), so each turn leaves fewer of them. True when it ran one: the engine's message is
+    /// then what they left, which no frame has shown yet.
+    fn finish_exports(&mut self) -> bool {
+        let mut ran = false;
         while self.suspended.is_some() && !self.quitting {
             self.run_export();
+            ran = true;
         }
+        ran
     }
 
     /// A frame was presented, or the window has nothing to present one on: an export waiting
@@ -510,11 +516,18 @@ impl App {
 
     /// A close request: true when the window closes now. The exports waiting for their frames
     /// were asked for before the close, so they run first, with what waited with them
-    /// ([`App::finish_exports`]); then the window closes if that quit (a `:wq` that waited),
-    /// else as [`App::close_or_warn`] says.
+    /// ([`App::finish_exports`]); then the window closes if that quit (a `:wq` that waited).
+    /// If they left an error (an export or a write that failed), the window stays open with
+    /// that error on the status line, and the close is not armed: nobody has seen the error,
+    /// and the close warning would hide it, as closing would. The next close request goes on as
+    /// usual (the warning first if the board has changes). Else as [`App::close_or_warn`] says.
     fn close(&mut self) -> bool {
-        self.finish_exports();
-        if self.quitting || self.close_or_warn() {
+        let drained = self.finish_exports();
+        if self.quitting {
+            return true;
+        }
+        let failed = drained && self.engine.message().is_some_and(|m| m.error);
+        if !failed && self.close_or_warn() {
             return true;
         }
         self.request_redraw();
@@ -589,17 +602,28 @@ impl App {
     }
 
     /// A left click at `at` (physical pixels): the engine's cursor goes to the object there, or
-    /// to the grid point nearest it. A click on the status bar does nothing. Every export waiting
-    /// for its frame runs first, with the keys that waited ([`App::finish_exports`]), so the click
-    /// lands on the board they leave.
+    /// to the grid point nearest it. A click on the status bar does nothing.
+    ///
+    /// Every export waiting for its frame runs first, with the keys that waited
+    /// ([`App::finish_exports`]), so the click lands on the board they leave. It lands where the
+    /// user clicked, though: `at` becomes a board point through the view as it was when they
+    /// clicked, before those keys move the view (it follows the cursor), and the view is put
+    /// back, so what they clicked stays where they saw it. What those exports and keys left on
+    /// the status line (an export's report, a failed write) stays after the click
+    /// ([`Engine::restore_message`]): it comes just before the click, and nobody has seen it yet.
     fn click(&mut self, at: Point) {
-        self.finish_exports();
+        let seen = self.viewport;
+        let clicked = seen.and_then(|vp| click_point(&vp, at));
+        let drained = self.finish_exports();
         if self.quitting {
             return;
         }
-        let Some((point, tolerance)) = self.viewport.and_then(|vp| click_point(&vp, at)) else {
+        let Some((point, tolerance)) = clicked else {
             return;
         };
+        if drained {
+            self.viewport = seen;
+        }
         let hit = self
             .renderer
             .hit_test(self.engine.board(), point, tolerance);
@@ -610,7 +634,11 @@ impl App {
         self.message = None;
         // A formula finishing must not move the board from under what was just clicked.
         self.keep_view = true;
+        let news = drained.then(|| self.engine.message().cloned()).flatten();
         self.engine.click(point, hit, &mut self.renderer);
+        if let Some(news) = news {
+            self.engine.restore_message(news);
+        }
         self.update_title();
         self.request_redraw();
     }
@@ -1928,6 +1956,139 @@ mod tests {
             .collect();
         assert_eq!(ids, ["c2"]);
         assert_eq!(app.engine.cursor(), &object("c2"));
+    }
+
+    /// `c1` on the origin, where the cursor starts, and `c2` 100 units right of it, far outside
+    /// [`origin_view`].
+    const FAR_APART: &str = "lawh version=1\n\
+                             circle id=c1 x=0 y=0 r=1\n\
+                             circle id=c2 x=100 y=0 r=1\n";
+
+    #[test]
+    fn a_click_lands_through_the_view_the_user_clicked_on() {
+        let dir = TestDir::new("export-click-view");
+        dir.write("a.lawh", FAR_APART);
+        // The keys that wait move the view: `w` goes to `c2`, and the view follows it.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        app.feed(keys(":exp one.png<CR>w"));
+        assert!(app.finish_exports());
+        assert_eq!(app.engine.cursor(), &object("c2"));
+        assert_ne!(app.viewport, Some(origin_view()));
+
+        // Typed fast, then a click on `c1` where the window shows it, before any frame: the
+        // export and `w` run first, then the click lands on `c1`, through the view the user
+        // saw, which stays.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        app.feed(keys(":exp one.png<CR>w"));
+        assert!(app.suspended.is_some());
+        app.click(Point::new(400.0, 300.0));
+        assert!(app.suspended.is_none());
+        assert!(
+            fs::read(dir.path("one.png"))
+                .unwrap()
+                .starts_with(PNG_SIGNATURE)
+        );
+        assert_eq!(app.engine.cursor(), &object("c1"));
+        assert_eq!(app.viewport, Some(origin_view()));
+        // On the grid there too: 2 units right of `c1`'s centre is (2, 0).
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        app.feed(keys(":exp one.png<CR>w"));
+        app.click(Point::new(480.0, 300.0));
+        assert_eq!(app.engine.cursor(), &Cursor::Grid(Point::new(2.0, 0.0)));
+    }
+
+    #[test]
+    fn a_click_keeps_what_the_exports_it_ran_reported() {
+        let dir = TestDir::new("export-click-report");
+        dir.write("a.lawh", TWO_CIRCLES);
+        // A failed export, run by the click: its error stays after it.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        export_as(&mut app, "no-such-dir/out.png");
+        app.click(Point::new(600.0, 300.0));
+        assert_eq!(app.engine.cursor(), &object("c2"));
+        let status = shown(&app);
+        assert!(status.error);
+        assert!(
+            status
+                .left
+                .starts_with("cannot export \"no-such-dir/out.png\": "),
+            "{}",
+            status.left
+        );
+        // Until the next key, as any message.
+        app.feed(keys("<Esc>"));
+        assert_eq!(shown(&app).left, "");
+
+        // A good export's report stays too.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        export_as(&mut app, "out.svg");
+        app.click(Point::new(600.0, 300.0));
+        let status = shown(&app);
+        assert_eq!(status.left, "\"out.svg\" exported");
+        assert!(!status.error);
+        // A click with no export waiting drops the message, which a frame has shown.
+        app.click(Point::new(400.0, 300.0));
+        assert_eq!(app.engine.message(), None);
+        assert_eq!(app.engine.cursor(), &object("c1"));
+
+        // What the keys after the export left, as without the click: here `:w` reports.
+        let mut app = changed_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        app.feed(keys(":exp two.svg<CR>:w<CR>"));
+        app.click(Point::new(600.0, 300.0));
+        assert_eq!(shown(&app).left, "\"a.lawh\" written");
+        assert!(!app.engine.is_modified());
+    }
+
+    #[test]
+    fn a_close_shows_an_export_it_ran_failing_before_its_warning() {
+        let dir = TestDir::new("export-close-report");
+        dir.write("a.lawh", TWO_CIRCLES);
+        let failed = |app: &App| {
+            let status = shown(app);
+            status.error
+                && status
+                    .left
+                    .starts_with("cannot export \"no-such-dir/out.png\": ")
+        };
+        // A changed board: the export's error first, then the close warning, then the close.
+        let mut app = changed_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "no-such-dir/out.png");
+        assert!(!app.close());
+        assert!(failed(&app), "{:?}", shown(&app));
+        assert_eq!(app.message, None);
+        assert!(!app.close());
+        assert_eq!(shown(&app).left, CLOSE_MODIFIED);
+        assert!(app.close());
+
+        // No changes: the error, then the close.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "no-such-dir/out.png");
+        assert!(!app.close());
+        assert!(failed(&app), "{:?}", shown(&app));
+        assert!(app.close());
+
+        // An error the user saw already doesn't hold the close.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "no-such-dir/out.png");
+        app.run_export();
+        assert!(failed(&app));
+        assert!(app.close());
+
+        // A good export: the window closes at once without changes, and warns with them.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "good.png");
+        assert!(app.close());
+        let mut app = changed_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "good.png");
+        assert!(!app.close());
+        assert_eq!(shown(&app).left, CLOSE_MODIFIED);
+        assert!(app.close());
     }
 
     #[test]
