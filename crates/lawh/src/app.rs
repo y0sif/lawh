@@ -1,11 +1,14 @@
 //! The window: winit events in, frames drawn by lawh-render out through softbuffer.
 //!
 //! Keys go to the editing engine ([`Engine`]), which changes the board; the app does what the
-//! engine asks of it ([`Effect`]): it writes the board, quits, and times out keys waiting for a
-//! longer mapping. Before each key it tells the engine what part of the board the window shows,
-//! for jump labels. Each frame draws the board with the engine's cursor, selection, caret, jump
-//! labels, `:sym` rows and status line over it. The mouse pans (drag), zooms (wheel) and selects
-//! (click).
+//! engine asks of it ([`Effect`]): it writes the board, exports it, quits, and times out keys
+//! waiting for a longer mapping. Before each key it tells the engine what part of the board the
+//! window shows, for jump labels. Each frame draws the board with the engine's cursor,
+//! selection, caret, jump labels, `:sym` rows and status line over it. The mouse pans (drag),
+//! zooms (wheel) and selects (click).
+//!
+//! An export runs on this thread and may take seconds on a hostile board, so the window first
+//! shows that it starts (see [`Suspended`]).
 
 use std::collections::VecDeque;
 use std::io;
@@ -15,9 +18,9 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
-use lawh_core::{Cursor, Effect, Engine, Key, Mode, Point, Rect, to_lawh};
+use lawh_core::{Cursor, Effect, Engine, ExportOptions, Key, Mode, ObjectId, Point, Rect, to_lawh};
 use lawh_render::{
-    Caret, Overlay, OverlayCursor, Renderer, StatusLine, Viewport, status_bar_height_px,
+    Caret, FrameStats, Overlay, OverlayCursor, Renderer, StatusLine, Viewport, status_bar_height_px,
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -26,7 +29,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use crate::{files, keys, status, view};
+use crate::{export, files, keys, status, view};
 
 /// Window size on open, in logical pixels.
 const INITIAL_SIZE: LogicalSize<f64> = LogicalSize::new(1280.0, 800.0);
@@ -44,6 +47,18 @@ const HIT_TOLERANCE_PX: f64 = 4.0;
 /// request closes while this still shows: a key, a click on the board or a mapping timeout
 /// between drops it, and the next close warns again.
 const CLOSE_MODIFIED: &str = "unsaved changes: :w to save, :q! to discard, or close again";
+
+/// Longest an export waits for the frame that shows it starting (`exporting "out.png"` on the
+/// status line) before it runs anyway. The frame normally comes within a refresh (17 ms at
+/// 60 Hz), but a window that isn't shown may get none: on Wayland winit holds a redraw until the
+/// compositor's frame callback for the last frame, which a hidden surface never gets. Short, so
+/// that an export typed just before the window was minimized still runs at once.
+const EXPORT_FRAME_WAIT: Duration = Duration::from_millis(250);
+
+/// The status line while an export waits to run (see [`Suspended`]).
+fn exporting(path: &str) -> String {
+    format!("exporting \"{path}\"")
+}
 
 /// Sent to the event loop by the math engine's waker when a formula finishes compiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +101,8 @@ pub struct App {
     message: Option<String>,
     /// The engine asked to quit: keys still queued are dropped.
     quitting: bool,
+    /// An export the engine asked for, waiting for a frame to show that it starts.
+    suspended: Option<Suspended>,
     /// When lawh started, for the first-frame log.
     started: Instant,
     frames: u64,
@@ -108,6 +125,54 @@ struct LeftPress {
     at: Point,
     /// It moved past [`CLICK_SLOP_PX`]: it pans, and its release is no click.
     dragging: bool,
+}
+
+/// An export ([`Effect::Export`]) held back until a frame has shown that it starts.
+///
+/// An export runs on the event loop's thread, and a hostile board makes it take seconds (its
+/// caps are lawh-render's), so the window says so first. When the engine asks for one, the app
+/// stops doing the key's effects there: it keeps the export, the effects after it and the keys
+/// not typed into the engine yet, shows `exporting "out.png"` on the status line, and asks for a
+/// frame. Once that frame is presented, the event loop goes round once without waiting, so the
+/// frame leaves the app before the thread is busy (winit's X11 loop flushes the requests at the
+/// start of each turn, and softbuffer's Wayland present flushes them itself; macOS and Windows
+/// are untested), and the export runs at the start of the next turn ([`App::run_export`]), then
+/// the effects and keys that waited, in order. So everything happens in the order the engine
+/// asked for it, and the board doesn't change before the export draws it.
+///
+/// Meanwhile keys are queued behind the ones waiting; a click or a close request runs the
+/// export first (and what waited with it), then itself. If no frame comes within
+/// [`EXPORT_FRAME_WAIT`] (a hidden window), the export runs without one.
+#[derive(Debug)]
+struct Suspended {
+    job: ExportJob,
+    /// The effects of the export's key after the export, and that key's writes so far.
+    effects: Effects,
+    /// Keys not typed into the engine yet: those after the export's key in its batch, then the
+    /// keys typed since, in order.
+    keys: VecDeque<Key>,
+    /// A frame showing the export has been presented, or the window has no area to show one.
+    shown: bool,
+    /// When the export runs even without that frame.
+    deadline: Instant,
+}
+
+impl Suspended {
+    /// The export is to run at `now`: its frame has been presented, or waited for long enough.
+    fn due(&self, now: Instant) -> bool {
+        self.shown || now >= self.deadline
+    }
+}
+
+/// An export the engine asked for ([`Effect::Export`]), with the file it writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExportJob {
+    /// The file as the engine named it, for [`Engine::export_done`].
+    path: String,
+    /// The file it writes ([`files::write_target`]).
+    target: PathBuf,
+    options: ExportOptions,
+    selection: Option<Vec<ObjectId>>,
 }
 
 /// The one timer the engine may ask for ([`Effect::ArmTimer`]).
@@ -173,6 +238,7 @@ impl App {
             timer: Timer::default(),
             message,
             quitting: false,
+            suspended: None,
             started,
             frames: 0,
             error: None,
@@ -236,27 +302,48 @@ impl App {
         }
     }
 
-    /// Types `keys` into the engine, one by one, doing what each asks for ([`App::apply`]),
-    /// then [`App::after_input`]. Keys left once the engine quits are dropped.
+    /// Types `keys` into the engine ([`App::type_keys`]), or queues them behind an export
+    /// waiting to run ([`Suspended`]).
     fn feed(&mut self, keys: Vec<Key>) {
+        if let Some(suspended) = &mut self.suspended {
+            suspended.keys.extend(keys);
+            return;
+        }
         self.sync_view();
-        for key in keys {
-            let effects = self.engine.feed(key, &mut self.renderer);
-            self.apply(effects);
+        self.type_keys(keys.into());
+    }
+
+    /// Types `keys` into the engine, one by one, doing what each asks for ([`App::apply`]),
+    /// then [`App::after_input`]. Each key drops the armed timer first, as the engine asks
+    /// ([`Effect::ArmTimer`]). Keys left once the engine quits are dropped; keys left after a
+    /// key that asks for an export wait for it ([`Suspended`]).
+    fn type_keys(&mut self, mut keys: VecDeque<Key>) {
+        loop {
             if self.quitting {
                 return;
             }
+            if let Some(suspended) = &mut self.suspended {
+                suspended.keys.extend(keys);
+                break;
+            }
+            let Some(key) = keys.pop_front() else {
+                break;
+            };
+            self.timer.cancel();
+            let effects = self.engine.feed(key, &mut self.renderer);
+            self.apply(Effects::new(effects));
         }
         self.after_input();
     }
 
     /// The engine's timer went off: keys waiting for a longer mapping run now. As a key does, it
-    /// drops the app's message, a close warning too.
+    /// drops the app's message, a close warning too. (No timer is armed while an export waits:
+    /// the timer its key asked for waits with it.)
     fn timeout(&mut self) {
         self.message = None;
         self.sync_view();
         let effects = self.engine.timeout(&mut self.renderer);
-        self.apply(effects);
+        self.apply(Effects::new(effects));
         if !self.quitting {
             self.after_input();
         }
@@ -278,28 +365,89 @@ impl App {
         self.engine.set_view(area);
     }
 
-    /// Does what the engine asked for: the writes (see [`do_writes`]), then quitting
+    /// Does what the engine asked for, in order ([`Effects::run`]): the writes, then quitting
     /// ([`App::quitting`], after which the caller leaves the event loop) or arming the timer.
-    fn apply(&mut self, effects: Vec<Effect>) {
+    /// An export stops it there: the export and the effects after it wait for a frame that
+    /// shows it ([`Suspended`]).
+    fn apply(&mut self, mut effects: Effects) {
         let opened = self
             .file
             .as_ref()
             .map(|(name, real)| (name.as_str(), real.as_path()));
         let launch_dir = self.launch_dir.as_deref();
         let home = self.home.as_deref();
-        let after = do_writes(
+        let job = effects.run(
             &mut self.engine,
-            effects,
             |path| files::write_target(path, opened, launch_dir, home),
             write_board,
             files::same_file,
         );
-        if after.quit {
+        if let Some(job) = job {
+            tracing::info!(path = %job.target.display(), "export waits for its frame");
+            let now = Instant::now();
+            self.suspended = Some(Suspended {
+                job,
+                effects,
+                keys: VecDeque::new(),
+                shown: false,
+                deadline: now.checked_add(EXPORT_FRAME_WAIT).unwrap_or(now),
+            });
+            return;
+        }
+        if effects.after.quit {
             tracing::info!("quitting");
             self.quitting = true;
             self.timer.cancel();
-        } else if let Some(ms) = after.timer_ms {
+        } else if let Some(ms) = effects.after.timer_ms {
             self.timer.arm(Instant::now(), ms);
+        }
+    }
+
+    /// Runs the export waiting for its frame ([`Suspended`]), if there is one: draws and
+    /// writes it with the window's renderer ([`export::export_to`]), reports it to the engine
+    /// ([`Engine::export_done`]), then does the effects that came after it and types the keys
+    /// that waited, as if it had run when the engine asked for it. The caller leaves the event
+    /// loop if that quits.
+    fn run_export(&mut self) {
+        let Some(Suspended {
+            job, effects, keys, ..
+        }) = self.suspended.take()
+        else {
+            return;
+        };
+        let result = export::export_to(
+            &mut self.renderer,
+            self.engine.board(),
+            job.selection.as_deref(),
+            job.options,
+            &job.target,
+        );
+        if let Err(err) = &result {
+            tracing::warn!(path = %job.target.display(), %err, "could not export");
+        }
+        self.engine.export_done(&job.path, result);
+        self.apply(effects);
+        self.sync_view();
+        self.type_keys(keys);
+    }
+
+    /// A frame was presented, or the window has nothing to present one on: an export waiting
+    /// for its frame may run.
+    fn frame_shown(&mut self) {
+        if let Some(suspended) = &mut self.suspended {
+            suspended.shown = true;
+        }
+    }
+
+    /// How the event loop waits: not at all once an export's frame is presented (the export
+    /// runs at the start of the next turn, [`ApplicationHandler::new_events`]), until
+    /// [`EXPORT_FRAME_WAIT`] is up while it waits for that frame, else for the engine's timer
+    /// or the next event. No timer is armed while an export waits.
+    fn control_flow(&self) -> ControlFlow {
+        match &self.suspended {
+            Some(suspended) if suspended.shown => ControlFlow::Poll,
+            Some(suspended) => ControlFlow::WaitUntil(suspended.deadline),
+            None => self.timer.control_flow(),
         }
     }
 
@@ -327,6 +475,12 @@ impl App {
     /// The window's close button, the system's close shortcut, or Cmd+Q on macOS
     /// ([`keys::is_close_request`]).
     fn close_requested(&mut self, event_loop: &ActiveEventLoop) {
+        // An export waiting for its frame was asked for before the close: it runs first.
+        self.run_export();
+        if self.quitting {
+            event_loop.exit();
+            return;
+        }
         if self.close_or_warn() {
             event_loop.exit();
         } else {
@@ -402,8 +556,10 @@ impl App {
     }
 
     /// A left click at `at` (physical pixels): the engine's cursor goes to the object there, or
-    /// to the grid point nearest it. A click on the status bar does nothing.
+    /// to the grid point nearest it. A click on the status bar does nothing. An export waiting
+    /// for its frame runs first, and the keys that waited with it.
     fn click(&mut self, at: Point) {
+        self.run_export();
         if self.quitting {
             return;
         }
@@ -439,9 +595,11 @@ impl App {
     }
 
     /// Draws the board and the overlay and presents them. Does nothing while the window has no
-    /// area.
+    /// area. Then an export waiting for its frame may run ([`Suspended`]): this frame shows it,
+    /// or nothing can.
     fn redraw(&mut self) -> anyhow::Result<()> {
         let Some(gfx) = self.gfx.as_mut() else {
+            self.frame_shown();
             return Ok(());
         };
         let size = gfx.window.inner_size();
@@ -451,6 +609,7 @@ impl App {
             NonZeroU32::new(u32::from(width)),
             NonZeroU32::new(u32::from(height)),
         ) else {
+            self.frame_shown();
             return Ok(());
         };
         if gfx.surface_size != Some((surface_w, surface_h)) {
@@ -475,7 +634,11 @@ impl App {
         };
 
         let render_start = Instant::now();
-        let status = status::status(&self.engine, self.message.as_deref());
+        let status = status_line(
+            &self.engine,
+            self.message.as_deref(),
+            self.suspended.as_ref(),
+        );
         let visual = self.engine.visual_rect(&mut self.renderer);
         let text_cursor = self.engine.text_cursor();
         let overlay = Overlay {
@@ -507,10 +670,34 @@ impl App {
             .present()
             .map_err(|err| anyhow!("could not present a frame: {err}"))?;
         let frame_time = render_start.elapsed();
-
+        self.frame_shown();
         self.frames += 1;
         // Objects over the renderer's work budget are drawn as outlines; it logs how many.
         let drawn = self.renderer.last_frame();
+        self.log_frame(
+            &drawn,
+            render_time,
+            frame_time,
+            (width, height, scale_factor),
+        );
+        // Text the frame couldn't afford to lay out is drawn by the next one. Math still
+        // compiling asks for a frame itself, through the engine's waker.
+        if drawn.incomplete() {
+            self.request_redraw();
+        }
+        Ok(())
+    }
+
+    /// Logs a frame just presented, of the window's size in physical pixels at its scale
+    /// factor: the first at info level, with the time since lawh started, the others at debug
+    /// level.
+    fn log_frame(
+        &self,
+        drawn: &FrameStats,
+        render_time: Duration,
+        frame_time: Duration,
+        (width, height, scale_factor): (u16, u16, f64),
+    ) {
         if self.frames == 1 {
             tracing::info!(
                 since_start_ms = ms(self.started.elapsed()),
@@ -540,12 +727,6 @@ impl App {
                 "frame"
             );
         }
-        // Text the frame couldn't afford to lay out is drawn by the next one. Math still
-        // compiling asks for a frame itself, through the engine's waker.
-        if drawn.incomplete() {
-            gfx.window.request_redraw();
-        }
-        Ok(())
     }
 }
 
@@ -574,11 +755,20 @@ impl Gfx {
 
 impl ApplicationHandler<MathReady> for App {
     fn new_events(&mut self, event_loop: &ActiveEventLoop, _cause: StartCause) {
-        if self.timer.fire(Instant::now()) {
+        let now = Instant::now();
+        // The start of the turn after an export's frame was presented (see `Suspended`).
+        if self
+            .suspended
+            .as_ref()
+            .is_some_and(|suspended| suspended.due(now))
+        {
+            self.run_export();
+        }
+        if !self.quitting && self.suspended.is_none() && self.timer.fire(now) {
             self.timeout();
-            if self.quitting {
-                event_loop.exit();
-            }
+        }
+        if self.quitting {
+            event_loop.exit();
         }
     }
 
@@ -634,7 +824,13 @@ impl ApplicationHandler<MathReady> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(Point::new(position.x, position.y));
             }
-            WindowEvent::MouseInput { state, button, .. } => self.mouse_input(state, button),
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.mouse_input(state, button);
+                // A click runs an export waiting for its frame first, which may quit.
+                if self.quitting {
+                    event_loop.exit();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 self.zoom(view::wheel_zoom_factor(delta, self.scale_factor()));
             }
@@ -649,8 +845,23 @@ impl ApplicationHandler<MathReady> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(self.timer.control_flow());
+        event_loop.set_control_flow(self.control_flow());
     }
+}
+
+/// The status line as the window shows it: [`status::status`] of the engine and the app's
+/// `message`, or `exporting "out.png"` while an export waits for its frame (`suspended`).
+fn status_line(
+    engine: &Engine,
+    message: Option<&str>,
+    suspended: Option<&Suspended>,
+) -> status::Status {
+    let mut status = status::status(engine, message);
+    if let Some(suspended) = suspended {
+        status.left = exporting(&suspended.job.path);
+        status.error = false;
+    }
+    status
 }
 
 /// What the view keeps in sight after a key: the caret in a text block, else the current
@@ -712,7 +923,7 @@ fn rgba_to_0rgb(rgba: &[u8], out: &mut [u32]) {
     }
 }
 
-/// What is left of a batch of effects once its writes are done.
+/// What a batch of effects asks for besides writes and exports, once they are done.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct AfterWrites {
     /// The engine allows quitting ([`Effect::Quit`]).
@@ -721,52 +932,93 @@ struct AfterWrites {
     timer_ms: Option<u64>,
 }
 
-/// Does the writes `effects` ask for, those of one key or timeout, reporting each to `engine`
-/// in order with [`Engine::write_done`] (which may add [`Effect::Quit`] after them), and returns
-/// what else the effects ask for. `target` gives the file a write's path names; `write` writes
-/// it. The writes go through one [`files::WriteBatch`]: the board is turned into text once and
-/// each file is written once, but every write is reported, so the engine's writes waiting for
-/// their reports all get one. Stops at [`Effect::Quit`].
-///
-/// A good write is reported as one to the board's own file when `same_file` finds the file it
-/// wrote is the one `:w` alone writes (the target of the engine's file name), however the path
-/// was typed (`~/a.lawh`, an absolute path, a link): the engine then marks the board saved.
-/// Asked after the write, so it sees the files as the write left them. Not for a failed write,
-/// nor while the board has no file name yet (the write that names it is the board's own).
-fn do_writes(
-    engine: &mut Engine,
-    effects: Vec<Effect>,
-    target: impl Fn(&str) -> PathBuf,
-    mut write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
-    same_file: impl Fn(&Path, &Path) -> bool,
-) -> AfterWrites {
-    let mut batch = files::WriteBatch::default();
-    let mut after = AfterWrites::default();
-    let mut queue = VecDeque::from(effects);
-    while let Some(effect) = queue.pop_front() {
-        match effect {
-            Effect::Write { path, .. } => {
-                let board = engine.board();
-                let written = target(&path);
-                let result = batch.write(written.clone(), || to_lawh(board), &mut write);
-                let own = result.is_ok()
-                    && engine
-                        .file_name()
-                        .is_some_and(|name| same_file(&written, &target(name)));
-                queue.extend(engine.write_done(&path, result, own));
-            }
-            Effect::Export { path, .. } => {
-                // Lane L6 runs exports; until then each one is reported as failed.
-                engine.export_done(&path, Err("export is not wired up yet".to_owned()));
-            }
-            Effect::Quit => {
-                after.quit = true;
-                break;
-            }
-            Effect::ArmTimer { ms } => after.timer_ms = Some(ms),
+/// The effects of one key or timeout, done in order by [`Effects::run`]: those not done yet,
+/// the batch's writes so far, and what else they asked for.
+#[derive(Debug, Default)]
+struct Effects {
+    queue: VecDeque<Effect>,
+    /// The board is turned into text once and each file written once for every write of the
+    /// batch ([`files::WriteBatch`]), an export between them or not.
+    writes: files::WriteBatch,
+    /// Filled in as the effects are done; complete once [`Effects::run`] returns `None`.
+    after: AfterWrites,
+}
+
+impl Effects {
+    fn new(effects: Vec<Effect>) -> Self {
+        Self {
+            queue: effects.into(),
+            ..Self::default()
         }
     }
-    after
+
+    /// Does the effects in order, up to the next export, which it returns (the effects after
+    /// it stay queued for the next run), or to the end or [`Effect::Quit`]: `None`, and
+    /// [`Effects::after`] says what else they asked for.
+    ///
+    /// Writes are reported to `engine` in order with [`Engine::write_done`] (which may add
+    /// [`Effect::Quit`] after them). `target` gives the file a write's or an export's path names;
+    /// `write` writes the board. Every write is reported, a file written once already in the
+    /// batch too, so the engine's writes waiting for their reports all get one.
+    ///
+    /// A good write is reported as one to the board's own file when `same_file` finds the file it
+    /// wrote is the one `:w` alone writes (the target of the engine's file name), however the path
+    /// was typed (`~/a.lawh`, an absolute path, a link): the engine then marks the board saved.
+    /// Asked after the write, so it sees the files as the write left them. Not for a failed write,
+    /// nor while the board has no file name yet (the write that names it is the board's own).
+    ///
+    /// An export onto the board's own file, by the same comparison or the same path (a board
+    /// opened as `notes.svg` and not written yet), is refused at once: reported with
+    /// [`export::OWN_FILE`], nothing written, and the effects go on.
+    fn run(
+        &mut self,
+        engine: &mut Engine,
+        target: impl Fn(&str) -> PathBuf,
+        mut write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+        same_file: impl Fn(&Path, &Path) -> bool,
+    ) -> Option<ExportJob> {
+        while let Some(effect) = self.queue.pop_front() {
+            match effect {
+                Effect::Write { path, .. } => {
+                    let board = engine.board();
+                    let written = target(&path);
+                    let result = self
+                        .writes
+                        .write(written.clone(), || to_lawh(board), &mut write);
+                    let own = result.is_ok()
+                        && engine
+                            .file_name()
+                            .is_some_and(|name| same_file(&written, &target(name)));
+                    self.queue.extend(engine.write_done(&path, result, own));
+                }
+                Effect::Export {
+                    path,
+                    options,
+                    selection,
+                } => {
+                    let written = target(&path);
+                    let own = engine.file_name().map(&target);
+                    if own.is_some_and(|own| written == own || same_file(&written, &own)) {
+                        tracing::info!(path = %written.display(), "an export onto the board's own file refused");
+                        engine.export_done(&path, Err(export::OWN_FILE.to_owned()));
+                        continue;
+                    }
+                    return Some(ExportJob {
+                        path,
+                        target: written,
+                        options,
+                        selection,
+                    });
+                }
+                Effect::Quit => {
+                    self.after.quit = true;
+                    self.queue.clear();
+                }
+                Effect::ArmTimer { ms } => self.after.timer_ms = Some(ms),
+            }
+        }
+        None
+    }
 }
 
 /// Writes the board's text, `contents`, to `target` for `:w`, logging how it went.
@@ -853,6 +1105,20 @@ mod tests {
     /// No two paths name one file: only the engine's own comparison of names applies.
     fn different(_: &Path, _: &Path) -> bool {
         false
+    }
+
+    /// Does `effects`, which hold no export, as the app does: what else they ask for.
+    fn do_writes(
+        engine: &mut Engine,
+        effects: Vec<Effect>,
+        target: impl Fn(&str) -> PathBuf,
+        write: impl FnMut(&Path, &[u8]) -> io::Result<()>,
+        same_file: impl Fn(&Path, &Path) -> bool,
+    ) -> AfterWrites {
+        let mut effects = Effects::new(effects);
+        assert_eq!(effects.run(engine, target, write, same_file), None);
+        assert!(effects.queue.is_empty());
+        effects.after
     }
 
     /// Types `script` (Vim notation): the effects its keys ask for.
@@ -1037,7 +1303,7 @@ mod tests {
         click(&mut engine, &mut renderer, Point::new(480.0, 303.0));
         assert_eq!(
             engine.cursor(),
-            &Cursor::Object(lawh_core::ObjectId::new("l1").unwrap())
+            &Cursor::Object(ObjectId::new("l1").unwrap())
         );
         // 5 px below: past the tolerance, so the nearest grid point.
         click(&mut engine, &mut renderer, Point::new(480.0, 305.0));
@@ -1151,7 +1417,7 @@ mod tests {
         let mut app = app_for(board);
         assert_eq!(
             app.engine.cursor(),
-            &Cursor::Object(lawh_core::ObjectId::new("t1").unwrap())
+            &Cursor::Object(ObjectId::new("t1").unwrap())
         );
         for (width, height, scale) in [(1280, 800, 1.0), (800, 1200, 2.0), (2560, 600, 1.5)] {
             let bar = status_bar_height_px(scale);
@@ -1201,7 +1467,7 @@ mod tests {
         let mut app = app_for(from_lawh(SPREAD).unwrap());
         assert_eq!(
             app.engine.cursor(),
-            &Cursor::Object(lawh_core::ObjectId::new("a").unwrap())
+            &Cursor::Object(ObjectId::new("a").unwrap())
         );
         // Before the first frame there is no view: that frame will show the whole board.
         app.feed(keys("s"));
@@ -1237,7 +1503,7 @@ mod tests {
         assert!(app.engine.jump_labels().is_none());
         assert_eq!(
             app.engine.cursor(),
-            &Cursor::Object(lawh_core::ObjectId::new("b").unwrap())
+            &Cursor::Object(ObjectId::new("b").unwrap())
         );
     }
 
@@ -1255,11 +1521,12 @@ mod tests {
         assert_eq!(labelled(&app), ["e"]);
     }
 
-    /// An app for the board in `dir`'s file `name`, opened as `name` from `dir`, which is also
-    /// the home directory, with a change not written yet.
-    fn changed_app_in(dir: &Path, name: &str) -> App {
-        let src = fs::read_to_string(dir.join(name)).unwrap();
-        let engine = Engine::new(from_lawh(&src).unwrap()).with_file_name(Some(name.to_owned()));
+    /// An app for the board in `dir`'s file `name` (an empty board if there is none), opened as
+    /// `name` from `dir`, which is also the home directory.
+    fn opened_app_in(dir: &Path, name: &str) -> App {
+        let board = fs::read_to_string(dir.join(name))
+            .map_or_else(|_| lawh_core::Board::new(), |src| from_lawh(&src).unwrap());
+        let engine = Engine::new(board).with_file_name(Some(name.to_owned()));
         let mut app = App::new(
             engine,
             Some(PathBuf::from(name)),
@@ -1269,6 +1536,12 @@ mod tests {
             None,
         );
         app.home = Some(dir.to_owned());
+        app
+    }
+
+    /// [`opened_app_in`], with a change not written yet.
+    fn changed_app_in(dir: &Path, name: &str) -> App {
+        let mut app = opened_app_in(dir, name);
         app.feed(keys(":ci 2<CR>"));
         assert!(app.engine.is_modified());
         app
@@ -1336,6 +1609,249 @@ mod tests {
         write_as(&mut app, "hard.lawh");
         assert!(app.engine.is_modified());
         assert_eq!(fs::read_to_string(&x).unwrap(), old);
+    }
+
+    const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+    /// Types `:exp path` and Enter, the path's characters as typed.
+    fn export_as(app: &mut App, path: &str) {
+        let mut keys: Vec<Key> = ":exp ".chars().chain(path.chars()).map(Key::char).collect();
+        keys.push(Key::named(KeyCode::Enter));
+        app.feed(keys);
+    }
+
+    /// The status line the next frame shows.
+    fn shown(app: &App) -> status::Status {
+        status_line(&app.engine, app.message.as_deref(), app.suspended.as_ref())
+    }
+
+    /// The export waiting for its frame.
+    fn waiting(app: &App) -> &Suspended {
+        app.suspended
+            .as_ref()
+            .expect("an export waits for its frame")
+    }
+
+    #[test]
+    fn an_export_shows_that_it_starts_then_writes_and_reports() {
+        let dir = TestDir::new("export-frame");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "out.png");
+        // The frame comes first: nothing is written yet, and the status line says why.
+        let out = dir.path("out.png");
+        assert!(!out.exists());
+        let status = shown(&app);
+        assert_eq!(status.left, "exporting \"out.png\"");
+        assert!(!status.error);
+        let suspended = waiting(&app);
+        assert_eq!(suspended.job.target, out);
+        assert_eq!(suspended.job.selection, None);
+        assert_eq!(
+            app.control_flow(),
+            ControlFlow::WaitUntil(suspended.deadline)
+        );
+        // Once a frame is presented, the event loop doesn't wait: the next turn runs it.
+        app.frame_shown();
+        assert_eq!(app.control_flow(), ControlFlow::Poll);
+        app.run_export();
+        assert!(app.suspended.is_none());
+        assert!(fs::read(&out).unwrap().starts_with(PNG_SIGNATURE));
+        let status = shown(&app);
+        assert_eq!(status.left, "\"out.png\" exported");
+        assert!(!status.error);
+        assert_eq!(app.control_flow(), ControlFlow::Wait);
+        // The board is neither written nor renamed.
+        assert_eq!(fs::read_to_string(dir.path("a.lawh")).unwrap(), ONE_CIRCLE);
+        assert_eq!(app.engine.file_name(), Some("a.lawh"));
+        assert!(!app.engine.is_modified());
+    }
+
+    #[test]
+    fn an_export_waits_for_its_frame_only_so_long() {
+        let dir = TestDir::new("export-deadline");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "out.svg");
+        let deadline = waiting(&app).deadline;
+        let typed = Instant::now();
+        assert!(deadline > typed && deadline <= typed + EXPORT_FRAME_WAIT);
+        let suspended = waiting(&app);
+        let just_before = deadline.checked_sub(Duration::from_millis(1)).unwrap();
+        assert!(!suspended.due(just_before));
+        assert!(suspended.due(deadline));
+        // A window with nothing to draw on (none yet, here) doesn't hold it up.
+        app.redraw().unwrap();
+        assert!(waiting(&app).shown);
+        assert!(waiting(&app).due(typed));
+    }
+
+    #[test]
+    fn exports_find_their_file_as_writes_do() {
+        let dir = TestDir::new("export-paths");
+        dir.write("a.lawh", ONE_CIRCLE);
+        fs::create_dir(dir.path("sub")).unwrap();
+        let absolute = dir.path("abs.PDF");
+        let absolute_name = absolute.to_str().unwrap().to_owned();
+        let cases = [
+            ("out.svg", dir.path("out.svg"), &b"<?xml"[..]),
+            ("~/sub/out.pdf", dir.path("sub").join("out.pdf"), b"%PDF-"),
+            ("sub/../up.png", dir.path("sub/../up.png"), PNG_SIGNATURE),
+            (absolute_name.as_str(), absolute.clone(), b"%PDF-"),
+        ];
+        for (typed, file, signature) in cases {
+            let mut app = opened_app_in(dir.root(), "a.lawh");
+            export_as(&mut app, typed);
+            assert_eq!(waiting(&app).job.target, file, "{typed}");
+            app.run_export();
+            assert!(fs::read(&file).unwrap().starts_with(signature), "{typed}");
+            assert_eq!(
+                app.engine.message().unwrap().text,
+                format!("\"{typed}\" exported")
+            );
+        }
+        // Again: the file is replaced.
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        fs::write(dir.path("out.svg"), "old").unwrap();
+        export_as(&mut app, "out.svg");
+        app.run_export();
+        assert!(fs::read(dir.path("out.svg")).unwrap().starts_with(b"<?xml"));
+    }
+
+    #[test]
+    fn a_visual_selection_is_what_is_exported() {
+        let dir = TestDir::new("export-visual");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.feed(keys("v:exp sel.svg<CR>"));
+        assert_eq!(
+            waiting(&app).job.selection,
+            Some(vec![ObjectId::new("c1").unwrap()])
+        );
+        app.run_export();
+        assert!(dir.path("sel.svg").exists());
+    }
+
+    #[test]
+    fn an_export_onto_the_boards_own_file_is_refused() {
+        let dir = TestDir::new("export-own-file");
+        let own = dir.write("x.svg", ONE_CIRCLE);
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("x.svg", dir.path("link.png")).unwrap();
+        let mut typed = vec!["x.svg", "./x.svg", "~/x.svg", "sub/../x.svg"];
+        let absolute = own.to_str().unwrap().to_owned();
+        typed.push(&absolute);
+        if cfg!(unix) {
+            typed.push("link.png");
+        }
+        fs::create_dir(dir.path("sub")).unwrap();
+        for path in typed {
+            let mut app = opened_app_in(dir.root(), "x.svg");
+            export_as(&mut app, path);
+            assert!(app.suspended.is_none(), "{path}: refused at once");
+            let status = shown(&app);
+            assert!(status.error, "{path}");
+            assert_eq!(
+                status.left,
+                format!("cannot export \"{path}\": that is the board's own file")
+            );
+            assert_eq!(fs::read_to_string(&own).unwrap(), ONE_CIRCLE, "{path}");
+        }
+        // A board whose file isn't written yet: the same name is the same file.
+        let mut app = opened_app_in(dir.root(), "new.pdf");
+        export_as(&mut app, "new.pdf");
+        assert!(app.suspended.is_none());
+        assert!(!dir.path("new.pdf").exists());
+        // Another file is no copy of the board: it is exported.
+        let mut app = opened_app_in(dir.root(), "x.svg");
+        export_as(&mut app, "y.svg");
+        app.run_export();
+        assert!(dir.path("y.svg").exists());
+        assert_eq!(fs::read_to_string(&own).unwrap(), ONE_CIRCLE);
+    }
+
+    #[test]
+    fn effects_and_keys_after_an_export_wait_for_it_in_order() {
+        let dir = TestDir::new("export-order");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        assert_eq!(
+            app.engine
+                .source("nnoremap Q :w b.lawh<CR>:exp out.svg<CR>:w c.lawh<CR>\n"),
+            []
+        );
+        let before = to_lawh(app.engine.board());
+        // `x` after `Q` in one batch of keys, `j` typed while the export waits.
+        app.feed(keys("Qx"));
+        app.feed(keys("j"));
+        assert_eq!(fs::read_to_string(dir.path("b.lawh")).unwrap(), before);
+        assert!(!dir.path("out.svg").exists());
+        assert!(!dir.path("c.lawh").exists());
+        assert_eq!(waiting(&app).keys, keys("xj"));
+        assert_eq!(app.engine.board().len(), 1, "`x` waits for the export");
+
+        app.run_export();
+        // The export drew the board before `x` deleted its circle, and the write after it
+        // wrote that board too.
+        assert!(fs::read(dir.path("out.svg")).unwrap().starts_with(b"<?xml"));
+        assert_eq!(fs::read_to_string(dir.path("c.lawh")).unwrap(), before);
+        assert!(app.engine.board().is_empty());
+        assert!(app.suspended.is_none());
+    }
+
+    #[test]
+    fn a_quit_after_an_export_waits_for_it() {
+        let dir = TestDir::new("export-quit");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        assert_eq!(
+            app.engine.source("nnoremap Q :exp out.pdf<CR>:wq<CR>\n"),
+            []
+        );
+        app.feed(keys("Q"));
+        assert!(!app.quitting);
+        assert!(app.suspended.is_some());
+        app.run_export();
+        assert!(fs::read(dir.path("out.pdf")).unwrap().starts_with(b"%PDF-"));
+        assert!(app.quitting);
+    }
+
+    #[test]
+    fn a_failed_export_says_why_and_writes_nothing() {
+        let dir = TestDir::new("export-failed");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        export_as(&mut app, "no-such-dir/out.png");
+        app.run_export();
+        let status = shown(&app);
+        assert!(status.error);
+        assert!(
+            status
+                .left
+                .starts_with("cannot export \"no-such-dir/out.png\": "),
+            "{}",
+            status.left
+        );
+        assert!(!dir.path("no-such-dir").exists());
+    }
+
+    #[test]
+    fn a_click_runs_a_waiting_export_and_its_keys_first() {
+        let dir = TestDir::new("export-click");
+        dir.write("a.lawh", ONE_CIRCLE);
+        let mut app = opened_app_in(dir.root(), "a.lawh");
+        app.viewport = Some(origin_view());
+        export_as(&mut app, "out.png");
+        app.feed(keys("x"));
+        // On the circle's centre: the circle is gone by then, so a grid point.
+        app.click(Point::new(400.0, 300.0));
+        assert!(
+            fs::read(dir.path("out.png"))
+                .unwrap()
+                .starts_with(PNG_SIGNATURE)
+        );
+        assert!(app.engine.board().is_empty());
+        assert_eq!(app.engine.cursor(), &Cursor::Grid(Point::ZERO));
     }
 
     /// The copy runs in the app crate, outside lawh-render's bench; see the dev profile in the

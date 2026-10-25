@@ -1,8 +1,10 @@
 //! The lawh app: opens a `.lawh` board in a window to edit with Vim keys, with mouse pan, zoom
-//! and select. With `--math-worker` it runs as the math worker instead.
+//! and select. `lawh export` draws a board into an SVG, PNG or PDF file without a window. With
+//! `--math-worker` it runs as the math worker instead.
 
 mod app;
 mod cli;
+mod export;
 mod files;
 mod keys;
 mod rc;
@@ -60,6 +62,18 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        Command::Export(args) => match export::run(&args) {
+            // Nothing on stdout: a note (failed formulas) goes to stderr, and the exit is 0.
+            Ok(note) => {
+                if let Some(note) = note {
+                    cli::print_note(&note);
+                }
+            }
+            Err(err) => {
+                cli::print_error(&err);
+                return ExitCode::FAILURE;
+            }
+        },
     }
     ExitCode::SUCCESS
 }
@@ -151,9 +165,10 @@ fn drawable_symbols() -> Arc<[Symbol]> {
         .collect()
 }
 
-/// The math engine for a board from a file: formulas are untrusted, so they compile in a worker
-/// process, this executable started with [`cli::MATH_WORKER_FLAG`], which has a memory cap and is
-/// killed when a formula takes too long. The worker starts with the first formula.
+/// The math engine for a board from a file, in the window and in `lawh export`: formulas are
+/// untrusted, so they compile in a worker process, this executable started with
+/// [`cli::MATH_WORKER_FLAG`], which has a memory cap and is killed when a formula takes too long.
+/// The worker starts with the first formula.
 fn math_engine() -> anyhow::Result<MathEngine> {
     let exe = std::env::current_exe()
         .context("could not find the lawh executable, which also compiles math")?;

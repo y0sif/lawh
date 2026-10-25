@@ -59,6 +59,14 @@ pub fn plan_open(file: Option<&Path>) -> anyhow::Result<Opened> {
     })
 }
 
+/// The board in the file `path`, for `lawh export`: unlike [`plan_open`], a missing file is an
+/// error, never a new board. Errors read as `plan_open`'s: `<path>: <io error>` or
+/// `<path>:<line>:<col>: <message>`, the file's size checked first.
+pub fn read_existing(path: &Path) -> anyhow::Result<Board> {
+    let file = File::open(path).with_context(|| path.display().to_string())?;
+    read_board(path, file)
+}
+
 /// Reads and parses the board in `file`, opened from `path`.
 ///
 /// The file's size is checked before anything is read, so a huge file is refused without being
@@ -392,6 +400,45 @@ mod tests {
             err.starts_with(&format!("{}: ", dir.root().display())),
             "{err}"
         );
+    }
+
+    #[test]
+    fn an_export_reads_only_a_board_that_is_there() {
+        let dir = TestDir::new("read-existing");
+        let path = dir.write("a.lawh", "lawh version=1\ncircle id=c1 x=0 y=0 r=3\n");
+        assert_eq!(read_existing(&path).unwrap().len(), 1);
+
+        let missing = dir.path("missing.lawh");
+        let err = read_existing(&missing).unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<io::Error>().map(io::Error::kind),
+            Some(io::ErrorKind::NotFound)
+        );
+        let err = format!("{err:#}");
+        assert!(
+            err.starts_with(&format!("{}: ", missing.display())),
+            "{err}"
+        );
+        assert!(!missing.exists(), "reading must not create the file");
+
+        // The same errors as opening it: a directory, a bad board, a file over the size cap.
+        let err = format!("{:#}", read_existing(dir.root()).unwrap_err());
+        assert!(
+            err.starts_with(&format!("{}: ", dir.root().display())),
+            "{err}"
+        );
+        let bad = dir.write("bad.lawh", "lawh version=1\n\nstar id=s1 x=0 y=0\n");
+        assert_eq!(
+            format!("{:#}", read_existing(&bad).unwrap_err()),
+            format!("{:#}", plan_open(Some(&bad)).unwrap_err())
+        );
+        let huge = dir.path("huge.lawh");
+        File::create(&huge)
+            .unwrap()
+            .set_len(u64::try_from(MAX_FILE_BYTES).unwrap() + 1)
+            .unwrap();
+        let err = format!("{:#}", read_existing(&huge).unwrap_err());
+        assert!(err.contains("lawh reads files of up to"), "{err}");
     }
 
     #[test]
