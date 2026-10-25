@@ -6,21 +6,23 @@
 //! placeholder: it waits for every formula first, and a formula that fails is drawn as its source
 //! in the error colour, as on screen, and counted ([`ExportReport::failed_formulas`]).
 //!
-//! Formats: PNG (`png.rs`, drawn with `vello_cpu`) and SVG (`svg.rs`, written by hand: paths
-//! and glyph outlines only, no board text in the file). PDF is not written yet.
+//! Formats: PNG (`png.rs`, drawn with `vello_cpu`), SVG (`svg.rs`, written by hand: paths and
+//! glyph outlines only, no board text in the file) and PDF (`pdf.rs`, written with krilla: one
+//! page, board text as real text in embedded font subsets, math as paths).
 //!
 //! An export is bounded however hostile the board: the formulas' compiles by
 //! [`EXPORT_MATH_WAIT`] together, the drawing (or writing) by the export budget
 //! (`EXPORT_BUDGET_NS` of estimated work, as the window's frames are), a PNG's size by
-//! [`MAX_EXPORT_PIXELS`] and [`MAX_EXPORT_SIDE_PX`] (it shrinks to fit), and the file by
-//! [`MAX_EXPORT_BYTES`]. Past a cap that stops it, it returns an [`ExportError`] and no bytes.
-//! Nothing is written to disk here.
+//! [`MAX_EXPORT_PIXELS`] and [`MAX_EXPORT_SIDE_PX`] and a PDF page's by [`MAX_PDF_PAGE_PT`] (both
+//! shrink to fit), and the file by [`MAX_EXPORT_BYTES`]. Past a cap that stops it, it returns an
+//! [`ExportError`] and no bytes. Nothing is written to disk here.
 //!
 //! Memory: a first pass compiles each formula and keeps only its box, then objects are drawn one
 //! at a time, so an export holds one formula's layout at once, not every formula's (the math
 //! engine caches some, within its own limit). A PNG's image is moved into the encoder, never
 //! copied.
 
+mod pdf;
 mod png;
 mod svg;
 
@@ -67,8 +69,24 @@ pub const MAX_EXPORT_SIDE_PX: u32 = 16_384;
 /// R2), so only a hostile image gets near it. An SVG takes about 35 bytes a glyph drawn: a board
 /// at lawh-core's 40,000 characters of text is 1.2 MB, and only math near lawh-math's glyph
 /// caps reaches this (500 formulas of 22,500 glyphs stopped here after 110 ms, measured in
-/// release).
+/// release). krilla builds a PDF in memory, so a PDF counts the content it draws, uncompressed
+/// and estimated a little high, as it goes (44 to 63 bytes a math glyph, 8.5 a glyph of text),
+/// and its finished file once more, fonts included: the 40,000 characters take 0.35 MB of
+/// content and a 12 KB file, and the 500 formulas stopped here after 1.1 s with 154 MB of memory
+/// at the peak (measured in release).
 pub const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+
+/// Longest side a PDF export's page may have, in pt (200 inches); past it the scale shrinks to
+/// fit. PDF 1.x's implementation limit (ISO 32000-1, Annex C, which Acrobat keeps): Reader warns
+/// that a larger page is out of range, Ghostscript fails on a page of 1.2e8 pt, and PDF/A-2
+/// refuses one (veraPDF rule 6.1.13-11), though krilla writes any size (measured,
+/// `docs/handoff-m4-research.md`, R2). A board up to 480 units across (with the margin) keeps
+/// [`PDF_PT_PER_UNIT`].
+pub const MAX_PDF_PAGE_PT: f64 = 14_400.0;
+
+/// Points per grid unit of a PDF export: lawh at zoom 1 seen at 100 % in a viewer (40 pixels a
+/// unit at 0.75 pt a pixel, a 96 dpi screen), so text of size 1 is set at 15 pt.
+pub const PDF_PT_PER_UNIT: f64 = 30.0;
 
 /// Room around what an export frames, in grid units, on each side: a grid cell, so nothing
 /// touches the edge of the image.
@@ -107,15 +125,16 @@ pub enum ExportError {
     #[error("export stopped: math took over {} s to compile", EXPORT_MATH_WAIT.as_secs())]
     MathWait,
     /// The file came to more than [`MAX_EXPORT_BYTES`]; `bytes` is how many it had reached when
-    /// it stopped.
+    /// it stopped (for a PDF stopped while drawing, its content's estimate).
     #[error("export stopped: the file is over {} MiB", MAX_EXPORT_BYTES / (1024 * 1024))]
     TooLarge { bytes: usize },
     /// The PNG encoder failed, other than for the file's size.
     #[error("png encoding failed: {0}")]
     Png(String),
-    /// A format this renderer doesn't write yet.
-    #[error("{} export is not available yet", .0.extension())]
-    Unsupported(ExportFormat),
+    /// The PDF writer failed (krilla, or a glyph its font doesn't have), other than for the
+    /// file's size.
+    #[error("pdf writing failed: {0}")]
+    Pdf(String),
 }
 
 /// The caps an export stops or shrinks at, for tests that need them small. Each is at most its
@@ -134,6 +153,8 @@ pub struct ExportLimits {
     pub max_side_px: u32,
     /// [`MAX_EXPORT_BYTES`].
     pub max_bytes: usize,
+    /// [`MAX_PDF_PAGE_PT`].
+    pub max_page_pt: f64,
 }
 
 impl ExportLimits {
@@ -143,6 +164,7 @@ impl ExportLimits {
         max_pixels: MAX_EXPORT_PIXELS,
         max_side_px: MAX_EXPORT_SIDE_PX,
         max_bytes: MAX_EXPORT_BYTES,
+        max_page_pt: MAX_PDF_PAGE_PT,
     };
 
     /// Each limit, or its default where it is higher.
@@ -158,6 +180,11 @@ impl ExportLimits {
             max_pixels: self.max_pixels.min(default.max_pixels),
             max_side_px: self.max_side_px.min(default.max_side_px),
             max_bytes: self.max_bytes.min(default.max_bytes),
+            max_page_pt: if self.max_page_pt < default.max_page_pt {
+                self.max_page_pt
+            } else {
+                default.max_page_pt
+            },
         }
     }
 }
@@ -192,9 +219,6 @@ impl Renderer {
         limits: &ExportLimits,
     ) -> Result<Exported, ExportError> {
         let limits = limits.tightened();
-        if options.format == ExportFormat::Pdf {
-            return Err(ExportError::Unsupported(options.format));
-        }
         let mut budget = Budget::export_within(limits.budget_ns);
         let mut plan = self.plan_export(board, selection, &limits, &mut budget)?;
         let (bytes, shrunk) = match options.format {
@@ -203,7 +227,7 @@ impl Renderer {
                 svg::export(self, board, &mut plan, *options, &limits, budget)?,
                 None,
             ),
-            ExportFormat::Pdf => return Err(ExportError::Unsupported(options.format)),
+            ExportFormat::Pdf => pdf::export(self, board, &mut plan, *options, &limits, budget)?,
         };
         tracing::debug!(
             bytes = bytes.len(),

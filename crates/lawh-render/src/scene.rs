@@ -258,10 +258,6 @@ impl Glyphs<'_> {
     /// The glyphs of a text run as [`Self::glyphs`] gives them, each with the byte range of
     /// [`Self::text`] it shows: its cluster's, so every glyph of a cluster (a letter and its
     /// marks set as two glyphs) has the same range. Nothing for math.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for the PDF exporter's text, which comes next")
-    )]
     pub(crate) fn glyphs_with_text(&self) -> impl Iterator<Item = (Placed, Range<usize>)> + '_ {
         let run = match &self.run {
             Run::Text { glyphs, .. } => Some(glyphs),

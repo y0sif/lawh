@@ -1,5 +1,5 @@
 //! Rendering for lawh: draws a board to pixels for the window and exports it
-//! to PNG and SVG ([`Renderer::export`]; PDF comes next).
+//! to PNG, SVG and PDF ([`Renderer::export`]).
 //!
 //! [`Renderer`] draws a [`lawh_core::Board`] through a [`Viewport`] with
 //! `vello_cpu`, headless and on the CPU. Text is laid out by parley with the
@@ -14,8 +14,11 @@
 //! [`Renderer::render_png`] of a view) wait for every formula, so they are the
 //! same every time. An export frames the whole board (or a selection) at the
 //! window's zoom-1 sizes, within caps of its own ([`EXPORT_MATH_WAIT`],
-//! [`MAX_EXPORT_PIXELS`], [`MAX_EXPORT_BYTES`], ...). An SVG is only geometry:
-//! glyphs as outlines from the bundled fonts, no board text in the file.
+//! [`MAX_EXPORT_PIXELS`], [`MAX_PDF_PAGE_PT`], [`MAX_EXPORT_BYTES`], ...). An
+//! SVG is only geometry: glyphs as outlines from the bundled fonts, no board
+//! text in the file. A PDF is one page with board text as real text (the
+//! bundled fonts embedded as subsets, so it can be searched and copied) and
+//! math as paths.
 //!
 //! The window and every export draw from one draw list: each object's
 //! outlines, arrowheads, glyph runs and math paths, built by the same
@@ -62,6 +65,7 @@ pub use export::ExportLimits;
 pub use export::{
     EXPORT_ARROW_HEAD_UNITS, EXPORT_MARGIN_UNITS, EXPORT_MATH_WAIT, EXPORT_STROKE_UNITS,
     ExportError, Exported, MAX_EXPORT_BYTES, MAX_EXPORT_PIXELS, MAX_EXPORT_SIDE_PX,
+    MAX_PDF_PAGE_PT, PDF_PT_PER_UNIT,
 };
 pub use overlay::{Caret, Overlay, OverlayCursor, StatusLine, status_bar_height_px};
 pub use palette::Palette;

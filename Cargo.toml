@@ -51,6 +51,12 @@ png = "0.18.1"
 # neither is built twice; resvg without its default features draws no text and loads no fonts.
 resvg = { version = "=0.47.0", default-features = false }
 roxmltree = "=0.21.1"
+# PDF export: the library Typst's own PDF export uses. Without its default features (raster
+# images and simple text shaping), which lawh doesn't use: glyphs come shaped from parley.
+krilla = { version = "=0.8.2", default-features = false }
+# PDF export tests: reads exported PDFs back and renders them. Pinned to the hayro Typst already
+# compiles (through typst-svg), with the same features, so nothing new is built.
+hayro = { version = "=0.7.1", default-features = false }
 # No `system` feature: lawh never loads system fonts, and it would need fontconfig.
 parley = { version = "0.12.0", default-features = false, features = ["std", "bytemuck"] }
 bytemuck = "1.25.2"

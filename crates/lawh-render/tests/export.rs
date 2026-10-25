@@ -627,6 +627,7 @@ fn limits_above_the_defaults_change_nothing() {
         max_pixels: u64::MAX,
         max_side_px: u32::MAX,
         max_bytes: usize::MAX,
+        max_page_pt: f64::INFINITY,
     };
     let exported = export_with(&board, &loose).unwrap();
     assert_eq!(exported, export(&board));
@@ -634,6 +635,18 @@ fn limits_above_the_defaults_change_nothing() {
     let wide = common::board("lawh version=1\nline id=l1 x1=0 y1=0 x2=1000 y2=0\n");
     let image = decode(&export_with(&wide, &loose).unwrap().bytes);
     assert!(image.width <= MAX_EXPORT_SIDE_PX);
+    // And past the PDF page cap: 1,002 units at most 14,400 pt.
+    let pdf = ExportOptions {
+        format: ExportFormat::Pdf,
+        ..ExportOptions::default()
+    };
+    let mut renderer = Renderer::new_trusted();
+    let loosely = renderer
+        .export_with_limits(&wide, None, &pdf, &loose)
+        .unwrap();
+    assert_eq!(loosely, renderer.export(&wide, None, &pdf).unwrap());
+    let shrunk = loosely.report.shrunk.unwrap();
+    assert!(shrunk * 1_002.0 * lawh_render::PDF_PT_PER_UNIT <= lawh_render::MAX_PDF_PAGE_PT);
 }
 
 #[test]
@@ -669,29 +682,22 @@ fn an_export_leaves_the_window_as_it_was() {
 }
 
 #[test]
-fn pdf_is_not_written_yet() {
+fn every_format_is_written() {
     let board = common::area_board();
-    let options = ExportOptions {
-        format: ExportFormat::Pdf,
-        ..ExportOptions::default()
-    };
-    assert_eq!(
-        Renderer::new_trusted().export(&board, None, &options),
-        Err(ExportError::Unsupported(ExportFormat::Pdf))
-    );
-    assert_eq!(
-        ExportError::Unsupported(ExportFormat::Pdf).to_string(),
-        "pdf export is not available yet"
-    );
-    // SVG is.
-    let options = ExportOptions {
-        format: ExportFormat::Svg,
-        ..ExportOptions::default()
-    };
-    let svg = Renderer::new_trusted()
-        .export(&board, None, &options)
-        .unwrap();
-    assert!(svg.bytes.starts_with(b"<?xml"));
+    for (format, start) in [
+        (ExportFormat::Png, &b"\x89PNG"[..]),
+        (ExportFormat::Svg, b"<?xml"),
+        (ExportFormat::Pdf, b"%PDF-"),
+    ] {
+        let options = ExportOptions {
+            format,
+            ..ExportOptions::default()
+        };
+        let exported = Renderer::new_trusted()
+            .export(&board, None, &options)
+            .unwrap();
+        assert!(exported.bytes.starts_with(start), "{format:?}");
+    }
 }
 
 #[test]
@@ -702,7 +708,7 @@ fn error_messages_are_short_lowercase_phrases() {
         ExportError::MathWait,
         ExportError::TooLarge { bytes: 70_000_000 },
         ExportError::Png("bad".to_owned()),
-        ExportError::Unsupported(ExportFormat::Pdf),
+        ExportError::Pdf("glyph 70000 is not in font 1".to_owned()),
     ] {
         let message = err.to_string();
         let first = message.chars().next().unwrap();

@@ -89,10 +89,6 @@ impl Palette {
 
     /// The colour `paint` stands for as sRGB bytes, red, green, blue and alpha (not
     /// premultiplied).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for the SVG and PDF exporters, which come next")
-    )]
     pub(crate) fn rgba8(&self, paint: Paint) -> [u8; 4] {
         match paint {
             // A colour of its own keeps its exact bytes.

@@ -114,6 +114,14 @@ impl GlyphTable {
         (!path.0.elements().is_empty()).then_some(path.0)
     }
 
+    /// How many glyphs font `font` (an index into [`lawh_math::fonts`]) has: every glyph id
+    /// below this is the font's. 0 for a font the table doesn't have.
+    pub(crate) fn glyph_count(&self, font: usize) -> u32 {
+        self.fonts
+            .get(font)
+            .map_or(0, |table| u32::try_from(table.stats.len()).unwrap_or(0))
+    }
+
     /// The units per em of font `font`'s outlines ([`Self::outline`]); `None` for a font the
     /// table doesn't have.
     pub(crate) fn units_per_em(&self, font: usize) -> Option<f64> {

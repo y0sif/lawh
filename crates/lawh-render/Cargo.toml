@@ -17,6 +17,8 @@ publish.workspace = true
 bytemuck.workspace = true
 icu_properties = { workspace = true, features = ["compiled_data"] }
 kurbo.workspace = true
+# PDF export: pages, paths and embedded font subsets.
+krilla.workspace = true
 lawh-core.workspace = true
 lawh-math.workspace = true
 parley.workspace = true
@@ -30,6 +32,8 @@ ttf-parser.workspace = true
 vello_cpu.workspace = true
 
 [dev-dependencies]
+# Reads exported PDFs back (pages, fonts, the text of their glyphs) and renders them.
+hayro.workspace = true
 # Snapshots of exported SVG files.
 insta.workspace = true
 # Draws exported SVGs to compare with PNG exports; checks their XML.
