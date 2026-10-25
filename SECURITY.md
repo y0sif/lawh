@@ -21,14 +21,17 @@ someone else made.
 - A file that hangs or exhausts memory when opened (denial of service), past the limits below.
 - A key, mapping or lawhrc that freezes lawh past the per-key caps below.
 - A `:w` that leaves a board half written, or writes somewhere other than the path asked for.
+- An export (`:export`, `lawh export`) that runs past its caps below, leaves a file half
+  written, writes somewhere other than the path asked for, overwrites the board it exports, or
+  puts a board's text or a reference to anything outside the file into an SVG.
 
 **Out of scope:**
 
 - Issues in dependencies that lawh doesn't expose. Report those upstream.
 - The OS warning on first launch: lawh releases are deliberately unsigned.
 - The memory cap on macOS and Windows, which is known not to be in place yet (see below).
-- What your own lawhrc mappings do when you type them: a mapping may run `:w` like any typed
-  command.
+- What your own lawhrc mappings do when you type them: a mapping may run `:w` or `:export` like
+  any typed command.
 
 ## Threat model
 
@@ -116,7 +119,8 @@ as a vulnerability and report it.
   `:` commands. The app feeds the engine only keys typed in its window, and the lawhrc.
 - **The lawhrc is trusted, and capped.** It is your own file in your config directory, read once at
   start, like a vimrc. It may only `:set` options and make mappings: shape, write and quit
-  commands are refused there, so it can't change a board or a file by itself. Caps: 1 MiB
+  commands, `:export` included, are refused there, so it can't change a board or a file by
+  itself. Caps: 1 MiB
   (`MAX_RC_BYTES`; a larger file is refused from its size, unread), 1,000 mappings a mode
   (`MAX_MAPS`), 256 keys on each side of a mapping (`MAX_MAP_KEYS`). The slowest lawhrc the caps
   allow, 1 MiB of mappings made and dropped at the front of 999 others, loads in 676 ms in release
@@ -156,5 +160,48 @@ as a vulnerability and report it.
   links as the atomic write does, then compares device and inode on Unix, or canonical paths
   elsewhere. It only reads file metadata, after the write; a path it can't look up (a loop of
   links) counts as another file, so the board stays marked unsaved.
-- **Where writes go.** Only to the path typed after `:w` (or the board's own), a relative one taken
-  from the directory lawh started in. `:w !cmd` and `:w >>file` are refused: no shell runs.
+- **Where writes go.** Only to the path typed after `:w` or `:export` (or the board's own, for
+  `:w`), a relative one taken from the directory lawh started in. `:w !cmd`, `:w >>file` and the
+  same after `:export` are refused: no shell runs. `:w` refuses a name ending in `.svg`, `.png`
+  or `.pdf`, so a board's text never goes into a file named as a picture.
+
+### Exports
+
+Exporting draws a board someone else may have made into a file, so it is bounded as a frame is,
+with caps of its own. The full table is in
+[docs/architecture.md](docs/architecture.md#export-caps).
+
+- **Caps:** at most 2 s of estimated work for drawing and writing the file, a PNG's compression
+  included (`EXPORT_BUDGET_NS`); at most 10 s waiting for the board's formulas, all of them
+  together (`EXPORT_MATH_WAIT`), each still under the 2 s timeout; at most 64,000,000 pixels and
+  16,384 a side for a PNG, and 14,400 pt a side for a PDF page (larger boards are shrunk to
+  fit); at most 64 MiB for the file (`MAX_EXPORT_BYTES`), counted while it is written. So an
+  export takes about 10 s of waiting for math and 2 s of estimated work at most (derived; the
+  calibrations hold real work to 1.2 times its estimate), plus writing the file. The slowest
+  hostile boards measured took 10.04 s (stopped by the math wait) and 8.6 s (slow math, then
+  refused for its drawing), and the most memory 395 MB (an image at the pixel cap), in release.
+- **One export per key** (`MAX_EXPORTS_PER_KEY`), which also counts as one of the key's 4
+  writes, so a mapping can't run exports in a loop.
+- **Nothing partial:** past a cap that stops it, the export returns nothing and no file is
+  written. A file is written as `:w` writes a board, atomically: the old file or the new one,
+  never half of each.
+- **Never the board itself:** an export onto the board's own file is refused, compared by path
+  and by identity as `:w` compares (`~/`, an absolute path, a link to it), so a board named
+  `notes.svg`, or a link named `out.png` that points at the board, can't be overwritten with a
+  picture. `lawh export` refuses the same before it draws anything.
+- **SVG is geometry only:** every glyph is an outline from the bundled fonts. There is no
+  `<text>` and no board text in the file, not even object ids; the only references are the
+  file's own (`#g0`, `#g1`, ...), never a URL or another file; no script, no style sheet. So a
+  board's text can't put markup or a script into an SVG someone opens in a browser. Tested with
+  markup, `&`, `]]>`, quotes and control characters, as text and as the source of a failing
+  formula.
+- **PDF:** board text is written by krilla as glyphs of the embedded fonts and the text they
+  show. There is no date and no metadata. krilla panics on a glyph id of 65,536 or more and
+  fails the whole file on an id past its font's glyph count, so every glyph id is checked
+  against its font before krilla sees it; math's glyph ids were checked already, when the
+  worker's reply was read.
+- **`lawh export` reads no lawhrc** (a board exports the same on every machine), compiles math
+  in the worker as the window does, and prints nothing on stdout.
+- **No worker is left behind:** when the window closes or `lawh export` returns, dropping the
+  math engine kills and reaps the worker at once, even one still compiling a formula an export
+  gave up on.

@@ -5,11 +5,14 @@ draws text, Typst math, circles, ellipses, rectangles, lines and arrows, with mo
 Milestone 2 (the Vim engine) is built and merged: keys move the cursor, make and edit objects,
 select, undo and repeat, `:w` saves, and key maps and settings load from a lawhrc. Milestone 3 is
 built and merged: sizes for text and math, jump labels (`s` puts a short label on every object in view; typing one jumps there), and `:sym`
-to put in a symbol by name. Export and the rest come later. Sections marked **planned** describe
-design not built yet; **open** marks decisions still to make. Measured numbers are in
+to put in a symbol by name. Milestone 4 is built and being tested: export to SVG, PNG and PDF
+(`:export` in the window, `lawh export` without one), from a draw list the window shares. Moving
+things and the rest come later. Sections marked **planned** describe design not built yet;
+**open** marks decisions still to make. Measured numbers are in
 [research/m1-measurements.md](research/m1-measurements.md),
-[research/m2-measurements.md](research/m2-measurements.md) and
-[research/m3-measurements.md](research/m3-measurements.md). The keys themselves are listed in
+[research/m2-measurements.md](research/m2-measurements.md),
+[research/m3-measurements.md](research/m3-measurements.md) and
+[research/m4-measurements.md](research/m4-measurements.md). The keys themselves are listed in
 [keys.md](keys.md).
 
 ## Crates and dependency rules
@@ -25,10 +28,10 @@ lawh-core and lawh-math depend on no other lawh crate.
 
 | Crate | Owns today | Planned | Depends on |
 |---|---|---|---|
-| `lawh-core` | Board model and its limits (text and math sizes included), `.lawh` reader (own parser) and writer, Vim key notation, the Vim engine: modes, board grammar, sizes, jump labels, text editing in blocks, `:` command parser, `:sym` matching, undo, `.`, key maps, settings, lawhrc parsing | Spatial index | kurbo, nucleo-matcher, thiserror, unicode-segmentation. No rendering, windowing or Typst, ever. |
+| `lawh-core` | Board model and its limits (text and math sizes included), `.lawh` reader (own parser) and writer, Vim key notation, the Vim engine: modes, board grammar, sizes, jump labels, text editing in blocks, `:` command parser, `:sym` matching, `:export` and its options, undo, `.`, key maps, settings, lawhrc parsing; what an export asks for and reports (`ExportFormat`, `ExportOptions`, `ExportReport`, data only) | Spatial index | kurbo, nucleo-matcher, thiserror, unicode-segmentation. No rendering, windowing or Typst, ever. |
 | `lawh-math` | Typst sandbox, math worker process and its protocol, layout to vector paths, caches, recompile limits, bundled fonts, the list of Typst's symbol names for `:sym` (`symbols()`, with whether the bundled fonts draw each) | | typst, typst-layout, codex, ttf-parser, rlimit (Unix) |
-| `lawh-render` | Board to pixels with `vello_cpu`, text layout with parley (Libertinus Math for characters Inter lacks), text and math sizes, the frame budget, PNG encoding of a frame, the editing overlay (cursor, Visual selection, caret, jump labels, `:sym` rows, status and command line), caret geometry, hit tests, and measuring text and math for the engine (`impl Measure for Renderer`), with what laying text out cost | SVG and PDF export | lawh-core, lawh-math, vello_cpu, parley |
-| `lawh` | Command line, window and event loop (winit), presenting frames (softbuffer), winit keys to engine keys, the view for jump labels (`Engine::set_view`), the symbol list into the engine at start, the engine's effects (atomic writes and the same-file check after them, quitting, the mapping timer), the status line's text, the lawhrc from the config directory, mouse pan, zoom and click to select, the hidden `--math-worker` mode | App shortcuts, file watching, clipboard | everything above, etcetera |
+| `lawh-render` | Board to pixels with `vello_cpu`, text layout with parley (Libertinus Math for characters Inter lacks), text and math sizes, the shared draw list (`scene.rs`) the window and exports draw from, the `Palette` that holds every colour, the frame budget, export to SVG, PNG and PDF (`Renderer::export`) within its own caps, the editing overlay (cursor, Visual selection, caret, jump labels, `:sym` rows, status and command line), caret geometry, hit tests, and measuring text and math for the engine (`impl Measure for Renderer`), with what laying text out cost | | lawh-core, lawh-math, vello_cpu, parley, png, krilla |
+| `lawh` | Command line, window and event loop (winit), presenting frames (softbuffer), winit keys to engine keys, the view for jump labels (`Engine::set_view`), the symbol list into the engine at start, the engine's effects (atomic writes and the same-file check after them, exports and the queue that holds keys behind them, quitting, the mapping timer), `lawh export` without a window, the status line's text, the lawhrc from the config directory, mouse pan, zoom and click to select, the hidden `--math-worker` mode | App shortcuts, file watching, clipboard | everything above, etcetera |
 
 `lawh-core` stays light so `cargo test -p lawh-core` never compiles Typst or the renderer.
 [tech-stack.md](tech-stack.md) lists every dependency with its version and licence.
@@ -45,6 +48,7 @@ lawh file.lawh
                           ├─ text: laid out with parley, cached
                           ├─ math: MathEngine::request, never blocks ─► worker process (Typst)
                           ├─ budget: estimate each object, draw it or its outline
+                          ├─ draw list: each object's items (scene.rs), built in screen pixels
                           ├─ overlay: cursor, selection, caret, jump labels, :sym rows,
                           │           status bar (outside the budget)
                           └─ vello_cpu ─► RGBA pixels
@@ -206,6 +210,7 @@ message; it never panics. `CLAUDE.md` has the short list by file; the math caps 
 | Characters of text and math on a board | 40,000 | `MAX_BOARD_TEXT_CHARS` | same |
 | Characters in an id | 64 | `MAX_ID_CHARS` | same |
 | Size of a text or math object | 0.25 to 16 (a multiplier on the text height; 1 by default) | `MIN_TEXT_SIZE`, `MAX_TEXT_SIZE` (`DEFAULT_TEXT_SIZE`) | same |
+| PNG export scale (`:set pngscale`, `--scale`) | 0.25 to 8, in hundredths (25 to 800; 200 by default) | `MIN_PNG_SCALE_HUNDREDTHS`, `MAX_PNG_SCALE_HUNDREDTHS` (`DEFAULT_PNG_SCALE_HUNDREDTHS`) | `lawh-core/src/export.rs` |
 
 Below 0.25 text is a smudge at any zoom one works at (5 logical pixels an em at zoom 1). At 16 a
 formula at the closest zoom (20) on a scale factor 4 screen has an em of about 32,600 pixels
@@ -214,8 +219,9 @@ formula at the closest zoom (20) on a scale factor 4 screen has an em of about 3
 ### Engine, overlay and app
 
 Paths are under `crates/`. "Measured" numbers are release builds unless they say debug (see
-[research/m2-measurements.md](research/m2-measurements.md) and
-[research/m3-measurements.md](research/m3-measurements.md)); "derived" ones are worked out from
+[research/m2-measurements.md](research/m2-measurements.md),
+[research/m3-measurements.md](research/m3-measurements.md) and
+[research/m4-measurements.md](research/m4-measurements.md)); "derived" ones are worked out from
 the caps.
 
 | Limit | Value | Constant, file | Why |
@@ -243,15 +249,44 @@ the caps.
 | `:sym` rows shown | 8 | `SYM_ROWS`, same | Eight rows fit above the status bar in any window lawh is usable in, and a query a few characters long already narrows Typst's names to a handful. |
 | Writes per typed key | 4 | `MAX_WRITES_PER_KEY`, `engine/exec.rs` | One write costs the app 2.76 ms (measured on an SSD, build not recorded); 4 take about 11 ms and leave room for a mapping that writes the board and a copy. |
 | Writes waiting for their report | 4 (= `MAX_WRITES_PER_KEY`) | `MAX_PENDING_WRITES`, same | The app reports right after the key, so only one key's writes wait together. |
+| Exports per typed key | 1, each also one of the key's `MAX_WRITES_PER_KEY` | `MAX_EXPORTS_PER_KEY`, same | An export holds the window while it draws and writes: `examples/area.lawh` as a PNG at scale 2 took 10 to 41 ms, the limits board's PNG 0.39 to 0.41 s, and 500 formulas of 22,500 glyphs as a PDF 1.1 s before the file cap stopped it (measured). A mapping that exported twice would hold it twice as long. |
+| Work of asking for an export | 5,000 units, and 350 a selected object | `EXPORT_WORK`, `EXPORT_OBJECT_WORK`, `engine/work.rs` | `<CR>` on `:exp out.png` over 500 texts: 17 µs and 5,044 units in debug; from Visual mode with 500 texts selected, 210 µs and 180,044 units (1.2 ns a unit; measured, `work_unit_costs`). |
 | Visual highlights per frame, less what jump labels cost | 3 ms of estimated work | `HIGHLIGHT_BUDGET_NS`, `lawh-render/src/budget.rs` | A full board selected, every object crossing the screen, would take tens of milliseconds; past it the rectangle still shows the selection. Jump labels are always drawn in full (one not drawn can't be typed), and their estimated cost comes out of this first. |
 | Characters of a status string drawn | 256 | `STATUS_WINDOW_CHARS`, `lawh-render/src/status.rs` | About 1,800 logical pixels, wider than most windows; lays out in at most about 0.5 ms. |
 | Status strings kept laid out | 40 | `STATUS_CACHE_ENTRIES`, same | Left, right, the command line, and the name and value of each of 8 `:sym` rows (19 in a frame), with room for those shown a moment ago. A compile-time check keeps it at least `2 x SYM_ROWS + 3`. |
 | Status bar height | 24 logical pixels | `STATUS_BAR_PX`, `lawh-render/src/overlay.rs` | One line of 13-pixel text with room above and below. |
 | Pointer travel that is still a click | 4 logical pixels | `CLICK_SLOP_PX`, `lawh/src/app.rs` | A hand never holds a mouse perfectly still; past it the press pans. |
 | Distance at which a click still hits | 4 logical pixels | `HIT_TOLERANCE_PX`, same | Thin lines stay easy to click. |
+| Wait for the frame that shows an export starting | 250 ms | `EXPORT_FRAME_WAIT`, same | The frame comes within a refresh (17 ms at 60 Hz), but a hidden window may get none: on Wayland winit holds a redraw until the compositor's frame callback, which a hidden surface never gets. Short, so an export typed just before the window was minimized still runs at once. |
 | Room the view keeps around the cursor | 48 logical pixels | `FOLLOW_MARGIN_PX`, `lawh/src/view.rs` | A little more than a grid unit at zoom 1, so what is next to the cursor stays in view. |
 | Temporary file names tried per write | 100 | `TEMP_NAME_TRIES`, `lawh/src/files.rs` | A crash may leave a temporary file behind, or another lawh may write the same file. |
 | Symbolic links followed per write | 40 | `MAX_LINK_HOPS`, same | Linux follows at most 40 (`MAXSYMLINKS`); longer chains loop. |
+
+### Export caps
+
+What one export may cost. Past a cap that stops it, `Renderer::export` returns an `ExportError`
+and no bytes, so nothing is written; past one that shrinks it, the file is made smaller and the
+message names the factor. Paths are under `crates/lawh-render/src/` unless they say otherwise;
+the numbers are measured in release on 2026-10-25 unless marked
+([research/m4-measurements.md](research/m4-measurements.md)).
+
+| Limit | Value | Constant, file | Past it | Why |
+|---|---|---|---|---|
+| Estimated work of drawing and writing an export, and for a PNG its image and compression | 2 s (2e9 estimated ns) | `EXPORT_BUDGET_NS`, `budget.rs` | Stops: `export stopped: drawing it costs too much` | Exports needn't be interactive, so this is far above a real board (`examples/area.lawh` takes 1 ms as a PDF), but a hostile board can't make one take minutes. |
+| Waiting for the formulas, all of them together | 10 s | `EXPORT_MATH_WAIT`, `export/mod.rs` | Stops: `export stopped: math took over 10 s to compile` | Each formula keeps the engine's 2 s timeout, so a board of formulas that each take almost that long stops after about five; real formulas take milliseconds. Each wait ends at the export's deadline (`layout_until`): 8 formulas of a long loop stopped `lawh export` after 10.03 to 10.04 s. |
+| Pixels of a PNG | 64,000,000 (8,000 x 8,000) | `MAX_EXPORT_PIXELS`, `export/mod.rs` | Shrinks to fit | The image takes 4 bytes a pixel while it is drawn, 256 MB at the cap. The highest peak measured was 394 to 395 MB in all, for two scribbles of 2,000 lines each across the image. |
+| Pixels a side of a PNG, and of an SVG's `width` and `height` | 16,384 | `MAX_EXPORT_SIDE_PX`, same | Shrinks to fit (an SVG keeps its drawing and `viewBox`) | A common limit of the textures image viewers draw with, and inside the `u16` sizes `vello_cpu` draws. `rsvg-convert` refuses an SVG 80,000,162 pixels wide (it draws at most 32,767 a side) and reads the shrunk one, as ImageMagick does (measured). |
+| A side of a PDF page | 14,400 pt (200 inches) | `MAX_PDF_PAGE_PT`, same | Shrinks to fit | PDF 1.x's page limit (ISO 32000-1, Annex C, which Acrobat keeps). A board up to 480 units across, margin included, keeps 30 pt a unit (derived). |
+| An exported file | 64 MiB | `MAX_EXPORT_BYTES`, same | Stops: `export stopped: the file is over 64 MiB` | Counted while the file is written (a PDF counts its content as it draws, then its finished file). The board with lawh-core's 40,000 characters of text makes a 1.2 MB SVG; only hostile math or images get near the cap. |
+| Images zlib compresses | 2,000,000 pixels; larger ones fdeflate | `PNG_BALANCED_MAX_PIXELS`, `export/png.rs` | fdeflate: a larger file | zlib's worst case at that size is charged 0.6 s (0.8 s with transparency); at the pixel cap it would take about 15 s (derived: 192 MB of image data at 79 ns a byte). Below it files are smaller: the area board at `pngscale` 2 is 32 KB with zlib, 47 KB with fdeflate. |
+| What compressing costs the budget | 100 ns a byte of image data with zlib, 6.5 with fdeflate | `PNG_NS_PER_BYTE_BALANCED`, `PNG_NS_PER_BYTE_FAST`, same | | The worst content found: 79 ns a byte with zlib (random pixels of 3 values a channel), 6.1 with fdeflate. fdeflate at the pixel cap is charged 1.25 s (1.66 s with transparency, derived). |
+| Compressed bytes held before they are written | 256 KiB | `PNG_CHUNK_BYTES`, same | | How far past the byte cap the encoder may compress before the cap stops it. |
+| Work weights of SVG and PDF | estimated ns per object, element, segment, glyph and byte | `SVG_NS_*` (`export/svg.rs`), `PDF_NS_*` and `PDF_BYTES_*` (`export/pdf.rs`) | | Fitted with `calibrate_svg` and `calibrate_pdf`: every calibration board takes 0.10 to 0.75 (SVG) and 0.30 to 1.13 (PDF) times its estimate; a PDF's content estimate is 1.07 to 1.94 times what krilla writes. |
+| Waiting for the math worker to stop, when a math engine is dropped | 1 s | `MAX_SHUTDOWN_WAIT`, `lawh-math/src/engine.rs` | The queue thread is left to end on its own | Stopping ends the queue thread's wait for the worker at once, so the kill and reap take milliseconds; the bound only keeps a thread stuck elsewhere from holding up the caller. |
+
+The engine's caps on exports (`MAX_EXPORTS_PER_KEY`, `EXPORT_WORK`) and the app's
+(`EXPORT_FRAME_WAIT`) are in [Engine, overlay and app](#engine-overlay-and-app). The PNG
+scale's range is in [File and board](#file-and-board).
 
 Design constants shape the grammar and the drawing without capping anything: `ROW_TOLERANCE`
 (0.5 units, `engine/motion.rs`, see [Reading order](#reading-order)), `PLACE_GAP` (0.5 units,
@@ -259,9 +294,15 @@ Design constants shape the grammar and the drawing without capping anything: `RO
 (`engine/size.rs`, see [Sizes](#sizes)), `DEFAULT_JUMP_LABELS` (`engine/jump.rs`), `MATH_SCALE`
 (1.2725, `lawh-render/src/renderer.rs`, see [Text and math sizes](#text-and-math-sizes)), the
 jump labels' sizes (`LABEL_BOX_PX` 14, `LABEL_FONT_PX` 11 and `LABEL_PAD_PX` 3 logical pixels, and
-`LABEL_FONTS`, in `renderer/labels.rs`) and the `:sym` rows' (`ROW_PX` 20 and `VALUE_GAP_PX` 16, in
-`renderer/completions.rs`).
-
+`LABEL_FONTS`, in `renderer/labels.rs`), the `:sym` rows' (`ROW_PX` 20 and `VALUE_GAP_PX` 16, in
+`renderer/completions.rs`), and the exports' (see [Export](#export)): `EXPORT_MARGIN_UNITS` (1
+unit of room around what is exported), `PDF_PT_PER_UNIT` (30 pt a unit), `EXPORT_STROKE_UNITS`
+and `EXPORT_ARROW_HEAD_UNITS` (0.05 and 0.3 units, worked out from the window's zoom-1 sizes in
+`draw.rs`), all in `lawh-render/src/export/mod.rs`; the SVG writer's `COORD_DECIMALS` (2),
+`SCALE_DECIMALS` (9), `OPACITY_DECIMALS` (3) and `SVG_TOLERANCE_PX` (0.01) in `export/svg.rs`;
+the PDF writer's `PT_PER_PX` (0.75), `MIN_PAGE_PT` (3) and `PDF_TOLERANCE_PT` (0.01) in
+`export/pdf.rs`; and `MIN_SHOWN_SHRINK` (1e-6, the smallest shrink factor a message names) in
+`lawh-core/src/engine/exec.rs`.
 
 ## Math
 
@@ -308,7 +349,14 @@ binary instead.
 - The next formula starts a fresh worker. A request to a worker that died while idle is retried
   once on a new one. A new worker must announce itself within 5 s; after 3 failed starts in a row
   a formula gets `Unavailable`, and each later formula tries once more.
-- If the app goes away mid-compile, the worker exits on its own 1 s past the timeout.
+- When the app is done with math (the window closes, `lawh export` returns), dropping the math
+  engine stops it: the queue thread's wait for the worker ends at once, the worker is killed and
+  reaped there, and the drop waits for that thread at most `MAX_SHUTDOWN_WAIT` (1 s). So no
+  worker outlives lawh, even one still compiling a formula an export gave up on. A test drops the
+  engine during a compile of about 10 s: the drop took 1.7 to 2.4 ms (release, measured), and the
+  worker's `/proc` entry is gone after it (`lawh-math/tests/worker_process.rs`).
+- If the app goes away mid-compile without dropping it (a crash), the worker exits on its own 1 s
+  past the timeout.
 - **Logs:** in worker mode `main` sets up logging on stderr before it hands over to the worker, so
   the worker's panic hook and its `warn!` lines reach the app's stderr; stdout stays the
   protocol's (`math_worker_logs_go_to_stderr_only` in `lawh/tests/cli.rs`).
@@ -343,7 +391,10 @@ worker and in process alike.
 | `Pending` | Queued (once) or compiling; the waker is called when it finishes | Its source, in grey |
 | `Evicted(summary)` | Laid out before, but pushed out of the cache; its size is still known | A faint outline of its bounds |
 
-`MathEngine::layout_blocking` waits instead, for exports and tests. The renderer asks only for
+`MathEngine::layout_blocking` waits instead, for tests. `MathEngine::layout_until(src, deadline)`
+waits no later than a deadline, for exports, which share one limit across all their formulas: a
+formula still compiling then returns `Timeout` at once, not cached (it didn't fail; the caller ran
+out of time), and its compile carries on, so the next request finds it. The renderer asks only for
 formulas on screen, nearest the centre of the view first, so a slow formula elsewhere can't hold
 up the ones in view.
 
@@ -396,9 +447,12 @@ glyphs stacked on one spot. So each frame's work is budgeted.
   doesn't is charged only the work of estimating it and drawn as a faint **outline** of its
   bounds, from a separate 3 ms outline budget; past that it is left out. Board order never changes.
 - **Budgets:** 18 ms of estimated work per window frame, 8 ms for the frame right after a resize
-  (resizing costs `vello_cpu` about 10 ms of its own at 2880x1800), and 2 s per export. With a
-  frame's fixed cost (1 ms at 1920x1080, 3 ms at 2880x1800) this keeps a frame under 33 ms, two
-  refreshes at 60 Hz.
+  (resizing costs `vello_cpu` about 10 ms of its own at 2880x1800). With a frame's fixed cost
+  (1 ms at 1920x1080, 3 ms at 2880x1800) this keeps a frame under 33 ms, two refreshes at 60 Hz.
+  An export has a budget of its own, `EXPORT_BUDGET_NS`: 2e9 estimated nanoseconds (2 s) for
+  everything it draws and writes, in all three formats, and for a PNG its image (0.6 ns a pixel,
+  `NS_PER_IMAGE_PX`) and its compression, charged first (see [Export](#export)). Past it the
+  export stops and writes nothing; it never draws outlines in place of objects.
 - **Calibrated:** the `calibrate_*` tests check that nothing takes more than 1.2 times its estimate
   in release, and `frame_budget_worst_cases` that the worst boards stay under 33 ms a frame and
   100 ms to open. A row over its limit is measured again, up to 3 times in all, and keeps its
@@ -525,6 +579,177 @@ Visual rectangle over the whole view, a jump label on every object) adds 4.3 to 
 longest command line and eight rows of the longest names, changing every frame) 5.0 to 5.6 ms and
 4.7 to 5.4 ms. Both are under the 8 ms target the bench asserts (`OVERLAY_TARGET`).
 
+## Export
+
+`Renderer::export(board, selection, options)` draws a board, or the objects of a Visual
+selection, into one file's bytes: SVG, PNG or PDF. It writes nothing to disk; the app does (see
+[Exporting from the app](#exporting-from-the-app)). The caps are in
+[Export caps](#export-caps).
+
+### The shared draw list
+
+`lawh-render/src/scene.rs`. Each object is a list of **items**: shape outlines to stroke (round
+caps and joins), arrowheads to fill, glyph runs (board text from its parley layout, and math's
+glyphs) and math paths. Items borrow what they draw from where it already is (a text's cached
+layout, a formula's layout), so building them allocates nothing; the builders are iterators, which
+a sink can walk twice, to estimate an object's cost and then to draw it.
+
+Items are built in a **space** (`Space`): `Space::Board` is grid units, independent of any view,
+with outlines and arrowheads at the window's zoom-1 sizes (0.05 and 0.3 units), for exports;
+`Space::Screen(viewport)` is the window's physical pixels, where outlines and arrowheads keep their
+size on screen at every zoom. The builders are the same for both, so a shape's geometry (where an
+arrow's shaft stops, its head's corners) is worked out in one place, in the units it is drawn in.
+
+A **sink** takes the items, one object at a time (`Sink::begin`, then `Sink::item` for each): the
+window's (`Screen`, `renderer/vello.rs`, which culls what can't reach the view, cuts paths to it
+and counts the frame's work), the PNG export's (both hand items to `vello_cpu` through the same
+`Vello` calls, so they stroke, fill and set glyphs alike), the SVG writer, the PDF writer, and a
+tally for tests. An object's items are built, handed over and dropped before the next object's.
+
+**Colours** in items are roles (`Paint::Ink`, `Error`, `Pending`) or a colour math asked for, and
+the sink looks a role up in the palette. One function picks a text's role (`scene::text_paint`:
+board text in ink, a failed formula's source in the error colour, a compiling one's in grey),
+shapes are ink, and math keeps Typst's colours, its default black drawn in ink.
+
+The window draws every object from the draw list, with its culling, budget and estimates as
+before; the grid, the faint outlines of objects over the budget and the overlay are drawn
+directly. `tests/scene.rs` holds the two together: a window frame at zoom 1 against a PNG export
+at `pngscale` 1, which maps the board the same way, differs in 0 of 292,754 pixels compared (the
+pixels around grid dots left out, since only the window draws the grid); and the objects, item
+kinds and counts the window's sink is handed match the export's. Every golden of the window
+drawn before milestone 4 passes unchanged, and its benches take the same time (measured against
+the tree before milestone 4, [research/m4-measurements.md](research/m4-measurements.md)).
+
+### The palette
+
+`lawh-render/src/palette.rs`. `Palette` holds every colour lawh draws: the board's (paper, ink,
+grid dots, failed and compiling math, the faint outlines of objects over the frame budget) and the
+overlay's (cursor, block caret, selection, Visual rectangle, status bar, jump labels), 15 in all.
+`Palette::LIGHT` is the one theme today, and the `Renderer` holds it. The window and every export
+read the same palette, so a theme restyles both. `tests/palette_guard.rs` reads every source file
+of lawh-render and the app as text and fails on a colour made anywhere else: a colour
+constructor given a literal, a named colour, a colour with its alpha changed, a hex colour in a
+string, colour bytes. Test code is exempt.
+
+### From the board to a file
+
+1. **Plan** (`plan_export`, `export/mod.rs`). The objects: the whole board, or the selection in
+   board order, skipping ids no longer on the board; none left is `nothing to export`. Then
+   every formula is waited for in turn and only its box is kept, text whose layout isn't cached
+   is laid out (charged to the budget), and each object's bounds are found, outlines and
+   arrowheads included. The **frame** is their union with `EXPORT_MARGIN_UNITS` (1 unit) on
+   each side.
+2. **Draw** (`draw_export`). The format's writer gets the objects one at a time, in board order,
+   built in `Space::Board`. A formula's layout is fetched again as it is drawn (the math engine
+   may have dropped it since) and dropped after, so an export holds one formula's layout at a
+   time, not all of them. Each writer charges what it writes to the budget before writing it,
+   and counts the file's bytes against `MAX_EXPORT_BYTES` as it goes.
+3. **Report.** The bytes, with `ExportReport`: how many formulas failed and the factor the
+   export shrank by, if it did. Or an `ExportError`, and no bytes.
+
+**Math.** An export waits for every formula in turn through `MathEngine::layout_until`, and all
+its waits together may take `EXPORT_MATH_WAIT` (10 s): each formula's wait ends when what is left
+of it runs out. Each formula keeps the engine's own 2 s timeout. A formula that fails or times
+out is drawn as its source in the error colour, as on screen, and counted. One that laid out while
+planning but fails when fetched again to be drawn (its layout dropped, then its worker crashed)
+stops the export with `MathFailedWhileDrawing`: the frame was sized for its box, so its source
+could be cut off.
+
+### Formats
+
+- **PNG** (`export/png.rs`). Drawn with `vello_cpu` into an image of its own (the window's is
+  untouched) at `BASE_PX_PER_UNIT` (40) times `pngscale` pixels a unit; when the frame passes
+  `MAX_EXPORT_SIDE_PX` or `MAX_EXPORT_PIXELS`, at the largest scale that fits. No `Viewport` is
+  involved, so the window's view caps don't apply. The frame is centred in whole pixels. The
+  image is moved into the `png` encoder, never copied: RGB when the paper is opaque, else RGBA,
+  with an sRGB chunk, compressed into 256 KiB chunks that go through the byte cap as they are
+  made. Images up to `PNG_BALANCED_MAX_PIXELS` (2,000,000) are compressed with zlib's default
+  level, larger ones with fdeflate, 5 to 18 times faster on content that is hard to compress
+  (`png.rs`), with larger files. The budget is charged the image and fdeflate's worst case
+  before anything is drawn, so only an image even fdeflate can't encode in time is refused;
+  after the drawing, zlib's extra cost when the size calls for zlib and it fits what is left,
+  else the image is compressed with fdeflate (`Compression::within`). So a smaller scale is
+  never refused where a larger one is written.
+- **SVG** (`export/svg.rs`), written by hand, no dependency. 40 pixels a unit, the frame centred
+  as in a PNG at `pngscale` 1, so their pixels line up. Each glyph (font and glyph id) is
+  defined once, as a `<path>` in font units in a `<defs>` written just before the first glyph
+  run that uses it, so every reference points back; a glyph run is a `<g>` with one colour and
+  one transform, holding a `<use>` per glyph. There is no `<text>` and no board text anywhere,
+  not even object ids; the only references are the file's own `#g0`, `#g1`, ...; no script, no
+  style sheet. Shapes and math are paths, ellipses within 0.01 pixel of the true curve.
+  Numbers have fixed decimals and ids follow the draw list, so a board gives the same bytes every
+  time. When a side passes `MAX_EXPORT_SIDE_PX`, `width` and `height` shrink to fit and the
+  `viewBox` keeps the drawing.
+- **PDF** (`export/pdf.rs`), with krilla. One page at `PDF_PT_PER_UNIT` (30) pt a unit, its
+  sides rounded up to whole 0.75 pt (a pixel of a PNG at `pngscale` 1, so on a 96 dpi screen at
+  100 % the two are the same pixels), shrunk to fit `MAX_PDF_PAGE_PT`. Page coordinates are
+  worked out in `f64` and handed to krilla in `f32` only then. Board text is text: each glyph
+  run is drawn in the bundled font it was shaped in, which krilla embeds as a subset, with the
+  text each glyph shows, so krilla writes a `ToUnicode` map and a viewer can search and copy it.
+  Math carries no source text, so it is drawn as paths: each glyph (font, glyph id and colour) is
+  a form XObject (a drawing stored once and drawn by reference) holding its outline. On a formula
+  of 22,500 glyphs that took 44 bytes of content a glyph, against 1,644 for outlines written
+  where they are used (`pdf.rs`). Colours are ICC-based sRGB. There is no date, metadata or
+  tagging, so a board gives the same bytes every time. krilla panics on a glyph id of 65,536 or
+  more and fails the whole file on one past its font's glyph count, so every id is checked
+  against its font before krilla sees it (`ExportError::Pdf`). krilla builds the file in memory,
+  so while drawing the writer counts an estimate of its uncompressed content against the byte
+  cap, then checks the finished file.
+
+### Exporting from the app
+
+```text
+:exp out.pdf<CR>
+ └─► lawh-core: Command::Export ─► the selection (from Visual mode) and the options (exportbg,
+      │          pngscale); EXPORT_WORK charged, MAX_EXPORTS_PER_KEY counted
+      └─► Effect::Export { path, options, selection }
+           └─► lawh: files::write_target (~, the launch directory); the board's own file refused
+                └─► status line `exporting "out.pdf"`, a frame presented; keys typed meanwhile wait
+                     └─► next turn of the event loop: export::export_to
+                          ├─ lawh-render Renderer::export: plan, draw, report
+                          ├─ files::write_atomic(target, bytes)
+                          └─ Engine::export_done(path, report or error): the message
+                               └─► the effects and keys that waited, in order
+```
+
+**In the window** (`crates/lawh/src/app.rs`). When a key's effects reach an `Effect::Export`, the
+app resolves its file as it does a write's (`files::write_target`) and refuses it at once, with
+nothing written, when it is the board's own file: the same path as the board's file, or the same
+file by `files::same_file` (links followed), so a link named `out.svg` that points at the board
+is refused too. Otherwise the app stops there and keeps the export, the effects after it and the
+keys of the batch not typed yet (`Suspended`), shows `exporting "out.pdf"` and asks for a frame.
+Once the frame is presented, the event loop goes round once without waiting
+(`ControlFlow::Poll`), so the frame leaves the app before the thread is busy, and the export runs
+at the start of the next turn: `export::export_to` (`Renderer::export` with the window's
+renderer, then `files::write_atomic`), `Engine::export_done`, then the effects after it, then the
+keys that waited. So everything happens in the order the engine asked for it, and no key reaches
+the engine before the export has drawn the board. If no frame comes within `EXPORT_FRAME_WAIT`
+(250 ms; a hidden window gets none), the export runs without one. That the frame is on screen
+before the export starts is reasoned from winit's and softbuffer's sources for X11 (winit's loop
+flushes at the start of each turn) and Wayland (softbuffer's present flushes itself); macOS and
+Windows are untested.
+
+The export runs on the event loop's thread, so the window is busy while it draws and writes, for
+as long as the caps allow. Keys typed meanwhile are queued behind the ones waiting. A click, a
+close request or a failure that ends the app doesn't wait for frames: it first runs every export
+waiting, with the effects and keys behind it and any export those keys ask for in turn
+(`App::finish_exports`), then itself. A click then lands through the view the user clicked on,
+and keeps the message the drained work left (`Engine::restore_message`); a close whose drained
+work left an error stays open with it, unarmed, so the next close request goes on as usual.
+
+**Without a window** (`lawh export`, `crates/lawh/src/export.rs` and `cli.rs`). It reads the
+board with `files::read_existing` (as opening does, the size checked first, but a missing file is
+an error), refuses a file to write that is the board's own (`files::same_file`), compiles math in
+the worker, and takes the defaults of `pngscale` and `exportbg` (no lawhrc is read) with
+`--scale` and `--transparent` over them. It writes with `files::write_atomic`, then drops the
+renderer, which stops the worker, before it returns. No window, no event loop, nothing on stdout.
+It exits 0 when the file is written (stderr has one line, in the engine's words, when formulas
+failed or the export shrank), 1 when nothing was written, and 2 for bad arguments
+(`EXIT_USAGE`). `lawh export examples/area.lawh` takes 20.2 ms as an SVG, 33.2 ms as a PNG and
+21.5 ms as a PDF, from process start to exit with the worker started and the formula compiled
+(median of 15 runs, release, measured); the same board without its formula, so with no worker,
+10.8, 19.6 and 12.5 ms.
+
 ## Data flow for one key press
 
 ```text
@@ -538,6 +763,8 @@ winit KeyEvent (presses and repeats; releases and synthetic presses are dropped)
               │     └─ a command that changes the Board makes one undo step
               └─► lawh: do the effects, in order
                     ├─ Write { path, quit_after }: one files::WriteBatch, then Engine::write_done
+                    ├─ Export { path, options, selection }: waits for a frame, then
+                    │     Renderer::export, files::write_atomic, Engine::export_done
                     ├─ Quit: leave the event loop
                     └─ ArmTimer { ms }: call Engine::timeout after ms, unless a key comes first
   └─► lawh: window title, the view follows the cursor (FOLLOW_MARGIN_PX), redraw
@@ -546,8 +773,9 @@ winit KeyEvent (presses and repeats; releases and synthetic presses are dropped)
 ```
 
 The engine is a state machine with no I/O: `(state, board, key) → (state, board changes,
-effects)`. Effects are what only the app can do (write a file, quit, run a timer). The engine
-never blocks, prints or logs, so tests type the same keys and read the board without a window.
+effects)`. Effects are what only the app can do (write a file, export, quit, run a timer). The
+engine never blocks, prints or logs, so tests type the same keys and read the board without a
+window.
 
 **Logical keys.** The app takes winit's logical key: the character the keyboard layout makes,
 with Shift, AltGr and Option already applied, so `:` is `:` on every layout. Alt with a
@@ -581,7 +809,11 @@ timer.
 change while the app does them. So the app runs a key's effects through one
 `files::WriteBatch`: the board is turned into text once (`to_lawh`), each file is written once,
 and every `Write` effect still gets its own `write_done` report, in order. The engine matches
-each report to the oldest write it asked for with that path.
+each report to the oldest write it asked for with that path. The app does the effects after the
+key, so a write, like an export, takes the board as the whole key left it: in a mapping such as
+`:w<CR>x`, the file lacks what `x` deleted. An export between the writes (see
+[Exporting from the app](#exporting-from-the-app)) keeps the batch, so each file is still written
+once a key; the export itself counts as one of the key's writes.
 
 - `write_done` marks the board saved when the write went to the board's own file and the board
   hasn't changed since the write was asked for. The app decides "own file" by the files'
@@ -602,6 +834,11 @@ each report to the oldest write it asked for with that path.
   the same key writes to that name (`:w a.lawh<CR>:wq<CR>` in a mapping). Of several writes that
   would name it, the first to go well does.
 - `:x` on a board with no unwritten changes quits at once, without writing.
+- `:w`, `:wq` and `:x` refuse a file typed after them whose extension is one `:export` writes
+  (`.svg`, `.png`, `.pdf`, any case), naming `:export`: the board's text would go into a file
+  named as a picture, and an unnamed board would take that name. The parser refuses it
+  (`engine/command.rs`), so `:x out.png` on an unchanged board doesn't quit either. `:w` alone on
+  a board opened as `notes.svg` still writes it.
 - A relative path is taken from the directory lawh started in, and a leading `~` (alone, `~/`,
   and `~\` on Windows) from the home directory (`files::write_target`, etcetera's `home_dir`).
   `~user` stays as typed, as does the path of the file lawh opened (the shell expanded any `~`
@@ -736,9 +973,10 @@ the object's shape, so undo needs nothing new.
 - **`++size=N`** on `:te` and `:ma` (`command.rs`): only `++name=value` words right after the
   name are options, as Vim's `++opt`, and an unknown one is an error, so `:te size=2` stays text.
 - **The selection** is a list of objects, not the rectangle: what is highlighted is what `d`,
-  `x`, `y` and `:si` act on. The Visual size keys keep it the same objects, those that grew out of
-  the rectangle too; the next motion selects from the rectangle again. `:` from Visual mode keeps
-  it while the command line is open (`visual_command`), as Vim's `:'<,'>`, for `:si`.
+  `x`, `y`, `:si` and `:exp` act on. The Visual size keys keep it the same objects, those that
+  grew out of the rectangle too; the next motion selects from the rectangle again. `:` from Visual
+  mode keeps it while the command line is open (`visual_command`), as Vim's `:'<,'>`, for `:si`
+  and `:exp`.
 
 ### Jump labels
 
@@ -774,7 +1012,8 @@ flash's remote `r`; undo puts the object and the cursor back). Counts are ignore
 
 `engine/sym.rs`. `:sy[m] query` puts in a symbol by its Typst name: in a math block the name
 (`alpha`, spaced from a name it would touch, since Typst reads letters and digits that touch as
-one name), in a text block the character (`α`), on the board a new math block of the name.
+one name), in a text block the character (`α`), on the board a new math block of the name, placed
+as `:ma` places one (see [Put and the place rule](#put-and-the-place-rule)).
 
 - **The list is passed in.** lawh-core never depends on Typst or codex. The app builds the list
   once at start with `lawh_math::symbols()`, which reads codex's static tables (codex is the crate
@@ -827,6 +1066,11 @@ counted from the typed key (or timeout, or click) and reset at the next:
   key of a 64-character `:sym` query over 4,096 names as long as Typst's 32.8 million at most.
 - **`MAX_WRITES_PER_KEY`** (4): writes are counted apart, since the app does them and one costs
   it 2.76 ms (measured, build not recorded, mostly the flush to disk).
+- **`MAX_EXPORTS_PER_KEY`** (1): an export holds the window for as long as it draws and writes,
+  up to seconds on a hostile board, so one key may ask for one. Each also takes one of the 4
+  writes (`Engine::charge_export` counts the export, then the write). Asking for it costs
+  `EXPORT_WORK` (5,000 units), and `EXPORT_OBJECT_WORK` (350) for each object of a Visual
+  selection; the drawing is the renderer's, under its own caps.
 
 **Text the renderer lays out.** The engine counts `MEASURE_WORK` for each object and character
 it measures: about what the renderer costs for text it has laid out already. Laying out text it
@@ -844,12 +1088,14 @@ characters and then showed jump labels, or moved `w` and `b`, ran 1,000 rounds i
 in release; now it stops in 46 to 99 ms in release and 163 to 290 ms in debug (measured,
 `key_costs` in `lawh-render/tests/measure_cost.rs`).
 
-When a key runs out of work or asks for a fifth write, the command under way stops where the
-board is consistent: a motion stops on the last object it reached, an operator or a put does
-nothing, an undo with a count stops between steps, and an Insert session that `.` was typing ends
-as `<Esc>` would (one undo step). Nothing more runs for that key: the typeahead is dropped and the
-message says `that key did too much work; the rest of it was dropped` or `that key asked for more
-than 4 writes; the rest of it was dropped`. A `:wq` or `:x` refused this way doesn't quit.
+When a key runs out of work or asks for a fifth write or a second export, the command under way
+stops where the board is consistent: a motion stops on the last object it reached, an operator or a
+put does nothing, an undo with a count stops between steps, and an Insert session that `.` was
+typing ends as `<Esc>` would (one undo step). Nothing more runs for that key: the typeahead is
+dropped and the message says `that key did too much work; the rest of it was dropped`, `that key
+asked for more than 4 writes; the rest of it was dropped` or `that key asked for more than 1 export;
+the rest of it was dropped`. A `:wq` or `:x` refused this way doesn't quit. The exports and writes
+asked for before the cap still go.
 
 Counts never multiply a command that makes no progress: motions stop where they can't go on,
 undo stops at the ends of the history, and a put that doesn't fit is refused whole before the
@@ -879,7 +1125,9 @@ The cursor is either a grid point or an object, never both: `Cursor::Grid(Point)
   left, below, above and to the right. From a grid point, the point takes part as an object of
   no size. A motion that finds nothing leaves the cursor where it is.
 - **New objects** (the shape commands, `:text`, `:math`, `:sym` on the board, `i a I A` on a grid
-  point) appear at the cursor point and become the current object.
+  point) appear at the cursor point and become the current object. With the cursor on an object,
+  `:text`, `:math` and `:sym` put their block below it by the place rule instead (see
+  [Put and the place rule](#put-and-the-place-rule)), so it never lands on the object.
 - **`e`, `W`, `B`, `E` and text objects** mean nothing on the board yet, so `W B E` are free to
   map. Inside a text block `w`, `b` and `e` are Vim's word motions, and `W`, `B` and `E` its WORD
   motions (runs of characters that aren't blanks).
@@ -931,8 +1179,9 @@ A put object keeps its id when that id is free, else gets a fresh one for its ki
 nothing: copies past `MAX_OBJECTS` refuse the whole put. The cursor ends on the first object put.
 Text deleted inside a block with `x` puts on the board as a new text block.
 
-The **place rule** (`p`, `P`, `o`, `O`) finds where a group of size S goes next to a reference R,
-the current object's bounds (or a box of no size at a grid point):
+The **place rule** (`p`, `P`, `o`, `O`, and `:te`, `:ma` and `:sym` with the cursor on an
+object) finds where a group of size S goes next to a reference R, the current object's bounds (or
+a box of no size at a grid point):
 
 1. Below: `x = R.x0`, `y = R.y1 + PLACE_GAP` (0.5 units). Above: `y = R.y0 - PLACE_GAP - S.height`.
 2. While the candidate box overlaps other objects, move it past them: below, to `PLACE_GAP`
@@ -946,6 +1195,15 @@ never ends up lying on a line. Half a unit reads as "next to" at any zoom where 
 legible, and keeps their bounds apart so `w`, `J` and `K` still tell them apart. The rule ends
 within one try per object; past `MAX_COORDINATE` it fails with "no room".
 
+For `:te`, `:ma` and `:sym` on an object (`Engine::add_block`, `engine/exec.rs`), S is the new
+block's bounds as measured with its text and size, and the block is moved so that its box, not
+its anchor, lands where the rule says: a formula's ink can start above its anchor. A formula the
+renderer hasn't compiled yet is measured by its source text (measuring never waits for math), so
+its block can land a little nearer or farther than its compiled box would put it. Measuring the
+board and the block, the id and the rule's looks count as the key's work; `:te x` below the top of
+a column of 499 texts took 5.1 ms in debug and 0.76 ms in release, 6.09 million units (measured,
+`work_unit_costs`).
+
 ### Visual mode
 
 `v` starts Visual mode. Its anchor is the cursor's region when `v` was pressed (a point, or an
@@ -953,9 +1211,9 @@ object's bounds), and the rectangle is the bounding box of the anchor and the cu
 region. Selected are the objects whose bounds lie fully inside it, edges included. Motions,
 counts and jump labels move the cursor; `d`, `x` and `y` act on the selection and return to
 Normal mode; `<C-a>` and `<C-x>` resize its text and math and stay in Visual mode; `v` or `<Esc>`
-leave; `:` leaves Visual mode and opens the command line, keeping the selection for `:si`. The
-selection is what the window highlights and what `d`, `x`, `y` and `:si` act on (see
-[Sizes](#sizes)).
+leave; `:` leaves Visual mode and opens the command line, keeping the selection for `:si` and
+`:exp`. The selection is what the window highlights and what `d`, `x`, `y`, `:si` and `:exp` act
+on (see [Sizes](#sizes)).
 
 ### Clicks
 

@@ -121,11 +121,11 @@ highlighted.
 | `y` | Yank the selection, back to Normal mode |
 | `<C-a>` `<C-x>` | Every text and math block selected one size step larger or smaller, each from its own size, as one undo step; shapes are skipped. Visual mode stays. `{count}<C-a>` steps count times |
 | `v`, `<Esc>` | Back to Normal mode |
-| `:` | Leave Visual mode and open the command line. The selection stays highlighted while the line is open, for `:si` |
+| `:` | Leave Visual mode and open the command line. The selection stays highlighted while the line is open, for `:si` and `:exp` |
 
-What is highlighted is what `d`, `x`, `y` and `:si` act on. After `<C-a>` or `<C-x>` the selection
-stays the same objects, those that grew out of the rectangle too, and takes in none that the
-rectangle now holds only because a block grew; the next motion selects from the rectangle again.
+What is highlighted is what `d`, `x`, `y`, `:si` and `:exp` act on. After `<C-a>` or `<C-x>` the
+selection stays the same objects, those that grew out of the rectangle too, and takes in none that
+the rectangle now holds only because a block grew; the next motion selects from the rectangle again.
 `.` doesn't repeat Visual changes, so `<C-a>` and `<C-x>` here forget the last change.
 
 ## Sizes
@@ -275,6 +275,13 @@ place them (`x1=` `y1=` for a line or an arrow). Positional numbers are sizes fo
 and `:re`, and offsets from the start for `:li` and `:ar`. `key=value` uses the file's names, is
 absolute, and wins over a positional.
 
+Text and math blocks go at the cursor on a grid point. With the cursor on an object, `:te` and
+`:ma` put the new block below it by the place rule, as `o` opens one (see
+[Where `p`, `P`, `o` and `O` put things](#changing-objects)): half a unit under the object, left
+edges lined up, past anything in the way, so a block never lands on top of the object. With no
+room below, the status line says `no room for a new text block` or
+`no room for a new math block`.
+
 | Command | Makes |
 |---|---|
 | `:ci[rcle] R` | A circle of radius R centred on the cursor. Keys: `x=` `y=` `r=` |
@@ -282,8 +289,8 @@ absolute, and wins over a positional.
 | `:re[ct] W H` | A rectangle with its top-left corner at the cursor. Keys: `x=` `y=` `w=` `h=` |
 | `:li[ne] DX DY` | A line from its start to the start + (DX, DY). The start is the cursor point, or `x1=` `y1=`. Keys: `x1=` `y1=` `x2=` `y2=` |
 | `:ar[row] DX DY` | An arrow, the same way, its head at the end |
-| `:te[xt] [++size=N] <text>` | A text block of everything after the first space and the options, as typed |
-| `:ma[th] [++size=N] <formula>` | A math block in [Typst](https://typst.app) math syntax: `:ma A = pi r^2` |
+| `:te[xt] [++size=N] <text>` | A text block of everything after the first space and the options, as typed; below the current object when the cursor is on one |
+| `:ma[th] [++size=N] <formula>` | A math block in [Typst](https://typst.app) math syntax: `:ma A = pi r^2`; below the current object when the cursor is on one |
 
 Examples: `:ci 3`, `:circle r=3 x=0 y=0`, `:rect 4 2`, `:li 3 0`, `:ar 0 -2`, `:te ++size=2 Title`.
 
@@ -327,7 +334,7 @@ What a pick puts in depends on where the command line was opened:
 |---|---|
 | A math block (block-Normal mode, or Insert mode with `<C-k>`) | The Typst name, `alpha`, with a space before it where the text before ends in a name and after it where a letter or digit follows, so Typst reads it as a name of its own (`xalpha` and `alpha2` would be other names; `2alpha` is 2 times alpha) |
 | A text block | The symbol itself, `α`. A symbol the text font (Inter) lacks is drawn from the math font: **font fallback**, drawing a character in the next bundled font that has it |
-| The board | A new math block of the name at the cursor, as `:ma alpha` makes it, at the `size` option's size |
+| The board | A new math block of the name, as `:ma alpha` makes it: at the cursor on a grid point, below the current object on an object, at the `size` option's size |
 
 - Only symbols the bundled fonts can draw are listed: 732 of the 1,189 names Typst math knows
   (counted from Typst's symbol tables, codex 0.3.0).
@@ -348,7 +355,7 @@ What a pick puts in depends on where the command line was opened:
 | Command | Does |
 |---|---|
 | `:w[rite]` | Write the board to its file |
-| `:w <file>` | Write to `<file>`. An unnamed board takes the name once the write succeeds; a named board writes a copy and keeps its name, unless `<file>` is the board's own file under another name |
+| `:w <file>` | Write to `<file>`. An unnamed board takes the name once the write succeeds; a named board writes a copy and keeps its name, unless `<file>` is the board's own file under another name. A name ending in `.svg`, `.png` or `.pdf` (any case) is refused, also after `:wq` and `:x`: `` `:w` writes lawh boards: use `:export out.png` for .png `` |
 | `:w! [file]` | As `:w` |
 | `:q[uit]` | Quit, unless the board has unwritten changes |
 | `:q!` | Quit, dropping unwritten changes |
@@ -364,6 +371,74 @@ Windows) is your home directory; `~user` is not expanded. `:w !cmd` and `:w >>fi
 A write to the board's own file marks the board saved however the path was typed: an absolute
 path, `./`, `~/` or a link to it all count, since lawh compares the files themselves after the
 write, not their names.
+
+`:w` and `:exp` both take the board as the whole key leaves it. In a mapping that runs keys after
+them, the file holds what those keys did: with `nnoremap Q :exp out.png<CR>x`, `out.png` lacks
+the object `x` deleted. With `nnoremap Q v:exp sel.png<CR>x`, the selected objects `x` deleted are
+left out of `sel.png`, and with none left the status line says
+`cannot export "sel.png": nothing to export`.
+
+### Exporting: `:exp`
+
+`:exp[ort] {file}` draws the board into an SVG, PNG or PDF file. The extension names the format,
+in any case: `:exp board.pdf`, `:exp board.PNG`. `:exp!` is the same as `:exp`. (`:ex` is not
+`:exp`: in Vim it is `:edit`.)
+
+| Command | Does |
+|---|---|
+| `:exp[ort] {file}` | Export the whole board |
+| `:exp {file}` from Visual mode (`v`, a selection, then `:`) | Export only the objects selected, framed to them |
+
+What the file holds:
+
+- Every object exported, framed to their bounds (outlines and arrowheads included) with one grid
+  unit of room on each side. No grid dots, cursor, selection or status line.
+- Shapes, text and math as the window draws them at zoom 1: outlines 0.05 units wide,
+  arrowheads 0.3 units long, text and math at their size.
+- The paper colour behind the board, unless `:set exportbg=none`: then a PNG or SVG is
+  transparent and a PDF page has no fill.
+- Every formula compiled: the export waits for them. A formula that fails is drawn as its source
+  in red, as on screen, and the message counts it.
+
+| Format | Size | What is in it |
+|---|---|---|
+| PNG | 40 times `pngscale` pixels a grid unit: 80 by default. At most 16,384 pixels a side and 64,000,000 in all: a larger board is shrunk to fit, and the message says by how much | An image, marked as sRGB |
+| SVG | 40 pixels a grid unit. A side past 16,384 pixels is shown at 16,384 (the message says by how much), the drawing unchanged | Paths only. Every glyph is its outline from the bundled fonts, so no text of the board is in the file (it can't be searched or copied), and the file refers to nothing outside itself |
+| PDF | One page at 30 pt a grid unit: the board at zoom 1, seen at 100 % in a viewer. A side past 14,400 pt (200 inches, PDF's limit for a page) is shrunk to fit, and the message says by how much | Board text is real text, in subsets of the bundled fonts, so it can be searched and copied. Math is drawn as shapes and can't be copied |
+
+**The file.** As `:w {file}`: a relative path is taken from the directory lawh was started in, a
+leading `~` is your home directory, an existing file is replaced without asking, and the write is
+atomic (the file is either the old one or the new one). An export onto the board's own file is
+refused, however the path is typed (`./`, `~/`, an absolute path, a link to it):
+`cannot export "x.svg": that is the board's own file`. `:exp !cmd` and `:exp >>file` are
+refused.
+
+**While it runs.** The status line says `exporting "out.png"`, then the window is busy until the
+file is written. Keys typed meanwhile wait and run after it, in order. A click or a close request
+right after `:exp` runs the export first (and the keys waiting behind it), then itself: the click
+lands where you clicked, and the status line keeps the message the export (or a key after it)
+left. When an export that a close ran fails, the window stays open with the error; close again
+(with unwritten changes, the warning comes next, then the close).
+
+**Messages.**
+
+| Status line | When |
+|---|---|
+| `"out.png" exported` | The file is written |
+| `"out.png" exported, 2 formulas failed` | Written; 2 formulas are drawn as their source in red |
+| `"out.png" exported, shrunk to 0.5x to fit` | Written smaller than asked, to fit a size cap |
+| ``missing the file: `:exp[ort] <file>`, with .svg, .png or .pdf`` | `:exp` alone |
+| `export needs .svg, .png or .pdf` | Any other extension, or none (`out`, `out.jpg`, `.png`) |
+| `nothing to export` | An empty board, or an empty selection |
+| `cannot export "out.png": export stopped: drawing it costs too much` | Drawing the board would take more than an export's work budget: 2 s of estimated work, a PNG's compression included |
+| `cannot export "out.png": export stopped: math took over 10 s to compile` | The formulas took more than 10 s to compile, all together |
+| `cannot export "out.png": export stopped: the file is over 64 MiB` | The file would pass 64 MiB |
+| `cannot export "out.png": export stopped: math failed while drawing; export again` | A formula that compiled failed when it was drawn (its worker crashed, say) |
+| `cannot export "no-such-dir/out.png": No such file or directory (os error 2)` | The file can't be written |
+
+When an export stops, nothing is written. One key may ask for one export; a second in the same
+key (a mapping) is refused, `that key asked for more than 1 export; the rest of it was dropped`,
+and each export also counts as one of the key's 4 writes.
 
 ### Undo and settings
 
@@ -381,8 +456,10 @@ Several options may follow one `:set`. A word starting with `"` ends the line.
 | Option | Values | Default | Does |
 |---|---|---|---|
 | `escape` | `board`, `block` | `board` | Where `<Esc>` goes from Insert mode (see above) |
+| `exportbg` | `paper`, `none` | `paper` | What `:exp` draws behind the board: the paper colour, or nothing (a transparent PNG or SVG, a PDF page with no fill) |
 | `jumplabels` | 2 to 52 different characters, none of them a space or a control character | `asdfghjklqwertyuiopzxcvbnm` | The characters jump labels are made of, the first for the nearest object |
 | `leader` | One key in Vim notation, such as `<Space>` or `,` | `\` | What `<Leader>` stands for in mappings made after it |
+| `pngscale` | 0.25 to 8, at most two decimals | `2` | A PNG export's scale: 40 times it pixels a grid unit (2 is 80) |
 | `size` | 0.25 to 16, at most two decimals | `1` | The size of new text and math blocks (see [Sizes](#sizes)) |
 | `timeoutlen` (`tm`) | 0 to 10,000 | 1000 | Milliseconds keys that start a longer mapping wait for the rest |
 
@@ -428,9 +505,11 @@ other mappings too.
   (`<Tab>`, `<C-n>`, `<S-Tab>`, `<C-p>`) go through `cmap` mappings first.
 - At most 1,000 mappings a mode. One typed key may expand at most 1,000 mappings ("recursive
   mapping" past that) and set off at most 30,000 keys.
-- Everything one typed key sets off also shares two caps. It may ask for at most 4 writes
+- Everything one typed key sets off also shares these caps. It may ask for at most 4 writes
   (`MAX_WRITES_PER_KEY`); past that: "that key asked for more than 4 writes; the rest of it was
-  dropped". And it has a work budget (`MAX_KEY_WORK`): each command counts the work it does
+  dropped". It may ask for at most 1 export (`MAX_EXPORTS_PER_KEY`), which counts as one of the 4
+  writes too; past that: "that key asked for more than 1 export; the rest of it was dropped".
+  And it has a work budget (`MAX_KEY_WORK`): each command counts the work it does
   (objects looked at, bytes of text walked, text laid out to measure it, blocks resized, jump
   labels made, symbol names matched), and past the budget: "that key did too much work; the rest
   of it was dropped". The key stops where it got to, and the board is left as after any command.
@@ -493,6 +572,38 @@ lawh board.lawh      # open board.lawh; if it doesn't exist, an empty board that
 
 The cursor starts on the board's first object in reading order, as after `gg`. On an empty board
 it starts on the grid point 0,0.
+
+### Exporting without a window
+
+```bash
+lawh export board.lawh board.pdf                 # an SVG, PNG or PDF, by the extension
+lawh export --scale 4 board.lawh board.png       # a PNG at 160 pixels a grid unit
+lawh export --transparent board.lawh board.svg   # no paper behind the board
+```
+
+`lawh export [--scale N] [--transparent] <board.lawh> <out.svg|png|pdf>` draws the board into
+the file as `:exp` does, without opening a window, and exits. The extension names the format, in
+any case. An existing file is replaced. No lawhrc is read, so a board exports the same on every
+machine.
+
+| Option | Does |
+|---|---|
+| `--scale N` (or `--scale=N`) | The PNG's scale, from 0.25 to 8 with at most two decimals (default 2), as `:set pngscale=N`. Only for `.png` |
+| `--transparent` | No paper behind the board, as `:set exportbg=none` |
+
+Options may come before, between or after the two files, but not after `--`.
+
+| Exit | When | stderr |
+|---|---|---|
+| 0 | The file is written | Nothing, or one line when there is more to know: `lawh: "out.png" exported, 2 formulas failed` (and `, shrunk to 0.5x to fit`) |
+| 1 | Nothing is written: the board is missing or can't be read (`lawh: missing.lawh: No such file or directory (os error 2)`), the export stopped (`lawh: cannot export "out.png": export stopped: drawing it costs too much`), the file is the board itself (`lawh: cannot export "b.svg": that is the board's own file`), or the file can't be written | One line |
+| 2 | The arguments are wrong: no files, a file to write without `.svg`, `.png` or `.pdf`, `--scale` for an SVG or a PDF, a bad scale, an unknown option | The problem, then the usage |
+
+A missing board is an error, never a new board. Nothing is ever printed on stdout. Logs share
+stderr: at the default level a formula that times out logs warnings before the line above.
+
+`lawh export` exports; it doesn't open a file named `export`. To open a board of that name, type
+`lawh ./export` or `lawh -- export`.
 
 Logs go to stderr. lawhrc warnings show at the default level; `RUST_LOG=info lawh board.lawh`
 logs more.

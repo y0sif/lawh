@@ -33,6 +33,9 @@ the "area of a circle" example from an empty board takes 62 keys (see the
 Milestone 3 is done: sizes for text and math, jump labels to reach any object in view in two or
 three keys, and `:sym` to put in a math symbol by name.
 
+Milestone 4 is built and being tested: export to SVG, PNG and PDF, from the window with `:export`
+or without one with `lawh export`.
+
 ## What works
 
 - [x] **Modes:** Normal, Insert (inside a text or math block), block-Normal (Vim's Normal mode inside a block), Visual (select objects) and Command (`:`)
@@ -44,15 +47,15 @@ three keys, and `:sym` to put in a math symbol by name.
 - [x] **Sizes:** text and math from 0.25 to 16 times the default size, with `<C-a>` and `<C-x>`, `:size 2`, or `size=2` in the file; math is drawn to match the height of the text beside it
 - [x] **Jump labels:** `s` puts a one- or two-character label on every other object in view; type one to jump there, or `ds` and a label to delete a far object without moving
 - [x] **Symbol search:** `:sym integral` finds a math symbol by its Typst name, with the best matches shown as you type (fuzzy matching: a name matches when it holds the query's letters in order, not necessarily side by side)
-- [x] **Placing:** put objects or a new text block below or above another, clear of the rest (`p`, `P`, `o`, `O`)
+- [x] **Placing:** put objects or a new block below or above another, clear of the rest (`p`, `P`, `o`, `O`, and `:text` or `:math` with the cursor on an object)
 - [x] **Files:** plain-text `.lawh` boards that diff cleanly in git, saved atomically with `:w`
+- [x] **Export:** `:export board.pdf` draws the board into an SVG, PNG or PDF file, or only a Visual selection; `lawh export board.lawh board.png` does it without a window. Board text in a PDF can be searched and copied
 - [x] **Config:** key maps (`:nnoremap` and family) and settings (`:set`) in a `lawhrc`
 - [x] **Mouse:** pan, zoom and click to select. Everything else from the keyboard.
 
 ## Planned for v1
 
-- [ ] **Export:** SVG, PNG and PDF (next)
-- [ ] **Moving things:** move a selection with `hjkl`, place one object beside another
+- [ ] **Moving things:** move a selection with `hjkl`, place one object beside another (next). Moving already works by taking an object with `x` and putting it with `p`
 - [ ] **Visual design pass:** the look of the canvas, the status line and the labels, before the repository goes public
 
 Not in v1: freehand drawing, collaboration, a document view, right-to-left text, images, plugins.
@@ -97,7 +100,7 @@ The `:` commands use the same names, so `:circle r=3` reads like the line it cre
 ## How it works
 
 ```text
- file, keys, mouse ──► lawh (window, input, saving)
+ file, keys, mouse ──► lawh (window, input, saving, exporting; lawh export)
                          │
                          ▼
                     lawh-core ── board model, .lawh reader and writer,
@@ -106,7 +109,8 @@ The `:` commands use the same names, so `:circle r=3` reads like the line it cre
                          ▼
                     lawh-render ── draws the board (vello_cpu) with a per-frame work budget,
                          │         and the cursor, selection, jump labels, :sym rows and
-                         │         status line over it (later: export SVG / PNG / PDF)
+                         │         status line over it; exports SVG, PNG and PDF from
+                         │         the same draw list
                          │
                          └──► lawh-math ── Typst math → vector paths, compiled in a
                                            sandboxed worker process; Typst's symbol
@@ -162,6 +166,13 @@ moves with `jkl;`):
 
 `circle.lawh` now holds the same board as `examples/area.lawh`. `:q` quits.
 
+To share it as a picture or a document, type `:exp circle.png<CR>` (or `.svg`, `.pdf`) on the
+board, or export it from a shell without opening a window:
+
+```bash
+cargo run -p lawh -- export circle.lawh circle.pdf
+```
+
 ### Key maps and settings
 
 lawh reads `lawhrc` from its config directory at start: `:set` and mapping commands, one a line.
@@ -194,6 +205,7 @@ The essentials. Every key and command: [docs/keys.md](docs/keys.md).
 | `v` | Select objects with a rectangle |
 | `u` `<C-r>` `.` | Undo, redo, repeat the last change |
 | `:w` `:q` `:wq` `:q!` | Write, quit |
+| `:export board.pdf` | Export the board (or, from Visual mode, the selection) to SVG, PNG or PDF |
 | Mouse | Drag (left or middle button) to pan, scroll to zoom, click to select |
 
 `RUST_LOG=info` prints how long the first frame took.
@@ -205,8 +217,8 @@ lawh/
 ├── crates/
 │   ├── lawh-core/     # board model, file format and the Vim engine
 │   ├── lawh-math/     # Typst math in a sandboxed worker process
-│   ├── lawh-render/   # drawing and the editing overlay (export later)
-│   └── lawh/          # the app: window, keys, mouse, saving
+│   ├── lawh-render/   # drawing, the editing overlay, and export to SVG, PNG and PDF
+│   └── lawh/          # the app: window, keys, mouse, saving, lawh export
 ├── examples/          # a sample board and a sample lawhrc
 ├── assets/fonts/      # bundled fonts
 ├── contrib/           # (empty for now)

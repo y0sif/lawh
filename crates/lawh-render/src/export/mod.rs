@@ -84,9 +84,9 @@ pub const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 /// Longest side a PDF export's page may have, in pt (200 inches); past it the scale shrinks to
 /// fit. PDF 1.x's implementation limit (ISO 32000-1, Annex C, which Acrobat keeps): Reader warns
 /// that a larger page is out of range, Ghostscript fails on a page of 1.2e8 pt, and PDF/A-2
-/// refuses one (veraPDF rule 6.1.13-11), though krilla writes any size (measured,
-/// `docs/handoff-m4-research.md`, R2). A board up to 480 units across (with the margin) keeps
-/// [`PDF_PT_PER_UNIT`].
+/// refuses one (veraPDF rule 6.1.13-11), though krilla writes any size (measured on scratch PDFs
+/// during M4's research, `docs/research/m4-measurements.md`). A board up to 480 units across
+/// (with the margin) keeps [`PDF_PT_PER_UNIT`].
 pub const MAX_PDF_PAGE_PT: f64 = 14_400.0;
 
 /// Points per grid unit of a PDF export: lawh at zoom 1 seen at 100 % in a viewer (40 pixels a
