@@ -1,5 +1,5 @@
-//! The shared draw list: what each object of a board draws, in grid units and independent of any
-//! view, so the window and every export draw the same things the same way.
+//! The shared draw list: what each object of a board draws, so the window and every export draw
+//! the same things the same way.
 //!
 //! An object is a list of [`Item`]s: shape outlines to stroke, arrowheads to fill, glyph runs
 //! (board text, and math's glyphs) and math paths. Items borrow what they draw from where it
@@ -7,6 +7,12 @@
 //! allocates nothing; the builders here are iterators, which a sink can walk twice (to estimate
 //! its cost, then to draw it). Colours are [`Paint`]s, roles the sink looks up in its
 //! [`Palette`], or a colour math asked for.
+//!
+//! Items are built in a [`Space`]: grid units, independent of any view, for exports, which map
+//! them on to their own units; or screen pixels through a viewport for the window, whose shapes
+//! keep their size on screen at every zoom ([`Style`]). The builders are the same for both, so a
+//! shape's geometry (where an arrow's shaft stops, its head's corners) is worked out in one
+//! place, in the units it is drawn in.
 //!
 //! Objects are built one at a time, handed to a [`Sink`], then dropped, so drawing a board never
 //! holds more than one formula's layout of its own.
@@ -19,11 +25,11 @@ use lawh_math::{MathGlyph, MathItem, MathLayout};
 use parley::{GlyphRun, Layout, PositionedLayoutItem};
 use vello_cpu::peniko::FontData;
 
-use crate::draw;
 use crate::export::{EXPORT_ARROW_HEAD_UNITS, EXPORT_STROKE_UNITS};
 use crate::glyphs::GlyphTable;
 use crate::palette::{Palette, math_paint};
 use crate::text::font_index;
+use crate::{Viewport, draw};
 
 /// A colour: a role the palette gives a colour to, or a colour of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,20 +39,60 @@ pub(crate) enum Paint {
     /// The source of a formula that failed ([`Palette::error`]).
     Error,
     /// The source of a formula still compiling, in the window ([`Palette::pending`]).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "exports wait for every formula; the window will draw it"
-        )
-    )]
     Pending,
     /// A colour math asked for, as Typst gave it: sRGB bytes, red, green, blue and alpha, not
     /// premultiplied.
     Rgba([u8; 4]),
 }
 
-/// How wide shape outlines are and how long arrowheads are, in grid units.
+/// Where items are built, and so what units they are in.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Space<'v> {
+    /// Grid units, independent of any view, with shapes at the window's zoom-1 sizes
+    /// ([`Style::EXPORT`]): for exports, which map items on to their own units.
+    Board,
+    /// Physical pixels through a viewport ([`Viewport::to_screen`]), with shapes at sizes that
+    /// stay the same on screen at every zoom ([`Style::screen`]): for the window.
+    Screen(&'v Viewport),
+}
+
+impl Space<'_> {
+    /// Board point `p` in this space.
+    fn point(self, p: Point) -> Point {
+        match self {
+            Space::Board => p,
+            Space::Screen(vp) => vp.to_screen(p),
+        }
+    }
+
+    /// A length of `units` grid units in this space.
+    fn length(self, units: f64) -> f64 {
+        match self {
+            Space::Board => units,
+            Space::Screen(vp) => units * vp.px_per_unit(),
+        }
+    }
+
+    /// The sizes shapes are drawn at in this space, in its units.
+    pub(crate) fn style(self) -> Style {
+        match self {
+            Space::Board => Style::EXPORT,
+            Space::Screen(vp) => Style::screen(vp),
+        }
+    }
+
+    /// `to_board`, which maps something's own units (a text's layout units, a formula's pt) to
+    /// grid units, on to this space: what a glyph run or a path built here carries.
+    pub(crate) fn map(self, to_board: Affine) -> Affine {
+        match self {
+            Space::Board => to_board,
+            Space::Screen(vp) => vp.transform() * to_board,
+        }
+    }
+}
+
+/// How wide shape outlines are and how long arrowheads are, in the units of the [`Space`] they
+/// are built in.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Style {
     pub(crate) stroke: f64,
@@ -54,14 +100,24 @@ pub(crate) struct Style {
 }
 
 impl Style {
-    /// The sizes exports draw with: the window's at zoom 1.
+    /// The sizes exports draw with, in grid units: the window's at zoom 1.
     pub(crate) const EXPORT: Style = Style {
         stroke: EXPORT_STROKE_UNITS,
         head: EXPORT_ARROW_HEAD_UNITS,
     };
+
+    /// The window's sizes through `vp`, in physical pixels: outlines
+    /// [`draw::STROKE_PX`] logical pixels wide at every zoom, and arrowheads
+    /// [`draw::ARROW_HEAD_UNITS`] long, kept between their pixel limits.
+    pub(crate) fn screen(vp: &Viewport) -> Style {
+        Style {
+            stroke: draw::stroke_width_px(vp),
+            head: draw::arrow_head_px(vp),
+        }
+    }
 }
 
-/// A shape's outline, in grid units.
+/// A shape's outline, in the units of the [`Space`] it was built in.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Outline {
     /// Axis-aligned, its radii above or at zero.
@@ -104,7 +160,8 @@ impl Outline {
     }
 }
 
-/// One thing an object draws, in grid units or in units its `to_board` maps to grid units.
+/// One thing an object draws, in the units of the [`Space`] it was built in, or in units its
+/// `transform` maps to them.
 #[derive(Clone)]
 pub(crate) enum Item<'a> {
     /// A shape's outline, stroked `width` units wide with round caps and joins.
@@ -113,7 +170,7 @@ pub(crate) enum Item<'a> {
         width: f64,
         paint: Paint,
     },
-    /// A filled triangle, its corners in grid units: an arrowhead, tip first.
+    /// A filled triangle: an arrowhead, tip first.
     Fill { corners: [Point; 3], paint: Paint },
     /// A run of glyphs from one bundled font at one size.
     Glyphs(Glyphs<'a>),
@@ -121,7 +178,9 @@ pub(crate) enum Item<'a> {
     /// round caps and joins (`kurbo::Stroke::new`'s), and is `width` pt wide.
     Path {
         path: &'a BezPath,
-        to_board: Affine,
+        /// The layout's pt to the space's units: only scales (the same along both axes) and
+        /// moves.
+        transform: Affine,
         fill: Option<Paint>,
         stroke: Option<(f64, Paint)>,
     },
@@ -131,13 +190,11 @@ pub(crate) enum Item<'a> {
 /// text, or a formula's source drawn as text), or one of a formula's glyph runs.
 #[derive(Clone)]
 pub(crate) struct Glyphs<'a> {
-    /// The font, an index into [`lawh_math::fonts`].
-    pub(crate) font: usize,
     /// The em size, in the run's units: layout units for text (`crate::text::LAYOUT_EM`), pt
     /// for math.
     pub(crate) size: f64,
-    /// The run's units to grid units: only scales (the same along both axes) and moves.
-    pub(crate) to_board: Affine,
+    /// The run's units to the space's units: only scales (the same along both axes) and moves.
+    pub(crate) transform: Affine,
     pub(crate) paint: Paint,
     pub(crate) run: Run<'a>,
 }
@@ -152,9 +209,13 @@ pub(crate) enum Run<'a> {
         glyphs: GlyphRun<'a, ()>,
         text: &'a str,
     },
-    /// A formula's glyphs. Math carries no text: its glyphs may have no character (stretched
-    /// delimiters, size variants).
-    Math(&'a [MathGlyph]),
+    /// A formula's glyphs, in the bundled font `font` (an index into [`lawh_math::fonts`]).
+    /// Math carries no text: its glyphs may have no character (stretched delimiters, size
+    /// variants).
+    Math {
+        font: usize,
+        glyphs: &'a [MathGlyph],
+    },
 }
 
 /// A glyph and where its origin is, in its run's units, y down.
@@ -168,24 +229,29 @@ pub(crate) struct Placed {
 }
 
 impl Glyphs<'_> {
+    /// The run's font, an index into [`lawh_math::fonts`]: a text run's is looked up from its
+    /// parley font when asked (the window, which draws from parley's font, never asks).
+    pub(crate) fn font(&self) -> usize {
+        match &self.run {
+            Run::Text { glyphs, .. } => font_index(glyphs.run().font()),
+            Run::Math { font, .. } => *font,
+        }
+    }
+
     /// The run's glyphs in the order they are drawn (visual order, for text).
     pub(crate) fn glyphs(&self) -> impl Iterator<Item = Placed> + Clone + '_ {
         let (text, math) = match &self.run {
             Run::Text { glyphs, .. } => (Some(glyphs.positioned_glyphs().map(text_glyph)), None),
-            Run::Math(glyphs) => (None, Some(glyphs.iter().map(math_glyph))),
+            Run::Math { glyphs, .. } => (None, Some(glyphs.iter().map(math_glyph))),
         };
         text.into_iter().flatten().chain(math.into_iter().flatten())
     }
 
     /// The text the run's glyphs show, for a text run; `None` for math.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "for the PDF exporter's text, which comes next")
-    )]
     pub(crate) fn text(&self) -> Option<&str> {
         match &self.run {
             Run::Text { text, .. } => Some(text),
-            Run::Math(_) => None,
+            Run::Math { .. } => None,
         }
     }
 
@@ -199,7 +265,7 @@ impl Glyphs<'_> {
     pub(crate) fn glyphs_with_text(&self) -> impl Iterator<Item = (Placed, Range<usize>)> + '_ {
         let run = match &self.run {
             Run::Text { glyphs, .. } => Some(glyphs),
-            Run::Math(_) => None,
+            Run::Math { .. } => None,
         };
         run.into_iter().flat_map(|glyphs| {
             // A cluster's glyphs, in the order the run's glyphs are walked: both go over the
@@ -243,8 +309,8 @@ pub(crate) struct Tools<'r> {
 pub(crate) trait Sink {
     type Error;
 
-    /// Starts object `id`, whose items lie within `bounds` (grid units, strokes and arrowheads
-    /// included).
+    /// Starts object `id`, whose items lie within `bounds` (in the units of the space they are
+    /// built in, strokes and arrowheads included).
     fn begin(
         &mut self,
         tools: &mut Tools<'_>,
@@ -256,9 +322,15 @@ pub(crate) trait Sink {
     fn item(&mut self, tools: &mut Tools<'_>, item: &Item<'_>) -> Result<(), Self::Error>;
 }
 
-/// What a shape (an ellipse, a rectangle, a line or an arrow) draws with `style`: its outline,
-/// and an arrow's head. Nothing for text or math, or for a shape whose numbers aren't finite.
-pub(crate) fn shape_items(shape: &Shape, style: Style) -> impl Iterator<Item = Item<'static>> {
+/// What a shape (an ellipse, a rectangle, a line or an arrow) draws in `space`, at the space's
+/// sizes ([`Space::style`]): its outline, and an arrow's head. At most two items. Nothing for
+/// text or math, or for a shape whose numbers aren't finite.
+///
+/// The shape is mapped into the space first and its geometry worked out there: an arrow's
+/// shaft and head in screen pixels for the window (where the head's length is clamped in
+/// pixels), in grid units for an export.
+pub(crate) fn shape_items(shape: &Shape, space: Space<'_>) -> impl Iterator<Item = Item<'static>> {
+    let style = space.style();
     let stroke = |outline| Item::Stroke {
         outline,
         width: style.stroke,
@@ -267,29 +339,39 @@ pub(crate) fn shape_items(shape: &Shape, style: Style) -> impl Iterator<Item = I
     let items = match shape {
         Shape::Ellipse { center, rx, ry } => [
             Some(stroke(Outline::Ellipse {
-                center: *center,
-                radii: Vec2::new(rx.abs(), ry.abs()),
+                center: space.point(*center),
+                radii: Vec2::new(space.length(rx.abs()), space.length(ry.abs())),
             })),
             None,
         ],
         Shape::Rect { origin, w, h } => [
             Some(stroke(Outline::Rect(
-                Rect::from_origin_size(*origin, (*w, *h)).abs(),
+                Rect::from_origin_size(space.point(*origin), (space.length(*w), space.length(*h)))
+                    .abs(),
             ))),
             None,
         ],
-        Shape::Line { a, b } => [Some(stroke(Outline::Line(Line::new(*a, *b)))), None],
-        Shape::Arrow { a, b } => match draw::arrow_parts(*a, *b, style.head) {
-            Some((end, corners)) => [
-                Some(stroke(Outline::Line(Line::new(*a, end)))),
-                Some(Item::Fill {
-                    corners,
-                    paint: Paint::Ink,
-                }),
-            ],
-            // No length, so no head.
-            None => [Some(stroke(Outline::Line(Line::new(*a, *b)))), None],
-        },
+        Shape::Line { a, b } => [
+            Some(stroke(Outline::Line(Line::new(
+                space.point(*a),
+                space.point(*b),
+            )))),
+            None,
+        ],
+        Shape::Arrow { a, b } => {
+            let (a, b) = (space.point(*a), space.point(*b));
+            match draw::arrow_parts(a, b, style.head) {
+                Some((end, corners)) => [
+                    Some(stroke(Outline::Line(Line::new(a, end)))),
+                    Some(Item::Fill {
+                        corners,
+                        paint: Paint::Ink,
+                    }),
+                ],
+                // No length, so no head.
+                None => [Some(stroke(Outline::Line(Line::new(a, b)))), None],
+            }
+        }
         Shape::Text { .. } | Shape::Math { .. } => [None, None],
     };
     let finite = shape_finite(shape);
@@ -306,18 +388,18 @@ fn shape_finite(shape: &Shape) -> bool {
     }
 }
 
-/// The bounds of what a shape draws with `style`, strokes (half their width past the outline,
-/// as round caps and joins reach) and arrowheads included; `None` for text or math, or a shape
+/// The bounds of what a shape draws in `space`, strokes (half their width past the outline, as
+/// round caps and joins reach) and arrowheads included; `None` for text or math, or a shape
 /// whose numbers aren't finite.
-pub(crate) fn shape_bounds(shape: &Shape, style: Style) -> Option<Rect> {
-    shape_items(shape, style)
+pub(crate) fn shape_bounds(shape: &Shape, space: Space<'_>) -> Option<Rect> {
+    shape_items(shape, space)
         .filter_map(|item| item_bounds(&item))
         .reduce(|a, b| a.union(b))
         .filter(Rect::is_finite)
 }
 
-/// The bounds of a shape's item in grid units; `None` for glyphs and math paths, whose bounds
-/// come from their layout.
+/// The bounds of a shape's item in its space's units; `None` for glyphs and math paths, whose
+/// bounds come from their layout.
 fn item_bounds(item: &Item<'_>) -> Option<Rect> {
     match item {
         Item::Stroke { outline, width, .. } => {
@@ -332,45 +414,55 @@ fn item_bounds(item: &Item<'_>) -> Option<Rect> {
     }
 }
 
-/// What a text laid out as `layout` draws in `paint`, `to_board` mapping its layout units to
-/// grid units: one glyph run item per glyph run, line by line.
+/// What a text laid out as `layout` draws in `paint`, `transform` mapping its layout units to
+/// the space's units (`crate::renderer::text_transform`): one glyph run item per glyph run,
+/// line by line.
 pub(crate) fn text_items<'a>(
     layout: &'a Layout<()>,
     text: &'a str,
-    to_board: Affine,
+    transform: Affine,
     paint: Paint,
 ) -> impl Iterator<Item = Item<'a>> {
     layout
         .lines()
-        .flat_map(move |line| line_items(line, text, to_board, paint))
+        .flat_map(move |line| line_items(line, text, transform, paint))
 }
 
-/// The glyph run items of one line of a text's layout, as [`text_items`] gives them: for
-/// drawing only the lines near a view.
-pub(crate) fn line_items<'a>(
+/// The glyph run items of one line of a text's layout, as [`text_items`] gives them.
+fn line_items<'a>(
     line: parley::Line<'a, ()>,
     text: &'a str,
-    to_board: Affine,
+    transform: Affine,
     paint: Paint,
 ) -> impl Iterator<Item = Item<'a>> {
     line.items().filter_map(move |item| {
         let PositionedLayoutItem::GlyphRun(glyphs) = item else {
             return None;
         };
-        let run = glyphs.run();
-        Some(Item::Glyphs(Glyphs {
-            font: font_index(run.font()),
-            size: f64::from(run.font_size()),
-            to_board,
-            paint,
-            run: Run::Text { glyphs, text },
-        }))
+        Some(run_item(glyphs, text, transform, paint))
     })
 }
 
-/// What a formula laid out as `layout` draws, `to_board` mapping its pt to grid units. Typst's
-/// default black is [`Paint::Ink`].
-pub(crate) fn math_items(layout: &MathLayout, to_board: Affine) -> impl Iterator<Item = Item<'_>> {
+/// The item of one glyph run of a text's layout, `text` the whole text laid out, as
+/// [`text_items`] gives them: for the window, which builds items only for the runs that reach
+/// its view.
+pub(crate) fn run_item<'a>(
+    glyphs: GlyphRun<'a, ()>,
+    text: &'a str,
+    transform: Affine,
+    paint: Paint,
+) -> Item<'a> {
+    Item::Glyphs(Glyphs {
+        size: f64::from(glyphs.run().font_size()),
+        transform,
+        paint,
+        run: Run::Text { glyphs, text },
+    })
+}
+
+/// What a formula laid out as `layout` draws, `transform` mapping its pt to the space's units
+/// (`Renderer::math_transform`). Typst's default black is [`Paint::Ink`].
+pub(crate) fn math_items(layout: &MathLayout, transform: Affine) -> impl Iterator<Item = Item<'_>> {
     layout.items.iter().map(move |item| match item {
         MathItem::Glyphs {
             font,
@@ -378,15 +470,17 @@ pub(crate) fn math_items(layout: &MathLayout, to_board: Affine) -> impl Iterator
             fill,
             glyphs,
         } => Item::Glyphs(Glyphs {
-            font: *font,
             size: *size,
-            to_board,
+            transform,
             paint: math_paint(*fill),
-            run: Run::Math(glyphs),
+            run: Run::Math {
+                font: *font,
+                glyphs,
+            },
         }),
         MathItem::Path { path, fill, stroke } => Item::Path {
             path,
-            to_board,
+            transform,
             fill: fill.map(math_paint),
             stroke: stroke.map(|(width, color)| (width, math_paint(color))),
         },
@@ -396,6 +490,85 @@ pub(crate) fn math_items(layout: &MathLayout, to_board: Affine) -> impl Iterator
 /// How much `transform` (which only scales, the same along both axes, and moves) scales.
 pub(crate) fn uniform_scale(transform: Affine) -> f64 {
     transform.determinant().abs().sqrt()
+}
+
+/// What a sink was handed for one object: for tests that hold the window and the exports to the
+/// same draw list (`Renderer::record_frame`, `Renderer::record_export`).
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneObject {
+    pub id: ObjectId,
+    /// Its bounds as the sink was given them: screen pixels for a window frame (the bounds it
+    /// is culled by), grid units for an export (strokes and arrowheads included).
+    pub bounds: Rect,
+    pub items: Vec<SceneItem>,
+}
+
+/// One item a sink was handed: its kind and size.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub enum SceneItem {
+    /// A shape's outline, stroked `width` wide (in the sink's units).
+    Stroke { width: f64 },
+    /// An arrowhead.
+    Fill,
+    /// A glyph run: its font (an index into `lawh_math::fonts()`), how many glyphs it holds, and
+    /// the text it shows (`None` for math).
+    Glyphs {
+        font: usize,
+        glyphs: usize,
+        text: Option<String>,
+    },
+    /// A formula's path: how many elements, and whether it is filled and stroked.
+    Path {
+        elements: usize,
+        fill: bool,
+        stroke: bool,
+    },
+}
+
+/// A sink that tallies what it is handed, as [`SceneObject`]s: for tests, through an export
+/// (`Renderer::record_export`), or as a copy of what the window's sink is handed
+/// (`Renderer::record_frame`).
+#[derive(Debug, Default)]
+pub(crate) struct Tally {
+    pub(crate) objects: Vec<SceneObject>,
+}
+
+impl Sink for Tally {
+    type Error = std::convert::Infallible;
+
+    fn begin(&mut self, _: &mut Tools<'_>, id: &ObjectId, bounds: Rect) -> Result<(), Self::Error> {
+        self.objects.push(SceneObject {
+            id: id.clone(),
+            bounds,
+            items: Vec::new(),
+        });
+        Ok(())
+    }
+
+    fn item(&mut self, _: &mut Tools<'_>, item: &Item<'_>) -> Result<(), Self::Error> {
+        let tallied = match item {
+            Item::Stroke { width, .. } => SceneItem::Stroke { width: *width },
+            Item::Fill { .. } => SceneItem::Fill,
+            Item::Glyphs(glyphs) => SceneItem::Glyphs {
+                font: glyphs.font(),
+                glyphs: glyphs.glyphs().count(),
+                text: glyphs.text().map(str::to_owned),
+            },
+            Item::Path {
+                path, fill, stroke, ..
+            } => SceneItem::Path {
+                elements: path.elements().len(),
+                fill: fill.is_some(),
+                stroke: stroke.is_some(),
+            },
+        };
+        if let Some(object) = self.objects.last_mut() {
+            object.items.push(tallied);
+        }
+        Ok(())
+    }
 }
 
 /// A sink that keeps what it is handed, for tests: the same objects and items, whoever draws
@@ -431,14 +604,14 @@ pub(crate) enum RecordedItem {
     Glyphs {
         font: usize,
         size: f64,
-        to_board: Affine,
+        transform: Affine,
         paint: Paint,
         glyphs: Vec<Placed>,
         text: Option<String>,
     },
     Path {
         elements: usize,
-        to_board: Affine,
+        transform: Affine,
         fill: Option<Paint>,
         stroke: Option<(f64, Paint)>,
     },
@@ -473,21 +646,21 @@ impl Sink for Recorder {
                 paint: *paint,
             },
             Item::Glyphs(glyphs) => RecordedItem::Glyphs {
-                font: glyphs.font,
+                font: glyphs.font(),
                 size: glyphs.size,
-                to_board: glyphs.to_board,
+                transform: glyphs.transform,
                 paint: glyphs.paint,
                 glyphs: glyphs.glyphs().collect(),
                 text: glyphs.text().map(str::to_owned),
             },
             Item::Path {
                 path,
-                to_board,
+                transform,
                 fill,
                 stroke,
             } => RecordedItem::Path {
                 elements: path.elements().len(),
-                to_board: *to_board,
+                transform: *transform,
                 fill: *fill,
                 stroke: *stroke,
             },
@@ -523,8 +696,8 @@ mod tests {
 
     #[test]
     fn shape_bounds_include_the_stroke_and_the_head() {
-        let style = Style::EXPORT;
-        let half = style.stroke / 2.0;
+        let style = Space::Board;
+        let half = Style::EXPORT.stroke / 2.0;
         let ellipse = shape_bounds(&shape("ellipse id=e1 x=0 y=0 rx=3 ry=2"), style).unwrap();
         assert!(
             close(ellipse.x0, -3.0 - half) && close(ellipse.y1, 2.0 + half),
@@ -577,8 +750,66 @@ mod tests {
             a: Point::new(f64::NAN, 0.0),
             b: Point::ZERO,
         };
-        assert_eq!(shape_items(&shape, Style::EXPORT).count(), 0);
-        assert_eq!(shape_bounds(&shape, Style::EXPORT), None);
+        assert_eq!(shape_items(&shape, Space::Board).count(), 0);
+        assert_eq!(shape_bounds(&shape, Space::Board), None);
+    }
+
+    #[test]
+    fn on_screen_shapes_are_in_pixels_at_the_window_sizes() {
+        // 80 pixels a unit, scale factor 2: outlines 4 pixels wide.
+        let vp = Viewport::new(Point::new(1.0, 2.0), 1.0, 400, 300, 2.0);
+        let items: Vec<_> = shape_items(
+            &shape("ellipse id=e1 x=3 y=2 rx=1 ry=0.5"),
+            Space::Screen(&vp),
+        )
+        .collect();
+        let [
+            Item::Stroke {
+                outline: Outline::Ellipse { center, radii },
+                width,
+                paint: Paint::Ink,
+            },
+        ] = items[..]
+        else {
+            panic!("{}", items.len());
+        };
+        assert_eq!(center, vp.to_screen(Point::new(3.0, 2.0)));
+        assert_eq!(radii, Vec2::new(80.0, 40.0));
+        assert!(close(width, 4.0), "{width}");
+        // A rectangle keeps its corner and size through the view.
+        let items: Vec<_> =
+            shape_items(&shape("rect id=r1 x=1 y=2 w=3 h=0.5"), Space::Screen(&vp)).collect();
+        let [
+            Item::Stroke {
+                outline: Outline::Rect(rect),
+                ..
+            },
+        ] = items[..]
+        else {
+            panic!("{}", items.len());
+        };
+        assert_eq!(rect, Rect::new(200.0, 150.0, 440.0, 190.0));
+        // Arrowheads are 0.3 units long, kept between 8 and 24 logical pixels: 24 pixels at
+        // zoom 1 (here 0.3 x 80), 16 when zoomed far out, 48 when zoomed far in.
+        for (zoom, head) in [(1.0, 24.0), (0.05, 16.0), (20.0, 48.0)] {
+            let vp = Viewport { zoom, ..vp };
+            let arrow = shape("arrow id=a1 x1=0 y1=0 x2=1000 y2=0");
+            let items: Vec<_> = shape_items(&arrow, Space::Screen(&vp)).collect();
+            let [
+                Item::Stroke {
+                    outline: Outline::Line(shaft),
+                    ..
+                },
+                Item::Fill { corners, .. },
+            ] = items[..]
+            else {
+                panic!("{}", items.len());
+            };
+            let tip = vp.to_screen(Point::new(1000.0, 0.0));
+            assert_eq!(corners[0], tip);
+            assert!(close(tip.x - corners[1].x, head), "{zoom}: {corners:?}");
+            assert!(close(tip.x - shaft.p1.x, head / 2.0), "{zoom}: {shaft:?}");
+        }
     }
 
     /// The glyph runs of `text` as [`text_items`] gives them.
@@ -634,7 +865,7 @@ mod tests {
         let layout = shaper.build(text);
         let fonts: Vec<_> = runs(&layout, text)
             .iter()
-            .flat_map(|run| run.glyphs_with_text().map(|(_, range)| (range, run.font)))
+            .flat_map(|run| run.glyphs_with_text().map(|(_, range)| (range, run.font())))
             .collect();
         let wedge = text.find('\u{2227}').unwrap();
         assert!(fonts.contains(&(wedge..wedge + 3, 1)), "{fonts:?}");
@@ -645,15 +876,15 @@ mod tests {
     fn math_items_keep_the_layout_and_draw_typst_black_in_ink() {
         let engine = MathEngine::new();
         let layout = engine.layout_blocking("A = sqrt(pi) r^2").unwrap();
-        let to_board = Affine::scale(0.5);
-        let items: Vec<_> = math_items(&layout, to_board).collect();
+        let transform = Affine::scale(0.5);
+        let items: Vec<_> = math_items(&layout, transform).collect();
         assert_eq!(items.len(), layout.items.len());
         let mut glyphs = 0;
         for item in &items {
             match item {
                 Item::Glyphs(run) => {
                     assert_eq!(run.paint, Paint::Ink);
-                    assert_eq!(run.to_board, to_board);
+                    assert_eq!(run.transform, transform);
                     assert_eq!(run.text(), None);
                     assert_eq!(run.glyphs_with_text().count(), 0);
                     glyphs += run.glyphs().count();

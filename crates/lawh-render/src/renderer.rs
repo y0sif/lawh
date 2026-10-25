@@ -1,23 +1,23 @@
 //! Board → pixels with `vello_cpu`.
 
-use std::cell::Cell;
 use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kurbo::{Affine, BezPath, Cap, Join, Point, Rect, Shape as _, Stroke};
+use kurbo::{Affine, BezPath, Point, Rect, Shape as _, Stroke};
 use lawh_core::board::{DEFAULT_TEXT_SIZE, MAX_TEXT_SIZE, MIN_TEXT_SIZE};
-use lawh_core::{Board, Object, Shape};
+use lawh_core::{Board, Object, ObjectId, Shape};
 use lawh_math::{MATH_FONT_SIZE_PT, MathEngine, MathItem, MathLayout, MathStatus, MathSummary};
 use parley::PositionedLayoutItem;
-use vello_cpu::color::{AlphaColor, Srgb};
 use vello_cpu::peniko::{Blob, FontData};
-use vello_cpu::{Glyph, Pixmap, RenderContext, Resources};
+use vello_cpu::{Pixmap, RenderContext, Resources};
 
 use crate::budget::{self, Budget, Estimate, GlyphSums, MIN_VISIBLE_PX};
+use crate::export::{self, MAX_EXPORT_BYTES};
 use crate::glyphs::GlyphTable;
 use crate::overlay::Overlay;
-use crate::palette::{Palette, math_paint};
+use crate::palette::Palette;
+use crate::scene::{self, Item, Paint, SceneObject, Sink as _, Space, Tally, Tools};
 use crate::status::StatusText;
 use crate::text::{Chunk, KeyMap, Known, LAYOUT_EM, Plan, TextKey, TextShaper};
 use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
@@ -25,6 +25,10 @@ use crate::{RenderError, TEXT_SIZE_UNITS, Viewport, draw};
 mod completions;
 mod labels;
 mod ui;
+mod vello;
+
+use vello::Screen;
+pub(crate) use vello::Vello;
 
 /// Width of those outlines in logical pixels.
 const OUTLINE_PX: f64 = 1.0;
@@ -171,7 +175,7 @@ struct KnownMath {
 /// what the estimates of the text it drew charged for the same: for logs, and for tests that
 /// hold the estimates to what drawing does.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Work {
+pub(crate) struct Work {
     text: TextWork,
     text_charged: TextWork,
     /// Math glyph runs set up and math glyphs drawn.
@@ -190,7 +194,7 @@ struct Work {
 
 /// Work drawing text.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct TextWork {
+pub(crate) struct TextWork {
     /// Lines whose glyph runs were walked.
     lines: f64,
     /// Glyph runs parley handed out on those lines, set up or not.
@@ -254,6 +258,15 @@ pub struct Renderer {
     measured_ns: f64,
     /// The colours of the board and the overlay, for the window and exports alike.
     pub(crate) palette: Palette,
+    /// While [`Self::record_frame`] draws a frame: what the window's sink is handed.
+    tally: Option<Tally>,
+}
+
+/// An object a frame draws: its id, and its bounds on screen.
+#[derive(Debug, Clone, Copy)]
+struct Shown<'o> {
+    id: &'o ObjectId,
+    bounds: Rect,
 }
 
 impl Renderer {
@@ -289,6 +302,7 @@ impl Renderer {
             work: Work::default(),
             measured_ns: 0.0,
             palette: Palette::LIGHT,
+            tally: None,
         }
     }
 
@@ -427,6 +441,10 @@ impl Renderer {
     /// so the image never has placeholders: math that doesn't compile in
     /// time shows its source in red. Exports have a work budget too, far
     /// larger than a window frame's.
+    ///
+    /// Encoded as exports are (sRGB, the default compression), within their
+    /// byte cap ([`MAX_EXPORT_BYTES`](crate::MAX_EXPORT_BYTES)). The image is
+    /// moved into the encoder, not copied; the next frame makes a new one.
     pub fn render_png(&mut self, board: &Board, vp: &Viewport) -> Result<Vec<u8>, RenderError> {
         if vp.width == 0 || vp.height == 0 {
             return Err(RenderError::EmptyImage {
@@ -436,10 +454,21 @@ impl Renderer {
         }
         self.resolve_math(board);
         self.draw_frame(board, vp, MathWait::Yes);
-        self.pixmap
-            .clone()
-            .into_png()
-            .map_err(|err| RenderError::Png(err.to_string()))
+        let image = std::mem::replace(&mut self.pixmap, Pixmap::new(1, 1));
+        export::encode_png(image, MAX_EXPORT_BYTES).map_err(|err| RenderError::Png(err.to_string()))
+    }
+
+    /// What a window frame of `board` through `vp` ([`Self::render`], drawn as usual) hands the
+    /// window's sink, object by object: for tests that hold the window to the draw list the
+    /// exports share ([`Self::record_export`]).
+    #[doc(hidden)]
+    pub fn record_frame(&mut self, board: &Board, vp: &Viewport) -> Vec<SceneObject> {
+        self.tally = Some(Tally::default());
+        self.render(board, vp);
+        self.tally
+            .take()
+            .map(|tally| tally.objects)
+            .unwrap_or_default()
     }
 
     /// Compiles every formula on `board` that isn't compiled yet, waiting
@@ -683,7 +712,11 @@ impl Renderer {
                 stats.too_small += 1;
                 continue;
             }
-            let outcome = self.draw_object(object, seen, vp, clip, budget);
+            let shown = Shown {
+                id: &object.id,
+                bounds: screen,
+            };
+            let outcome = self.draw_object(object, shown, seen, vp, clip, budget);
             match outcome {
                 Outcome::Drawn => {
                     stats.drawn += 1;
@@ -829,16 +862,53 @@ impl Renderer {
         Affine::translate((at.x, at.y + down)) * Affine::scale(units_per_pt)
     }
 
-    /// [`Self::math_to_board`], then on to screen pixels through `vp`.
-    fn math_transform(&self, at: Point, size: f64, baseline: f64, vp: &Viewport) -> Affine {
-        vp.transform() * self.math_to_board(at, size, baseline)
+    /// [`Self::math_to_board`], then on to `space`: what the items of a formula placed so carry
+    /// (`scene::math_items`).
+    pub(crate) fn math_transform(
+        &self,
+        space: Space<'_>,
+        at: Point,
+        size: f64,
+        baseline: f64,
+    ) -> Affine {
+        space.map(self.math_to_board(at, size, baseline))
     }
 
-    /// Draws one object whose bounds reach into `clip` (screen pixels), if
-    /// its estimated cost fits in `budget`.
+    /// The window's sink for this frame's clip, and what it may use of the renderer's.
+    fn screen(&mut self, clip: Rect, text_near: Option<Rect>) -> (Screen<'_>, Tools<'_>) {
+        let Renderer {
+            ctx,
+            resources,
+            work,
+            glyphs,
+            math_fonts,
+            palette,
+            tally,
+            ..
+        } = self;
+        (
+            Screen::new(
+                Vello { ctx, resources },
+                work,
+                clip,
+                text_near,
+                tally.as_mut(),
+            ),
+            Tools {
+                glyphs,
+                fonts: math_fonts,
+                palette,
+            },
+        )
+    }
+
+    /// Draws one object whose bounds reach into `clip` (screen pixels), if its estimated cost
+    /// fits in `budget`: its items built in screen pixels with the scene's builders (the same an
+    /// export draws, `crate::scene`), handed to the window's sink.
     fn draw_object(
         &mut self,
         object: &Object,
+        shown: Shown<'_>,
         seen: &Seen,
         vp: &Viewport,
         clip: Rect,
@@ -852,100 +922,80 @@ impl Renderer {
             }
         };
         match &object.shape {
-            Shape::Ellipse { center, rx, ry } => {
-                fits(self.stroke_px(draw::ellipse(vp, *center, *rx, *ry, clip), vp, clip, budget))
-            }
-            Shape::Rect { origin, w, h } => {
-                fits(self.stroke_px(draw::rect(vp, *origin, *w, *h, clip), vp, clip, budget))
-            }
-            Shape::Line { a, b } => {
-                fits(self.stroke_px(draw::line(vp, *a, *b, clip), vp, clip, budget))
-            }
-            Shape::Arrow { a, b } => {
-                let (shaft, head) = draw::arrow(vp, *a, *b, clip);
-                let width = draw::stroke_width_px(vp);
-                let mut cost = Estimate::new(clip, vp.width, vp.height, budget.left());
-                if let Some(shaft) = &shaft {
-                    cost.stroke(shaft, width);
-                }
-                if let Some(head) = &head {
-                    cost.fill(head);
-                }
-                if !budget.settle(&cost) {
-                    return Outcome::OverBudget;
-                }
-                if let Some(shaft) = shaft {
-                    self.stroke_ink(&shaft, width);
-                }
-                if let Some(head) = head {
-                    self.ctx.set_transform(Affine::IDENTITY);
-                    self.ctx.set_paint(self.palette.ink);
-                    self.ctx.fill_path(&head);
-                }
-                Outcome::Drawn
-            }
+            shape @ (Shape::Ellipse { .. }
+            | Shape::Rect { .. }
+            | Shape::Line { .. }
+            | Shape::Arrow { .. }) => fits(self.draw_shape(shown, shape, vp, clip, budget)),
             Shape::Text { at, text, size } => match seen.key {
                 Some(key) => {
-                    self.draw_text(*at, *size, key, text, self.palette.ink, vp, clip, budget)
+                    self.draw_text(shown, *at, *size, key, text, Paint::Ink, vp, clip, budget)
                 }
                 None => Outcome::Pending,
             },
             Shape::Math { at, src, size } => match (&seen.math, seen.key) {
                 (Some(MathStatus::Ready(layout)), _) => {
-                    fits(self.draw_math(*at, *size, layout, vp, clip, budget))
+                    fits(self.draw_math(shown, *at, *size, layout, vp, clip, budget))
                 }
                 // Laid out before, but pushed out of the math cache and not compiled again yet:
                 // drawn as the faint outline of its bounds.
                 (Some(MathStatus::Evicted(_)), _) => Outcome::Evicted,
                 (Some(MathStatus::Failed(err)), Some(key)) => {
                     tracing::debug!(id = %object.id, %err, "drawing math source instead of math");
-                    self.draw_text(*at, *size, key, src, self.palette.error, vp, clip, budget)
+                    self.draw_text(shown, *at, *size, key, src, Paint::Error, vp, clip, budget)
                 }
                 (Some(MathStatus::Pending) | None, Some(key)) => {
-                    let color = if seen.edited {
-                        self.palette.ink
+                    let paint = if seen.edited {
+                        Paint::Ink
                     } else {
-                        self.palette.pending
+                        Paint::Pending
                     };
-                    self.draw_text(*at, *size, key, src, color, vp, clip, budget)
+                    self.draw_text(shown, *at, *size, key, src, paint, vp, clip, budget)
                 }
                 (_, None) => Outcome::Pending,
             },
         }
     }
 
-    /// Strokes a path given in screen pixels with the fixed outline width, if
-    /// it fits in `budget`. Nothing to stroke always fits.
-    fn stroke_px(
+    /// Draws a shape (an ellipse, a rectangle, a line or an arrow) if it fits in `budget`: its
+    /// items in screen pixels, each cut to `clip` once, which its estimate counts and its sink
+    /// draws. A shape with nothing inside the clip costs nothing and always fits, but for an
+    /// arrow, which is charged for being looked at.
+    fn draw_shape(
         &mut self,
-        path: Option<BezPath>,
+        shown: Shown<'_>,
+        shape: &Shape,
         vp: &Viewport,
         clip: Rect,
         budget: &mut Budget,
     ) -> bool {
-        let Some(path) = path else {
+        // At most two items: an outline, and an arrow's head.
+        let mut cut: [Option<(Item<'static>, BezPath)>; 2] = [None, None];
+        for (slot, item) in cut
+            .iter_mut()
+            .zip(scene::shape_items(shape, Space::Screen(vp)))
+        {
+            *slot = draw::cut_item(&item, clip).map(|path| (item, path));
+        }
+        if !matches!(shape, Shape::Arrow { .. }) && cut.iter().all(Option::is_none) {
             return true;
-        };
-        let width = draw::stroke_width_px(vp);
+        }
         let mut cost = Estimate::new(clip, vp.width, vp.height, budget.left());
-        cost.stroke(&path, width);
+        for (item, path) in cut.iter().flatten() {
+            match item {
+                Item::Stroke { width, .. } => cost.stroke(path, *width),
+                Item::Fill { .. } => cost.fill(path),
+                Item::Glyphs(_) | Item::Path { .. } => {}
+            }
+        }
         if !budget.settle(&cost) {
             return false;
         }
-        self.stroke_ink(&path, width);
+        let (mut screen, mut tools) = self.screen(clip, None);
+        let Ok(()) = screen.begin(&mut tools, shown.id, shown.bounds);
+        for (item, path) in cut.iter().flatten() {
+            screen.shape(&mut tools, item, path);
+        }
         true
-    }
-
-    /// Strokes a path given in screen pixels in ink, `width` pixels wide.
-    fn stroke_ink(&mut self, path: &BezPath, width: f64) {
-        self.ctx.set_transform(Affine::IDENTITY);
-        self.ctx.set_paint(self.palette.ink);
-        self.ctx.set_stroke(
-            Stroke::new(width)
-                .with_caps(Cap::Round)
-                .with_join(Join::Round),
-        );
-        self.ctx.stroke_path(path);
     }
 
     /// Draws the faint outline of `screen`, an object's bounds in screen
@@ -981,22 +1031,24 @@ impl Renderer {
         true
     }
 
-    /// Draws text of size `size` with its top-left corner at `at`, if its estimated cost fits in
-    /// `budget`: only the lines whose baseline is near `clip`, and of those only the glyph runs
-    /// and glyphs that can reach into it. The estimate comes from the text's plan, at the text's
-    /// pixels per em, so a text over the budget is never walked and larger text costs more.
-    /// [`Outcome::Pending`] when the text has no layout cached.
+    /// Draws text of size `size` with its top-left corner at `at` in `paint`, if its estimated
+    /// cost fits in `budget`: only the lines whose baseline is near `clip`, and of those only the
+    /// glyph runs and glyphs that can reach into it. The estimate comes from the text's plan, at
+    /// the text's pixels per em, so a text over the budget is never walked and larger text costs
+    /// more; the glyph runs drawn are handed to the window's sink as the scene's items
+    /// (`scene::run_item`). [`Outcome::Pending`] when the text has no layout cached.
     #[expect(
         clippy::too_many_arguments,
-        reason = "the text, where and how to draw it, and the budget"
+        reason = "the object, the text, where and how to draw it, and the budget"
     )]
     fn draw_text(
         &mut self,
+        shown: Shown<'_>,
         at: Point,
         size: f64,
         key: TextKey,
         text: &str,
-        color: AlphaColor<Srgb>,
+        paint: Paint,
         vp: &Viewport,
         clip: Rect,
         budget: &mut Budget,
@@ -1005,7 +1057,18 @@ impl Renderer {
             // Nothing of it is drawn at this zoom.
             return Outcome::Drawn;
         };
-        let Some(shaped) = self.text.shaped(key, text) else {
+        let Renderer {
+            text: cache,
+            ctx,
+            resources,
+            work,
+            glyphs,
+            math_fonts,
+            palette,
+            tally,
+            ..
+        } = self;
+        let Some(shaped) = cache.shaped(key, text) else {
             return Outcome::Pending;
         };
         let plan = &shaped.plan;
@@ -1014,16 +1077,28 @@ impl Renderer {
         if !budget.settle(&cost) {
             return Outcome::OverBudget;
         }
-        self.work.text_charged.add(&charged);
+        work.text_charged.add(&charged);
+        let mut screen = Screen::new(
+            Vello { ctx, resources },
+            work,
+            clip,
+            Some(view.near),
+            tally.as_mut(),
+        );
+        let mut tools = Tools {
+            glyphs,
+            fonts: math_fonts,
+            palette,
+        };
+        let Ok(()) = screen.begin(&mut tools, shown.id, shown.bounds);
         let TextView {
             transform, near, ..
         } = view;
         let slack = RUN_SLACK_EM * f64::from(LAYOUT_EM);
         let screen_x = |x: f64| (transform * Point::new(x, 0.0)).x;
-        self.ctx.set_transform(transform);
-        self.ctx.set_paint(color);
         // Only lines with glyphs have chunks, so lines without are never looked at, and a line
         // is walked only when a run of it can reach the image ([`text_cost`] charges the same).
+        // A run is built into an item (`scene::run_item`) only when it can reach the image.
         let mut last = None;
         for chunk in plan.chunks(lines) {
             if last == Some(chunk.line) || !view.reaches(chunk) {
@@ -1033,59 +1108,30 @@ impl Renderer {
             let Some(line) = shaped.layout.get(chunk.line as usize) else {
                 continue;
             };
-            self.work.text.lines += 1.0;
+            screen.work.text.lines += 1.0;
             for item in line.items() {
                 let PositionedLayoutItem::GlyphRun(glyph_run) = item else {
                     continue;
                 };
-                self.work.text.walked_runs += 1.0;
+                screen.work.text.walked_runs += 1.0;
                 let start = f64::from(glyph_run.offset());
                 let end = start + f64::from(glyph_run.advance());
                 if screen_x(end + slack) < near.x0 || screen_x(start - slack) > near.x1 {
                     // None of its glyphs can reach the image.
                     continue;
                 }
-                let run = glyph_run.run();
-                let coords = bytemuck::cast_slice::<_, i16>(run.normalized_coords());
-                // Counted as `vello_cpu` takes them: it goes over the glyphs once.
-                let (walked, kept) = (Cell::new(0_u32), Cell::new(0_u32));
-                let drawn = self
-                    .ctx
-                    .glyph_run(&mut self.resources, run.font())
-                    .font_size(run.font_size())
-                    .hint(false)
-                    .normalized_coords(coords)
-                    .fill_glyphs(
-                        glyph_run
-                            .positioned_glyphs()
-                            .filter(|glyph| {
-                                walked.set(walked.get() + 1);
-                                near.contains(
-                                    transform * Point::new(f64::from(glyph.x), f64::from(glyph.y)),
-                                )
-                            })
-                            .map(|glyph| {
-                                kept.set(kept.get() + 1);
-                                Glyph {
-                                    id: glyph.id,
-                                    x: glyph.x,
-                                    y: glyph.y,
-                                }
-                            }),
-                    );
-                self.work.text.runs += 1.0;
-                self.work.text.walked += f64::from(walked.get());
-                self.work.text.glyphs += f64::from(kept.get());
-                if let Err(err) = drawn {
-                    tracing::debug!(?err, "some text glyphs failed to draw");
-                }
+                let item = scene::run_item(glyph_run, text, transform, paint);
+                let Ok(()) = screen.item(&mut tools, &item);
             }
         }
         Outcome::Drawn
     }
 
     /// The estimated cost of [`Self::draw_math`] with the same arguments,
-    /// counted until it is past `limit`.
+    /// counted until it is past `limit`. It walks the formula's layout itself, not the scene's
+    /// items: a formula over the budget is walked here every frame, so this loop stays as lean
+    /// as the budget prices it (`NS_PER_EXAMINED_GLYPH`), with the culling the window's sink
+    /// draws with ([`math_run_area`], [`path_area`]).
     fn math_cost(
         &mut self,
         at: Point,
@@ -1095,7 +1141,7 @@ impl Renderer {
         clip: Rect,
         limit: f64,
     ) -> Estimate {
-        let transform = self.math_transform(at, size, layout.baseline, vp);
+        let transform = self.math_transform(Space::Screen(vp), at, size, layout.baseline);
         let px_per_pt = vp.px_per_unit() * math_units_per_pt(size);
         let mut cost = Estimate::new(clip, vp.width, vp.height, limit);
         for item in &layout.items {
@@ -1106,11 +1152,11 @@ impl Renderer {
                 MathItem::Glyphs {
                     font, size, glyphs, ..
                 } => {
-                    let Some(near) = self.glyph_run_area(*font, *size, px_per_pt, clip) else {
+                    let em_px = (size * px_per_pt).abs();
+                    let Some(near) = math_run_area(&self.math_fonts, *font, em_px, clip) else {
                         continue;
                     };
                     cost.run();
-                    let em_px = (size * px_per_pt).abs();
                     for glyph in glyphs {
                         if cost.over() {
                             break;
@@ -1139,26 +1185,16 @@ impl Renderer {
         cost
     }
 
-    /// Where on screen a math glyph run's glyph origins must be to be drawn, for glyphs of
-    /// `size` pt drawn `px_per_pt` pixels to the pt; `None` when none of it is drawn (unknown
-    /// font, glyphs under half a pixel or absurdly large).
-    fn glyph_run_area(&self, font: usize, size: f64, px_per_pt: f64, clip: Rect) -> Option<Rect> {
-        if self.math_fonts.get(font).is_none() {
-            tracing::warn!(font, "math glyphs reference an unknown font");
-            return None;
-        }
-        let em_px = (size * px_per_pt).abs();
-        if em_px < MIN_VISIBLE_PX {
-            return None;
-        }
-        glyph_area(em_px, clip)
-    }
-
-    /// Draws a formula of size `size` placed at `at` ([`Self::math_to_board`]), skipping
-    /// glyphs and paths that can't reach into `clip` and cutting paths down to it, if it fits
-    /// in `budget`.
+    /// Draws a formula of size `size` placed at `at` ([`Self::math_to_board`]), if it fits in
+    /// `budget`: its items in screen pixels, handed to the window's sink, which skips glyphs and
+    /// paths that can't reach into `clip` and cuts paths down to it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the object, the formula, where and how to draw it, and the budget"
+    )]
     fn draw_math(
         &mut self,
+        shown: Shown<'_>,
         at: Point,
         size: f64,
         layout: &MathLayout,
@@ -1170,73 +1206,28 @@ impl Renderer {
         if !budget.settle(&cost) {
             return false;
         }
-        let transform = self.math_transform(at, size, layout.baseline, vp);
-        let px_per_pt = vp.px_per_unit() * math_units_per_pt(size);
-        for item in &layout.items {
-            match item {
-                MathItem::Glyphs {
-                    font,
-                    size,
-                    fill,
-                    glyphs,
-                } => {
-                    let Some(near) = self.glyph_run_area(*font, *size, px_per_pt, clip) else {
-                        continue;
-                    };
-                    let Some(font_data) = self.math_fonts.get(*font) else {
-                        continue;
-                    };
-                    self.ctx.set_transform(transform);
-                    self.ctx.set_paint(self.palette.color(math_paint(*fill)));
-                    let kept = Cell::new(0);
-                    let drawn = self
-                        .ctx
-                        .glyph_run(&mut self.resources, font_data)
-                        .font_size(to_f32(*size))
-                        .hint(false)
-                        .fill_glyphs(
-                            glyphs
-                                .iter()
-                                .filter(|glyph| {
-                                    near.contains(transform * Point::new(glyph.x, glyph.y))
-                                })
-                                .map(|glyph| {
-                                    kept.set(kept.get() + 1);
-                                    Glyph {
-                                        id: glyph.id,
-                                        x: to_f32(glyph.x),
-                                        y: to_f32(glyph.y),
-                                    }
-                                }),
-                        );
-                    self.work.math_runs += 1;
-                    self.work.math_glyphs += kept.get();
-                    if let Err(err) = drawn {
-                        tracing::debug!(?err, "some math glyphs failed to draw");
-                    }
-                }
-                MathItem::Path { path, fill, stroke } => {
-                    let stroke = stroke_px(*stroke, px_per_pt);
-                    let Some(near) = path_area(path, transform, stroke, clip) else {
-                        continue;
-                    };
-                    let mut screen = path.clone();
-                    screen.apply_affine(transform);
-                    self.ctx.set_transform(Affine::IDENTITY);
-                    if let Some(fill) = fill {
-                        self.ctx.set_paint(self.palette.color(math_paint(*fill)));
-                        self.ctx.fill_path(&draw::cut_path(&screen, near, true));
-                    }
-                    if let Some((width, color)) = stroke {
-                        self.ctx.set_paint(self.palette.color(math_paint(color)));
-                        self.ctx.set_stroke(Stroke::new(width));
-                        self.ctx.stroke_path(&draw::cut_path(&screen, near, false));
-                    }
-                }
-            }
+        let transform = self.math_transform(Space::Screen(vp), at, size, layout.baseline);
+        let (mut screen, mut tools) = self.screen(clip, None);
+        let Ok(()) = screen.begin(&mut tools, shown.id, shown.bounds);
+        for item in scene::math_items(layout, transform) {
+            let Ok(()) = screen.item(&mut tools, &item);
         }
         true
     }
+}
+
+/// Where on screen the glyph origins of a math glyph run in font `font` (an index into
+/// `fonts`), `em_px` physical pixels to the em, must be for its glyphs to be drawn; `None` when
+/// none of it is drawn (a font not in `fonts`, glyphs under half a pixel or absurdly large).
+fn math_run_area(fonts: &[FontData], font: usize, em_px: f64, clip: Rect) -> Option<Rect> {
+    if fonts.get(font).is_none() {
+        tracing::warn!(font, "math glyphs reference an unknown font");
+        return None;
+    }
+    if em_px < MIN_VISIBLE_PX {
+        return None;
+    }
+    glyph_area(em_px, clip)
 }
 
 /// A math path's stroke as its width in screen pixels and its colour; `None`
@@ -1256,10 +1247,10 @@ pub(crate) fn stroke_px<C>(stroke: Option<(f64, C)>, px_per_pt: f64) -> Option<(
 /// The screen rectangle a math path is cut to: `clip` grown by a whole stroke
 /// width, so a stroke's joins and caps are inside too. `None` when the path
 /// doesn't reach into it, so isn't drawn.
-fn path_area(
+fn path_area<C>(
     path: &BezPath,
     transform: Affine,
-    stroke: Option<(f64, [u8; 4])>,
+    stroke: Option<(f64, C)>,
     clip: Rect,
 ) -> Option<Rect> {
     let reach = stroke.map_or(0.0, |(width, _)| width);
@@ -1332,6 +1323,12 @@ pub(crate) fn text_scale(size: f64) -> f64 {
     TEXT_SIZE_UNITS / f64::from(LAYOUT_EM) * drawn_size(size)
 }
 
+/// A text of size `size` with its top-left corner at `at`: its layout units → `space`, what its
+/// glyph runs carry (`scene::text_items`).
+pub(crate) fn text_transform(space: Space<'_>, at: Point, size: f64) -> Affine {
+    space.map(Affine::translate(at.to_vec2())) * Affine::scale(text_scale(size))
+}
+
 /// The box of a text of size `size`, `width` x `height` layout units, with its top-left corner
 /// at `at`, in grid units.
 pub(crate) fn text_box(at: Point, size: f64, width: f32, height: f32) -> Rect {
@@ -1340,7 +1337,7 @@ pub(crate) fn text_box(at: Point, size: f64, width: f32, height: f32) -> Rect {
 }
 
 /// Marks the object `id` in `seen` as holding the caret, if it is a text or a formula.
-fn mark_edited(board: &Board, seen: &mut [Seen], id: &lawh_core::ObjectId) {
+fn mark_edited(board: &Board, seen: &mut [Seen], id: &ObjectId) {
     let edited = board
         .objects()
         .iter()
@@ -1430,7 +1427,7 @@ fn text_view(at: Point, size: f64, vp: &Viewport, clip: Rect) -> Option<TextView
     }
     let near = glyph_area(em_px, clip)?;
     Some(TextView {
-        transform: vp.transform() * Affine::translate(at.to_vec2()) * Affine::scale(scale),
+        transform: text_transform(Space::Screen(vp), at, size),
         near,
         em_px,
     })
@@ -1523,7 +1520,13 @@ mod tests {
         let started = Instant::now();
         assert!(renderer.begin_frame(vp));
         let mut budget = Budget::export();
-        assert!(renderer.draw_math(at, size, layout, vp, draw::clip_rect(vp), &mut budget));
+        let id = ObjectId::new("m1").unwrap();
+        let shown = Shown {
+            id: &id,
+            bounds: Rect::ZERO,
+        };
+        let clip = draw::clip_rect(vp);
+        assert!(renderer.draw_math(shown, at, size, layout, vp, clip, &mut budget));
         let image = renderer.finish_frame().to_vec();
         (image, started.elapsed())
     }
@@ -1687,7 +1690,7 @@ mod tests {
         for i in 0..count {
             board
                 .insert(Object::new(
-                    lawh_core::ObjectId::new(format!("t{i}")).unwrap(),
+                    ObjectId::new(format!("t{i}")).unwrap(),
                     Shape::Text {
                         at: Point::ZERO,
                         text: text(i),
@@ -1740,7 +1743,7 @@ mod tests {
         // An object made without the board's checks still draws and measures.
         let mut renderer = Renderer::new_trusted();
         let object = Object::new(
-            lawh_core::ObjectId::new("t1").unwrap(),
+            ObjectId::new("t1").unwrap(),
             Shape::Text {
                 at: Point::ZERO,
                 text: "x".to_owned(),

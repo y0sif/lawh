@@ -20,16 +20,18 @@
 mod png;
 
 use std::collections::HashSet;
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kurbo::{Affine, Rect};
+use kurbo::Rect;
 use lawh_core::{Board, ExportFormat, ExportOptions, ExportReport, Object, ObjectId, Shape};
 use lawh_math::{MathEngine, MathError, MathLayout};
 
+pub(crate) use self::png::encode as encode_png;
 use crate::budget::{self, Budget};
-use crate::renderer::{MathBox, layout_box, text_box, text_scale};
-use crate::scene::{self, Paint, Sink, Style, Tools};
+use crate::renderer::{MathBox, layout_box, text_box, text_transform};
+use crate::scene::{self, Item, Paint, SceneObject, Sink, Space, Tally, Tools};
 use crate::text::TextKey;
 use crate::{BASE_PX_PER_UNIT, Renderer, draw};
 
@@ -316,7 +318,7 @@ impl Renderer {
                 self.math_to_board(*at, *size, placed.baseline)
                     .transform_rect_bbox(placed.bounds),
             ),
-            (shape, ..) => scene::shape_bounds(shape, Style::EXPORT),
+            (shape, ..) => scene::shape_bounds(shape, Space::Board),
         };
         Ok(bounds.filter(Rect::is_finite))
     }
@@ -373,10 +375,11 @@ impl Renderer {
                 let layout = plan.math.layout(&self.math, src)?;
                 match (layout, key) {
                     (Ok(layout), _) => {
-                        let to_board = self.math_to_board(*at, *size, layout.baseline);
+                        let transform =
+                            self.math_transform(Space::Board, *at, *size, layout.baseline);
                         let mut tools = self.tools();
                         sink.begin(&mut tools, &object.id, planned.bounds)?;
-                        for item in scene::math_items(&layout, to_board) {
+                        for item in scene::math_items(&layout, transform) {
                             sink.item(&mut tools, &item)?;
                         }
                         return Ok(());
@@ -393,7 +396,7 @@ impl Renderer {
             (shape, ..) => {
                 let mut tools = self.tools();
                 sink.begin(&mut tools, &object.id, planned.bounds)?;
-                for item in scene::shape_items(shape, Style::EXPORT) {
+                for item in scene::shape_items(shape, Space::Board) {
                     sink.item(&mut tools, &item)?;
                 }
                 return Ok(());
@@ -401,7 +404,7 @@ impl Renderer {
         };
         let (key, text) = text;
         self.lay_out_for_export(key, text, sink.budget())?;
-        let to_board = Affine::translate(at.to_vec2()) * Affine::scale(text_scale(size));
+        let transform = text_transform(Space::Board, at, size);
         let Renderer {
             text: cache,
             glyphs,
@@ -420,7 +423,7 @@ impl Renderer {
             return Ok(());
         };
         sink.begin(&mut tools, &object.id, planned.bounds)?;
-        for item in scene::text_items(&shaped.layout, text, to_board, paint) {
+        for item in scene::text_items(&shaped.layout, text, transform, paint) {
             sink.item(&mut tools, &item)?;
         }
         Ok(())
@@ -434,12 +437,64 @@ impl Renderer {
             palette: &self.palette,
         }
     }
+
+    /// What exporting `board` (or only the objects of `selection`) hands its sink, object by
+    /// object, and the frame it exports, in grid units: for tests that hold the exports to the
+    /// window's draw list ([`Self::record_frame`]). Waits for math as [`Self::export`] does, but
+    /// draws no file.
+    #[doc(hidden)]
+    pub fn record_export(
+        &mut self,
+        board: &Board,
+        selection: Option<&[ObjectId]>,
+    ) -> Result<(Rect, Vec<SceneObject>), ExportError> {
+        let mut budget = Budget::export();
+        let mut plan = self.plan_export(board, selection, &ExportLimits::DEFAULT, &mut budget)?;
+        let mut sink = Recording {
+            sink: Tally::default(),
+            budget,
+        };
+        self.draw_export(board, &mut plan, &mut sink)?;
+        Ok((plan.frame, sink.sink.objects))
+    }
 }
 
 /// A sink an export draws into: it charges what it draws to the export's budget, which the
 /// export also charges for laying out text it must.
 trait ExportSink: Sink<Error = ExportError> {
     fn budget(&mut self) -> &mut Budget;
+}
+
+/// An export sink that hands what it is given to `sink` (a [`Tally`], or in tests a
+/// `scene::Recorder`), drawing nothing, with the export's budget.
+struct Recording<S> {
+    sink: S,
+    budget: Budget,
+}
+
+impl<S: Sink<Error = Infallible>> Sink for Recording<S> {
+    type Error = ExportError;
+
+    fn begin(
+        &mut self,
+        tools: &mut Tools<'_>,
+        id: &ObjectId,
+        bounds: Rect,
+    ) -> Result<(), ExportError> {
+        let Ok(()) = self.sink.begin(tools, id, bounds);
+        Ok(())
+    }
+
+    fn item(&mut self, tools: &mut Tools<'_>, item: &Item<'_>) -> Result<(), ExportError> {
+        let Ok(()) = self.sink.item(tools, item);
+        Ok(())
+    }
+}
+
+impl<S: Sink<Error = Infallible>> ExportSink for Recording<S> {
+    fn budget(&mut self) -> &mut Budget {
+        &mut self.budget
+    }
 }
 
 /// What an export draws, found before it draws anything.
@@ -513,38 +568,7 @@ fn source(object: &Object) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::{Item, Outline, Recorded, RecordedItem, Recorder};
-
-    /// A [`Recorder`] an export can draw into.
-    struct Recording {
-        recorder: Recorder,
-        budget: Budget,
-    }
-
-    impl Sink for Recording {
-        type Error = ExportError;
-
-        fn begin(
-            &mut self,
-            tools: &mut Tools<'_>,
-            id: &ObjectId,
-            bounds: Rect,
-        ) -> Result<(), ExportError> {
-            let Ok(()) = self.recorder.begin(tools, id, bounds);
-            Ok(())
-        }
-
-        fn item(&mut self, tools: &mut Tools<'_>, item: &Item<'_>) -> Result<(), ExportError> {
-            let Ok(()) = self.recorder.item(tools, item);
-            Ok(())
-        }
-    }
-
-    impl ExportSink for Recording {
-        fn budget(&mut self) -> &mut Budget {
-            &mut self.budget
-        }
-    }
+    use crate::scene::{Outline, Recorded, RecordedItem, Recorder};
 
     /// What exporting `selection` of `board` hands its sink, and the plan's frame and failures.
     fn record(board: &Board, selection: Option<&[ObjectId]>) -> (Vec<Recorded>, Rect, usize) {
@@ -554,11 +578,11 @@ mod tests {
             .plan_export(board, selection, &ExportLimits::DEFAULT, &mut budget)
             .unwrap();
         let mut sink = Recording {
-            recorder: Recorder::default(),
+            sink: Recorder::default(),
             budget,
         };
         renderer.draw_export(board, &mut plan, &mut sink).unwrap();
-        (sink.recorder.objects, plan.frame, plan.failed)
+        (sink.sink.objects, plan.frame, plan.failed)
     }
 
     fn id(name: &str) -> ObjectId {

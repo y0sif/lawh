@@ -23,11 +23,11 @@ use lawh_core::{Board, Object, ObjectId, Shape};
 use lawh_math::{MathEngine, MathGlyph, MathItem, MathLayout};
 
 use super::{
-    MATH_SCALE, MathWait, Renderer, UNITS_PER_PT, layout_box, text_box, text_cost, text_view,
+    MATH_SCALE, MathWait, Renderer, Shown, UNITS_PER_PT, layout_box, text_box, text_cost, text_view,
 };
 use crate::budget::{self, Budget};
 use crate::glyphs::{GlyphStats, GlyphTable};
-use crate::palette::Palette;
+use crate::scene::Paint;
 use crate::text::TextShaper;
 use crate::{Viewport, draw};
 
@@ -180,7 +180,12 @@ fn row(renderer: &mut Renderer, rows: &mut Rows, name: &str, layout: &MathLayout
         ms(median(5, || {
             renderer.begin_frame(vp);
             let mut budget = Budget::unlimited();
-            assert!(renderer.draw_math(at, CAL_SIZE, layout, vp, clip, &mut budget));
+            let id = ObjectId::new("m1").unwrap();
+            let shown = Shown {
+                id: &id,
+                bounds: Rect::ZERO,
+            };
+            assert!(renderer.draw_math(shown, at, CAL_SIZE, layout, vp, clip, &mut budget));
             black_box(renderer.finish_frame());
         }))
     });
@@ -847,6 +852,11 @@ fn picked(name: &str) -> bool {
 fn calibrate_text_drawing() {
     let mut rows = Rows::default();
     let mut renderer = Renderer::new_trusted();
+    let id = ObjectId::new("t1").unwrap();
+    let shown = Shown {
+        id: &id,
+        bounds: Rect::ZERO,
+    };
     for (kind, alphabet) in TEXT_KINDS {
         if !picked(kind) {
             continue;
@@ -876,11 +886,12 @@ fn calibrate_text_drawing() {
                                 renderer.begin_frame(&vp);
                                 let mut budget = Budget::unlimited();
                                 renderer.draw_text(
+                                    shown,
                                     Point::ZERO,
                                     size,
                                     key,
                                     &text,
-                                    Palette::LIGHT.ink,
+                                    Paint::Ink,
                                     &vp,
                                     clip,
                                     &mut budget,

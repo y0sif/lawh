@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 
 use kurbo::{Point, Rect};
 use lawh_core::{Board, Object, ObjectId, Shape};
-use lawh_render::{BASE_PX_PER_UNIT, RenderError, Renderer, TEXT_SIZE_UNITS, Viewport};
+use lawh_render::{BASE_PX_PER_UNIT, Palette, RenderError, Renderer, TEXT_SIZE_UNITS, Viewport};
 
-const PAPER: [u8; 4] = [0xFA, 0xFA, 0xF7, 0xFF];
+/// The paper colour as a frame's bytes (opaque, so premultiplied is the same).
+fn paper() -> [u8; 4] {
+    Palette::LIGHT.paper.to_rgba8().to_u8_array()
+}
 
 /// Pixels of a math error's red source text.
 fn red_pixels(buf: &[u8]) -> usize {
@@ -162,7 +165,7 @@ fn empty_board_renders_paper_and_grid_only() {
         .as_chunks::<4>()
         .0
         .iter()
-        .filter(|px| **px == PAPER)
+        .filter(|px| **px == paper())
         .count();
     // Grid dots cover a tiny share of the image.
     assert!(paper * 100 > buf.len() / 4 * 95, "{paper}");
@@ -175,7 +178,7 @@ fn grid_is_hidden_when_zoomed_out() {
     // 0.25 * 40 = 10 px per unit, under the 12 px threshold.
     let vp = Viewport::new(Point::ZERO, 0.25, 200, 100, 1.0);
     let buf = renderer.render(&Board::new(), &vp);
-    assert!(buf.as_chunks::<4>().0.iter().all(|px| *px == PAPER));
+    assert!(buf.as_chunks::<4>().0.iter().all(|px| *px == paper()));
 }
 
 #[test]
@@ -573,7 +576,7 @@ fn absurd_zoom_or_scale_factor_draws_the_paper_only() {
     ] {
         let buf = renderer.render(&board, &vp);
         assert!(
-            buf.as_chunks::<4>().0.iter().all(|px| *px == PAPER),
+            buf.as_chunks::<4>().0.iter().all(|px| *px == paper()),
             "{vp:?}"
         );
     }
@@ -599,7 +602,8 @@ fn ink_at_center_only(renderer: &mut Renderer, board: &Board, vp: &Viewport, nor
     for side in [-1.0, 1.0] {
         let px = at(side * away * normal.0, side * away * normal.1);
         assert_eq!(
-            px, PAPER,
+            px,
+            paper(),
             "{vp:?}: expected paper {away} px off the outline"
         );
     }
@@ -667,9 +671,17 @@ fn png_round_trips_the_pixels() {
     let vp = Viewport::new(Point::new(1.0, -1.0), 1.2, 320, 240, 1.0);
     let png = renderer.render_png(&board, &vp).unwrap();
     let pixels = renderer.render(&board, &vp).to_vec();
-    let decoded = vello_cpu::Pixmap::from_png(std::io::Cursor::new(png)).unwrap();
+    let decoded = vello_cpu::Pixmap::from_png(std::io::Cursor::new(&png)).unwrap();
     assert_eq!(decoded.data_as_u8_slice(), pixels.as_slice());
     assert_eq!(common::pixel(&pixels, 320, 0, 0)[3], 255);
+    // Encoded as exports are: opaque RGB, tagged sRGB.
+    let reader = png::Decoder::new(std::io::Cursor::new(&png))
+        .read_info()
+        .unwrap();
+    assert_eq!(reader.info().color_type, png::ColorType::Rgb);
+    assert!(reader.info().srgb.is_some());
+    // The image was moved into the encoder: the window's next frame is whole again.
+    assert_eq!(renderer.render(&board, &vp), pixels.as_slice());
 }
 
 /// Pixels of the faint outline drawn in place of an object over the frame budget (#C8C8C2,
@@ -943,7 +955,7 @@ fn objects_over_the_budget_become_outlines_in_board_order() {
     );
     let at = |x, y| common::pixel(&buf, 800, x, y);
     // Inside the formula's box, away from the rectangles: paper, not a black fill.
-    assert_eq!(at(400, 420), PAPER);
+    assert_eq!(at(400, 420), paper());
     // The outline's left edge, at x = 250, between grid rows.
     assert!(is_faint(at(250, 440)), "{:?}", at(250, 440));
     // r0 is under the outline: where they cross, the faint line lightens r0's ink.

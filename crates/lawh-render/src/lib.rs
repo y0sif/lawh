@@ -13,9 +13,14 @@
 //! formulas on screen are asked for. Exports ([`Renderer::export`], and
 //! [`Renderer::render_png`] of a view) wait for every formula, so they are the
 //! same every time. An export frames the whole board (or a selection) at the
-//! window's zoom-1 sizes, from a draw list in grid units every output shares,
-//! within caps of its own ([`EXPORT_MATH_WAIT`], [`MAX_EXPORT_PIXELS`],
-//! [`MAX_EXPORT_BYTES`], ...). Every colour comes from one [`Palette`].
+//! window's zoom-1 sizes, within caps of its own ([`EXPORT_MATH_WAIT`],
+//! [`MAX_EXPORT_PIXELS`], [`MAX_EXPORT_BYTES`], ...).
+//!
+//! The window and every export draw from one draw list: each object's
+//! outlines, arrowheads, glyph runs and math paths, built by the same
+//! builders, in grid units for an export and in screen pixels for the window
+//! (whose outlines and arrowheads keep their size on screen at every zoom).
+//! Every colour comes from one [`Palette`].
 //!
 //! A frame's work is budgeted, so a hostile board can't freeze the window:
 //! each object's cost is estimated before it is drawn, and objects that don't
@@ -60,6 +65,8 @@ pub use export::{
 pub use overlay::{Caret, Overlay, OverlayCursor, StatusLine, status_bar_height_px};
 pub use palette::Palette;
 pub use renderer::{FrameStats, Renderer};
+#[doc(hidden)]
+pub use scene::{SceneItem, SceneObject};
 pub use text::MAX_TEXT_CACHE_BYTES;
 pub use viewport::Viewport;
 

@@ -3,17 +3,17 @@
 
 use std::io;
 
-use kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
+use kurbo::{Affine, BezPath, Rect};
 use lawh_core::export::{MAX_PNG_SCALE_HUNDREDTHS, MIN_PNG_SCALE_HUNDREDTHS};
 use lawh_core::{Board, ExportBackground, ExportOptions, ObjectId};
 use vello_cpu::peniko::ImageAlphaType;
-use vello_cpu::{Glyph, Pixels, Pixmap, RenderContext, Resources};
+use vello_cpu::{Pixels, Pixmap, RenderContext, Resources};
 
 use super::{ExportError, ExportLimits, ExportPlan, ExportSink};
 use crate::budget::{self, Budget, Estimate, MIN_VISIBLE_PX};
 use crate::draw::{self, TOLERANCE_PX};
-use crate::renderer::{MAX_GLYPH_EM_PX, stroke_px};
-use crate::scene::{Glyphs, Item, Run, Sink, Tools, uniform_scale};
+use crate::renderer::{MAX_GLYPH_EM_PX, Vello, stroke_px};
+use crate::scene::{Glyphs, Item, Sink, Tools, uniform_scale};
 use crate::{BASE_PX_PER_UNIT, Renderer};
 
 /// Draws `plan` into a PNG at `options`' scale, shrunk to fit the pixel caps, and encodes it;
@@ -158,6 +158,14 @@ impl PngTarget {
         Ok(())
     }
 
+    /// Its context, as the window's sink draws with it.
+    fn vello(&mut self) -> Vello<'_> {
+        Vello {
+            ctx: &mut self.ctx,
+            resources: &mut self.resources,
+        }
+    }
+
     /// Renders everything drawn into the image and hands the image over.
     fn finish(mut self) -> Pixmap {
         self.ctx.flush();
@@ -193,31 +201,23 @@ impl Sink for PngTarget {
                 let width = width.abs() * self.px_per_unit;
                 self.cost.stroke(&path, width);
                 self.settle()?;
-                self.ctx.set_transform(Affine::IDENTITY);
-                self.ctx.set_paint(tools.palette.color(*paint));
-                self.ctx.set_stroke(
-                    Stroke::new(width)
-                        .with_caps(Cap::Round)
-                        .with_join(Join::Round),
-                );
-                self.ctx.stroke_path(&path);
+                self.vello()
+                    .stroke(&path, width, tools.palette.color(*paint));
             }
             Item::Fill { corners, paint } => {
                 let path = draw::triangle(corners.map(|corner| self.to_px * corner));
                 self.cost.fill(&path);
                 self.settle()?;
-                self.ctx.set_transform(Affine::IDENTITY);
-                self.ctx.set_paint(tools.palette.color(*paint));
-                self.ctx.fill_path(&path);
+                self.vello().fill(&path, tools.palette.color(*paint));
             }
             Item::Glyphs(run) => self.glyphs(tools, run)?,
             Item::Path {
                 path,
-                to_board,
+                transform,
                 fill,
                 stroke,
             } => {
-                let transform = self.to_px * *to_board;
+                let transform = self.to_px * *transform;
                 let stroke = stroke_px(*stroke, uniform_scale(transform));
                 self.cost.bound(path);
                 if fill.is_some() {
@@ -230,15 +230,11 @@ impl Sink for PngTarget {
                 // In pixels before `vello_cpu` sees it, as the window draws math paths.
                 let mut px = BezPath::clone(path);
                 px.apply_affine(transform);
-                self.ctx.set_transform(Affine::IDENTITY);
                 if let Some(fill) = fill {
-                    self.ctx.set_paint(tools.palette.color(*fill));
-                    self.ctx.fill_path(&px);
+                    self.vello().fill(&px, tools.palette.color(*fill));
                 }
                 if let Some((width, paint)) = stroke {
-                    self.ctx.set_paint(tools.palette.color(paint));
-                    self.ctx.set_stroke(Stroke::new(width));
-                    self.ctx.stroke_path(&px);
+                    self.vello().stroke(&px, width, tools.palette.color(paint));
                 }
             }
         }
@@ -250,56 +246,25 @@ impl PngTarget {
     /// Draws a glyph run, unless its glyphs are too small to see or too large to draw (as on
     /// screen).
     fn glyphs(&mut self, tools: &mut Tools<'_>, run: &Glyphs<'_>) -> Result<(), ExportError> {
-        let transform = self.to_px * run.to_board;
+        let transform = self.to_px * run.transform;
         let em_px = (run.size * uniform_scale(transform)).abs();
         if !(MIN_VISIBLE_PX..=MAX_GLYPH_EM_PX).contains(&em_px) {
             return Ok(());
         }
         self.cost.run();
+        let font = run.font();
         for glyph in run.glyphs() {
             if self.cost.over() {
                 break;
             }
-            let stats = tools.glyphs.stats(run.font, glyph.id);
+            let stats = tools.glyphs.stats(font, glyph.id);
             self.cost.glyph(Some((stats, em_px)));
         }
         self.settle()?;
-        self.ctx.set_transform(transform);
-        self.ctx.set_paint(tools.palette.color(run.paint));
-        let drawn = match &run.run {
-            Run::Text { glyphs, .. } => {
-                let font = glyphs.run();
-                let coords = bytemuck::cast_slice::<_, i16>(font.normalized_coords());
-                self.ctx
-                    .glyph_run(&mut self.resources, font.font())
-                    .font_size(font.font_size())
-                    .hint(false)
-                    .normalized_coords(coords)
-                    .fill_glyphs(glyphs.positioned_glyphs().map(|glyph| Glyph {
-                        id: glyph.id,
-                        x: glyph.x,
-                        y: glyph.y,
-                    }))
-            }
-            Run::Math(_) => {
-                let Some(font) = tools.fonts.get(run.font) else {
-                    tracing::warn!(font = run.font, "math glyphs reference an unknown font");
-                    return Ok(());
-                };
-                self.ctx
-                    .glyph_run(&mut self.resources, font)
-                    .font_size(to_f32(run.size))
-                    .hint(false)
-                    .fill_glyphs(run.glyphs().map(|glyph| Glyph {
-                        id: glyph.id,
-                        x: to_f32(glyph.x),
-                        y: to_f32(glyph.y),
-                    }))
-            }
-        };
-        if let Err(err) = drawn {
-            tracing::debug!(?err, "some glyphs failed to draw for export");
-        }
+        let mut vello = self.vello();
+        vello.glyph_state(transform, tools.palette.color(run.paint));
+        // Every glyph: the frame holds them all.
+        vello.glyphs(tools.fonts, run, |_| true);
         Ok(())
     }
 }
@@ -307,8 +272,8 @@ impl PngTarget {
 /// Encodes `pixmap` as PNG: RGB when every pixel is opaque, else RGBA (not premultiplied), 8
 /// bits a channel, the default compression and an sRGB chunk. Moves the image's pixels out of
 /// `pixmap` instead of copying them. [`ExportError::TooLarge`] once the file passes
-/// `max_bytes`.
-fn encode(pixmap: Pixmap, max_bytes: usize) -> Result<Vec<u8>, ExportError> {
+/// `max_bytes`. Exports and `Renderer::render_png` both encode with this.
+pub(crate) fn encode(pixmap: Pixmap, max_bytes: usize) -> Result<Vec<u8>, ExportError> {
     let (width, height) = (u32::from(pixmap.width()), u32::from(pixmap.height()));
     let (color, pixels) = match pixmap.try_take_rgb8(ImageAlphaType::Alpha) {
         Pixels::Rgb8(pixels) => (::png::ColorType::Rgb, pixels),
@@ -372,14 +337,6 @@ impl io::Write for Capped {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
-}
-
-#[expect(
-    clippy::cast_possible_truncation,
-    reason = "glyph sizes and positions in pt are far inside f32 range and precision"
-)]
-fn to_f32(v: f64) -> f32 {
-    v as f32
 }
 
 #[cfg(test)]

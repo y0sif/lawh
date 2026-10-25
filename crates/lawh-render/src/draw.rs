@@ -1,10 +1,12 @@
-//! Shape geometry in screen pixels: outlines, arrowheads, the dot grid and math paths.
+//! Geometry in screen pixels: the parts of shapes inside the view, arrowheads, the dot grid and
+//! math paths.
 //!
-//! Every outline is cut down to `clip`, a rectangle a little larger than the image, in `f64`
-//! before `vello_cpu` sees it. Shapes can be millions of pixels across at high zoom; cut down,
-//! they cost the same as small ones, and `vello_cpu`'s `f32` coordinates stay precise.
-//! `vello_cpu` flattens every curve that reaches into the image whole, so an uncut curve
-//! billions of pixels long would take gigabytes.
+//! The window's shapes come from the shared draw list (`crate::scene`) in screen pixels, and
+//! every outline is cut down to `clip`, a rectangle a little larger than the image, in `f64`
+//! before `vello_cpu` sees it ([`cut_item`]). Shapes can be millions of pixels across at high
+//! zoom; cut down, they cost the same as small ones, and `vello_cpu`'s `f32` coordinates stay
+//! precise. `vello_cpu` flattens every curve that reaches into the image whole, so an uncut
+//! curve billions of pixels long would take gigabytes.
 
 use std::f64::consts::{PI, TAU};
 
@@ -14,6 +16,7 @@ use kurbo::{
 };
 
 use crate::Viewport;
+use crate::scene::{Item, Outline};
 
 /// Curve flattening tolerance in physical pixels.
 pub(crate) const TOLERANCE_PX: f64 = 0.1;
@@ -75,7 +78,7 @@ pub(crate) fn stroke_width_px(vp: &Viewport) -> f64 {
 
 /// How long an arrowhead is through `vp`, in physical pixels, before an arrow shorter than that
 /// cuts it down: [`ARROW_HEAD_UNITS`] kept between the pixel limits.
-fn arrow_head_px(vp: &Viewport) -> f64 {
+pub(crate) fn arrow_head_px(vp: &Viewport) -> f64 {
     let sf = vp.scale_factor;
     (ARROW_HEAD_UNITS * vp.px_per_unit())
         .max(ARROW_HEAD_MIN_PX * sf)
@@ -85,8 +88,8 @@ fn arrow_head_px(vp: &Viewport) -> f64 {
 /// An arrow from `a` to `b` with a head `head` long, cut down to the arrow's length, in any
 /// units: where its shaft ends, inside the head so the shaft's stroke never pokes past the tip,
 /// and the head's corners, tip first. `None` for an arrow of no length (or not finite), which
-/// has no head. The window ([`arrow`], in screen pixels) and exports (`crate::scene`, in grid
-/// units) both build arrows with this.
+/// has no head. `crate::scene::shape_items` builds every arrow with this, in screen pixels for
+/// the window and in grid units for exports.
 pub(crate) fn arrow_parts(a: Point, b: Point, head: f64) -> Option<(Point, [Point; 3])> {
     let dir = b - a;
     let len = dir.hypot();
@@ -100,17 +103,27 @@ pub(crate) fn arrow_parts(a: Point, b: Point, head: f64) -> Option<(Point, [Poin
     Some((b - along * (head * 0.5), [b, base + across, base - across]))
 }
 
-/// The part of an ellipse's outline inside `clip`, or `None` when none of it is.
-pub(crate) fn ellipse(
-    vp: &Viewport,
-    center: Point,
-    rx: f64,
-    ry: f64,
-    clip: Rect,
-) -> Option<BezPath> {
-    let s = vp.px_per_unit();
-    let center = vp.to_screen(center);
-    let radii = Vec2::new(rx.abs() * s, ry.abs() * s);
+/// What the window strokes or fills of a shape's `item`, given in screen pixels: the part of
+/// its outline inside `clip`, or its arrowhead when that reaches into `clip`; `None` when none
+/// of it does, and for glyphs and math paths, which are cut as they are drawn.
+pub(crate) fn cut_item(item: &Item<'_>, clip: Rect) -> Option<BezPath> {
+    match item {
+        Item::Stroke { outline, .. } => match *outline {
+            Outline::Ellipse { center, radii } => ellipse(center, radii, clip),
+            Outline::Rect(rect) => rect_outline(rect, clip),
+            Outline::Line(line) => clip_segment(line.p0, line.p1, clip).map(|(a, b)| segment(a, b)),
+        },
+        Item::Fill { corners, .. } => {
+            let tip = triangle(*corners);
+            tip.bounding_box().overlaps(clip).then_some(tip)
+        }
+        Item::Glyphs(_) | Item::Path { .. } => None,
+    }
+}
+
+/// The part of the outline of the ellipse `center`, `radii` (axis-aligned, its radii at or
+/// above zero) inside `clip`, or `None` when none of it is.
+fn ellipse(center: Point, radii: Vec2, clip: Rect) -> Option<BezPath> {
     let bounds = Rect::new(
         center.x - radii.x,
         center.y - radii.y,
@@ -166,11 +179,9 @@ fn visible_arcs(center: Point, radii: Vec2, clip: Rect) -> Option<BezPath> {
     (!path.elements().is_empty()).then_some(path)
 }
 
-/// A rectangle's outline, with the edges outside `clip` moved onto it, or `None` when no edge
-/// reaches into `clip`.
-pub(crate) fn rect(vp: &Viewport, origin: Point, w: f64, h: f64, clip: Rect) -> Option<BezPath> {
-    let s = vp.px_per_unit();
-    let rect = Rect::from_origin_size(vp.to_screen(origin), (w * s, h * s)).abs();
+/// The outline of `rect` (its corners in order), with the edges outside `clip` moved onto it, or
+/// `None` when no edge reaches into `clip`.
+fn rect_outline(rect: Rect, clip: Rect) -> Option<BezPath> {
     if !(rect.is_finite() && rect.overlaps(clip)) {
         return None;
     }
@@ -181,31 +192,6 @@ pub(crate) fn rect(vp: &Viewport, origin: Point, w: f64, h: f64, clip: Rect) -> 
     }
     // A moved edge lies on the clip's border, outside the image by more than half a stroke.
     Some(rect.intersect(clip).to_path(TOLERANCE_PX))
-}
-
-/// The part of a line inside `clip`.
-pub(crate) fn line(vp: &Viewport, a: Point, b: Point, clip: Rect) -> Option<BezPath> {
-    let (a, b) = clip_segment(vp.to_screen(a), vp.to_screen(b), clip)?;
-    Some(segment(a, b))
-}
-
-/// An arrow as a shaft to stroke and a head to fill, each cut to `clip` (`None` when outside
-/// it). The shaft stops inside the head so its stroke never pokes past the tip. A zero-length
-/// arrow has no head.
-pub(crate) fn arrow(
-    vp: &Viewport,
-    a: Point,
-    b: Point,
-    clip: Rect,
-) -> (Option<BezPath>, Option<BezPath>) {
-    let (a, b) = (vp.to_screen(a), vp.to_screen(b));
-    let Some((end, corners)) = arrow_parts(a, b, arrow_head_px(vp)) else {
-        return (clip_segment(a, b, clip).map(|(a, b)| segment(a, b)), None);
-    };
-    let tip = triangle(corners);
-    let tip = tip.bounding_box().overlaps(clip).then_some(tip);
-    let shaft = clip_segment(a, end, clip).map(|(a, b)| segment(a, b));
-    (shaft, tip)
 }
 
 /// The closed path through `corners`.
