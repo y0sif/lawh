@@ -1,25 +1,15 @@
 name: CI
 
-# While the repo is private, Actions minutes are limited (2,000 a month on GitHub Free),
-# so pushes and pull requests run on Linux only. macOS and Windows run when triggered by
-# hand (all_platforms) and from the release workflow. Once the repo is public, runners are
-# free: switch the default to all three platforms.
+# Pushes to main and pull requests run the checks on Linux, macOS and Windows. Standard GitHub
+# runners are free for public repositories. The release workflow calls this one first
+# (workflow_call), so a tag only builds archives from a commit that passes.
 
 on:
   push:
     branches: [main]
   pull_request:
   workflow_dispatch:
-    inputs:
-      all_platforms:
-        description: Also run on macOS and Windows
-        type: boolean
-        default: false
   workflow_call:
-    inputs:
-      all_platforms:
-        type: boolean
-        default: true
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
@@ -47,11 +37,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.all_platforms && '["ubuntu-latest","macos-latest","windows-latest"]' || '["ubuntu-latest"]') }}
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       # Full debug info for every test binary filled the Linux runner's disk during
-      # `cargo test` (PR #2). Line tables keep file and line numbers in backtraces.
+      # `cargo test` (PR #2). Line tables keep file and line numbers in backtraces. Set on
+      # macOS and Windows too, so their test binaries are smaller as well and the three
+      # platforms build the same profile.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v7
@@ -68,6 +60,31 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The third-party licence file each release archive carries (release.yml): fails when a crate's
+  # licence can't be read or a clarification in about.toml no longer matches its file (cargo-about
+  # only warns about that), so a dependency bump shows it here rather than on a release tag.
+  licence-file:
+    name: Third-party licence file
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+      # Every target in about.toml at once.
+      - name: Generate
+        run: |
+          log="$RUNNER_TEMP/about.log"
+          status=0
+          cargo about generate --locked --fail about.hbs -o "$RUNNER_TEMP/THIRD-PARTY-LICENSES.txt" 2> "$log" || status=$?
+          cat "$log"
+          if grep -q 'failed to validate' "$log"; then
+            echo "::error::a clarification in about.toml no longer matches its file: update its checksum"
+            exit 1
+          fi
+          exit "$status"
 
   msrv:
     name: Minimum Rust version

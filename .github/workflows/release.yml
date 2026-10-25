@@ -1,8 +1,10 @@
 name: Release
 
 # Push a tag like v0.1.0 to build lawh for Linux, macOS and Windows and attach the archives to a
-# GitHub Release. Builds are not code-signed: macOS Gatekeeper and Windows SmartScreen warn on
-# first launch. A tag with a hyphen (v0.1.0-alpha.1) becomes a pre-release.
+# draft GitHub Release: publish the draft by hand once a download has been tried. The tag must
+# match lawh's version in Cargo.toml without its "v": tag v0.1.0-rc.1 needs version
+# "0.1.0-rc.1". A tag with a hyphen becomes a pre-release. Builds are not code-signed: macOS
+# Gatekeeper and Windows SmartScreen warn on first launch.
 
 on:
   push:
@@ -15,11 +17,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: Tag matches the version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compare the tag with lawh's version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "lawh") | .version')"
+          if [[ -z "$version" ]]; then
+            echo "::error::cargo metadata lists no lawh package"
+            exit 1
+          fi
+          if [[ "$tag" != "$version" ]]; then
+            echo "::error::tag $GITHUB_REF_NAME doesn't match lawh's version $version (Cargo.toml)"
+            exit 1
+          fi
+          echo "Tag $GITHUB_REF_NAME matches lawh $version"
+
   ci:
     name: Checks
+    needs: version
     uses: ./.github/workflows/ci.yml
-    with:
-      all_platforms: true
 
   build:
     name: Build (${{ matrix.target }})
@@ -28,12 +50,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-latest, target: x86_64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, smoke: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, smoke: true }
+          - { os: macos-latest, target: aarch64-apple-darwin, smoke: true }
+          # Cross-compiled on the arm64 runner. GitHub's macOS arm64 images don't list Rosetta,
+          # so this binary isn't run here.
+          - { os: macos-latest, target: x86_64-apple-darwin, smoke: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, smoke: true }
     runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -42,22 +68,76 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: cargo build --release --locked -p lawh --target ${{ matrix.target }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.2
+      - run: cargo build --release --locked -p lawh --target "$TARGET"
+        shell: bash
+      # The built binary starts, and exports a board with a formula: the export compiles it in
+      # the math worker, which is this binary started again. No display needed. A clean export
+      # prints nothing; a formula that fails prints "... formula(s) failed" and still exits 0.
+      - name: Smoke test
+        if: matrix.smoke
+        shell: bash
+        run: |
+          bin="target/$TARGET/release/lawh"
+          if [[ "$TARGET" == *windows* ]]; then bin="$bin.exe"; fi
+          tmp="$RUNNER_TEMP"
+          if command -v cygpath > /dev/null; then tmp="$(cygpath -m "$tmp")"; fi
+          "$bin" --version
+          out="$tmp/area.svg"
+          if ! note="$("$bin" export examples/area.lawh "$out" 2>&1)"; then
+            echo "$note"
+            echo "::error::lawh export failed"
+            exit 1
+          fi
+          if [[ -n "$note" ]]; then echo "$note"; fi
+          if [[ "$note" == *failed* ]]; then
+            echo "::error::lawh export reported a formula that failed"
+            exit 1
+          fi
+          if [[ ! -s "$out" ]]; then
+            echo "::error::lawh export wrote no SVG, or an empty one"
+            exit 1
+          fi
+          echo "area.svg: $(wc -c < "$out") bytes"
+      - name: glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          floor="$(objdump -T "target/$TARGET/release/lawh" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+          echo "lawh for $TARGET needs ${floor:?no GLIBC symbol versions found} or newer"
+          echo "- \`$TARGET\`: needs glibc ${floor#GLIBC_} or newer" >> "$GITHUB_STEP_SUMMARY"
+      # cargo-about lists the crates built for this target; the embedded notices cover what it
+      # can't see (see the file's header).
+      - name: Third-party licences
+        shell: bash
+        run: |
+          log="$RUNNER_TEMP/about.log"
+          status=0
+          cargo about generate --locked --fail --target "$TARGET" about.hbs -o THIRD-PARTY-LICENSES.txt 2> "$log" || status=$?
+          cat "$log"
+          if grep -q 'failed to validate' "$log"; then
+            echo "::error::a clarification in about.toml no longer matches its file: update its checksum"
+            exit 1
+          fi
+          if [[ "$status" != 0 ]]; then exit "$status"; fi
+          printf '\n\n' >> THIRD-PARTY-LICENSES.txt
+          cat assets/licenses/EMBEDDED-NOTICES.txt >> THIRD-PARTY-LICENSES.txt
       - name: Package
         shell: bash
         run: |
-          name="lawh-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="lawh-${GITHUB_REF_NAME}-${TARGET}"
           mkdir -p "dist/$name"
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
-            cp "target/${{ matrix.target }}/release/lawh.exe" "dist/$name/"
+          if [[ "$TARGET" == *windows* ]]; then
+            cp "target/$TARGET/release/lawh.exe" "dist/$name/"
           else
-            cp "target/${{ matrix.target }}/release/lawh" "dist/$name/"
+            cp "target/$TARGET/release/lawh" "dist/$name/"
           fi
-          cp README.md LICENSE "dist/$name/"
+          cp README.md LICENSE THIRD-PARTY-LICENSES.txt "dist/$name/"
           # The binary embeds the bundled fonts; OFL-1.1 requires their licences alongside.
           cp assets/fonts/Inter-OFL.txt assets/fonts/Libertinus-OFL.txt "dist/$name/"
           cd dist
-          if [[ "${{ matrix.target }}" == *windows* ]]; then
+          if [[ "$TARGET" == *windows* ]]; then
             7z a -tzip "$name.zip" "$name" > /dev/null
           else
             tar czf "$name.tar.gz" "$name"
@@ -70,7 +150,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Publish release
+    name: Publish draft release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -82,10 +162,11 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Checksums
-        run: cd dist && sha256sum * > SHA256SUMS
+        run: cd dist && sha256sum -- * > SHA256SUMS
       - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
+          draft: true
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           fail_on_unmatched_files: true

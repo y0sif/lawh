@@ -12,8 +12,8 @@ name: Bench
 # `measure_cost` the same with text measured by the real renderer. Last, how long lawh-math
 # takes to build the `:sym` list. These assert no time: read the numbers.
 #
-# Run by hand only (`gh workflow run bench.yml`): the repo is private and Actions minutes are
-# limited.
+# Run by hand only (`gh workflow run bench.yml`): the timings need a quiet runner and a person
+# to read them, so they don't run on every push.
 
 on:
   workflow_dispatch:

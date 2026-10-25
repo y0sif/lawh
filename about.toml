@@ -1,0 +1,117 @@
+# cargo-about: the third-party licence file in each release archive (THIRD-PARTY-LICENSES.txt).
+# release.yml runs `cargo about generate --locked --fail --target <target> about.hbs` for each
+# target it builds, then appends assets/licenses/EMBEDDED-NOTICES.txt (notices no Rust licence
+# tool reports). Local run: cargo about generate --locked --fail about.hbs -o target/THIRD-PARTY.txt
+
+# The licences cargo-about may pick, in order of preference: from "A OR B" it takes the first one
+# listed here, so most crates resolve to MIT. The same set as deny.toml's allow list: a licence
+# cargo-deny refuses never reaches this file.
+accepted = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OFL-1.1",
+]
+# Every target release.yml builds, so the platform crates (windows-sys, objc2, wayland) are known.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Only what is compiled into the binary: build scripts and test-only crates are not.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# lawh's own crates (publish = false): lawh's LICENSE ships next to this file.
+private = { ignore = true }
+
+# Crates whose licence files cargo-about can't match on its own (confidence below 0.8: libm's
+# licence has a preamble and its copyright lines, windows-rs indents its files), so it would print
+# the bare licence template with no copyright line instead. These point it at the files. A
+# version bump can change a file: cargo-about then only warns ("failed to validate all files
+# specified in clarification") and falls back to the template, so CI and release.yml fail on that
+# warning. The fix is the new file's `sha256sum`. The windows-rs files are the same in every
+# version in Cargo.lock today. For a target without Windows, cargo-about warns that the
+# windows-rs entries match no crate: expected, and not a failure.
+[dpi.clarify]
+license = "Apache-2.0 AND MIT"
+
+[[dpi.clarify.files]]
+path = "LICENSE"
+license = "Apache-2.0"
+checksum = "6dc0e068dcf3a5bc8e054205b85b7720e1d49265bbc64bf515d2cf79197df69a"
+
+[[dpi.clarify.files]]
+path = "LICENSE-LIBM-MIT"
+license = "MIT"
+checksum = "9eff396a99bafd208e7126602420d6864f6066c08b84485a5b032320a9c01997"
+
+[libm.clarify]
+license = "MIT"
+
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+[windows-sys.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-sys.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-sys.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-link.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-link.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-targets.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-targets.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-targets.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows_x86_64_msvc.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows_x86_64_msvc.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows_x86_64_msvc.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"

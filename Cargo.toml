@@ -12,7 +12,8 @@ license = "MIT"
 authors = ["y0sif <yosifsoli981@gmail.com>"]
 repository = "https://github.com/y0sif/lawh"
 homepage = "https://github.com/y0sif/lawh"
-# The repo is private until the app has been tested. Flip this when it goes public.
+# Not on crates.io yet: lawh-math embeds the bundled fonts from assets/fonts, outside its crate
+# directory, so the crates can't be packaged as they are.
 publish = false
 
 [workspace.dependencies]

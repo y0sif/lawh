@@ -1,6 +1,6 @@
 [package]
 name = "lawh-math"
-description = "Sandboxed Typst math layout to vector paths, compiled in a worker process, for the lawh whiteboard"
+description = "Typst math laid out to vector paths in a sandboxed worker process, with caches, bundled fonts and the :sym symbol list, for the lawh whiteboard"
 keywords = ["whiteboard", "typst", "math", "vector"]
 categories = ["mathematics", "graphics"]
 readme = "../../README.md"
