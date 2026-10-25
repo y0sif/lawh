@@ -336,11 +336,11 @@ binary instead.
   stacks and one malloc arena (`MALLOC_ARENA_MAX=1`; glibc's allocator otherwise reserves a
   64 MiB region of address space, an arena, per thread), so its address space tracks the memory
   it uses.
-- On start, on Unix, it caps its address space at **768 MiB** (`RLIMIT_AS`) and turns off core
-  dumps, lowering both soft and hard limits so nothing in it can raise them again. The memory cap
-  holds on Linux. macOS accepts `RLIMIT_AS` but doesn't enforce it, and Windows has no cap yet (it
-  needs a Job Object, the Windows feature that sets limits on a group of processes); there only
-  the timeout bounds a runaway compile.
+- On start, on Linux, it caps its address space at **768 MiB** (`RLIMIT_AS`); on Linux and macOS
+  it turns off core dumps. Both soft and hard limits are lowered, so nothing in it can raise them
+  again. macOS refuses `RLIMIT_AS` (`EINVAL`, seen on GitHub's macOS 26 runner), and Windows has no
+  cap yet (it needs a Job Object, the Windows feature that sets limits on a group of processes);
+  there only the timeout bounds a runaway compile.
 - A compile that takes more than **2 s** (`DEFAULT_TIMEOUT`) gets the worker killed and the
   formula marked `Timeout`. A worker that crashes (stack overflow, memory cap) or sends anything
   malformed is killed too, and the formula is marked `Crashed`.
@@ -1338,8 +1338,8 @@ can recurse deeply. So:
 - **No core dumps, on Unix:** on Linux and macOS the worker turns core dumps off (`RLIMIT_CORE`),
   so a crash doesn't write the worker's memory to disk.
 
-**The memory cap is not in place on macOS or Windows yet.** macOS accepts the same limit but
-doesn't enforce it, and Windows needs a Job Object (the Windows feature that sets limits on a
+**The memory cap is not in place on macOS or Windows yet.** macOS refuses the same limit
+(`EINVAL`), and Windows needs a Job Object (the Windows feature that sets limits on a
 group of processes), which lawh doesn't create yet. On both, a hostile formula can allocate as
 much memory as it can in the 2 s before the worker is killed.
 

@@ -55,7 +55,8 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # --no-fail-fast: one platform's failures all show in one run.
+      - run: cargo test --workspace --locked --no-fail-fast
 
   deny:
     name: Licences and advisories

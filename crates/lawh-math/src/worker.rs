@@ -14,7 +14,7 @@ use crate::MathError;
 use crate::compile::{Outcome, compile};
 use crate::protocol;
 
-/// Address space the worker process may map, set as `RLIMIT_AS` on Unix when
+/// Address space the worker process may map, set as `RLIMIT_AS` on Linux when
 /// it starts. An allocation past it fails and aborts the worker, which the
 /// engine reports as [`MathError::Crashed`].
 ///
@@ -120,21 +120,21 @@ fn start_compiler() -> io::Result<(mpsc::Sender<String>, mpsc::Receiver<Outcome>
     Ok((job_tx, result_rx))
 }
 
-/// Caps the address space at [`WORKER_MEMORY_LIMIT_BYTES`] and turns off core
-/// dumps, so a crash doesn't write the worker's memory to disk. Both the soft
-/// and hard limits are lowered, so nothing in the process can raise them
-/// again.
+/// Caps the address space at [`WORKER_MEMORY_LIMIT_BYTES`] (Linux only) and
+/// turns off core dumps, so a crash doesn't write the worker's memory to disk.
+/// Both the soft and hard limits are lowered, so nothing in the process can
+/// raise them again.
 ///
-/// macOS accepts `RLIMIT_AS` but doesn't enforce it; there, as on Windows,
-/// the engine's kill on timeout is what bounds a runaway compile.
+/// macOS refuses `RLIMIT_AS` with `EINVAL` (GitHub's macOS 26 runner, CI run
+/// 40216100811), so it isn't asked for there; on macOS, as on Windows, the
+/// engine's kill on timeout is what bounds a runaway compile.
 #[cfg(unix)]
 fn limit_resources() {
     use rlimit::Resource;
 
-    for (resource, cap) in [
-        (Resource::AS, WORKER_MEMORY_LIMIT_BYTES),
-        (Resource::CORE, 0),
-    ] {
+    let address_space =
+        cfg!(target_os = "linux").then_some((Resource::AS, WORKER_MEMORY_LIMIT_BYTES));
+    for (resource, cap) in address_space.into_iter().chain([(Resource::CORE, 0)]) {
         let lowered = resource
             .get()
             .and_then(|(_, hard)| resource.set(cap.min(hard), cap.min(hard)));
