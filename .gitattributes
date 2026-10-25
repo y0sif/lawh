@@ -8,7 +8,7 @@ examples/lawhrc text eol=lf
 *.otf binary
 *.png binary
 # release.yml joins cargo-about's output (from about.hbs) and the embedded notices into
-# THIRD-PARTY-LICENSES.txt: LF on every runner, Windows included, so the file has one line ending.
+# THIRD-PARTY-LICENSES.txt on one Linux runner: LF on every checkout keeps one line ending.
 about.hbs text eol=lf
 about.toml text eol=lf
 assets/licenses/*.txt text eol=lf

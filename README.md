@@ -74,10 +74,10 @@ of the two bundled fonts. `SHA256SUMS`, next to the archives, lists their checks
 macOS) checks the one you downloaded. Put `lawh` somewhere on your `PATH`.
 
 **Linux** needs no extra packages: lawh loads the X11 or Wayland libraries your desktop already
-has when it starts. The Linux archives are built on Ubuntu 24.04, whose glibc is 2.39
-([Launchpad](https://launchpad.net/ubuntu/noble/+source/glibc), checked 2026-10-25), so glibc
-2.39 or newer is enough; the oldest glibc each build needs is printed in the summary of the
-release workflow run that built it.
+has when it starts. It needs glibc 2.35 or newer, measured on the x86_64 and arm64 binaries of
+v0.1.0-rc.1: [Ubuntu 22.04](https://launchpad.net/ubuntu/jammy/+source/glibc) (2.35),
+[Debian 12](https://packages.debian.org/bookworm/libc6) (2.36) and later. The release workflow
+prints the oldest glibc each build needs in its run summary.
 
 **Windows** needs no Visual C++ Redistributable: the C runtime is linked into `lawh.exe`.
 
