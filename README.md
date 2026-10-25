@@ -2,63 +2,218 @@
 
 # lawh
 
-**A keyboard-driven whiteboard for people who think in Vim.**
-
+[![CI](https://github.com/y0sif/lawh/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/y0sif/lawh/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/y0sif/lawh)](https://github.com/y0sif/lawh/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-lightgrey.svg)](#status)
+
+**A keyboard-driven whiteboard for people who think in Vim.**
 
 </div>
 
+<p align="center">
+  <img src="assets/demo.gif" alt="lawh: building the area of a circle board with Vim keys" width="900">
+</p>
+
 lawh (لوح, "board" or "slate") is a native, open-source whiteboard and text editor for the
-keyboard. You draw shapes, write math and arrange text with Vim motions and commands instead of a
-mouse or a pen. Type `:circle r=3` and the circle appears at your cursor. Type `:math A = pi r^2`
-and it renders as math. Jump between objects with `w` and `HJKL`, or to any object in view with
-`s` and a short label, take one with `dd` and put it under another with `p`. No drawing tablet, no
-hunting for toolbar buttons, no dragging to get the size right.
+keyboard, written in Rust. You draw shapes, write math and arrange text with Vim motions and
+commands instead of a mouse or a pen. Type `:circle r=3` and the circle appears at your cursor.
+Type `:math A = pi r^2` and it renders as math, typeset by [Typst](https://typst.app). Jump
+between objects with `w` and `HJKL`, or to any object in view with `s` and a short label, take one
+with `x` and put it under another with `p`. No drawing tablet, no hunting for toolbar buttons, no
+dragging to get the size right.
 
 Whiteboards like Excalidraw and tldraw are built for the mouse: keyboard shortcuts pick a tool, then
 you drag. lawh drives the whole canvas with a Vim grammar (modes, counts, operators, motions and
 `:` commands). Its boards are plain-text files you keep in git.
 
-## Status
+## What you can do
 
-**Pre-alpha.** Milestone 1, "see a board", is done: `lawh file.lawh` opens a window and draws the
-board's text, math (rendered with Typst), circles, ellipses, rectangles, lines and arrows.
+lawh 0.1.0 opens a board in a window on Linux, macOS or Windows. You draw on it, write text and
+math, move things around and save it as a plain-text file, all from the keyboard, then export it
+to SVG, PNG or PDF. The demo above builds the "area of a circle" board and exports it.
 
-Milestone 2, the Vim engine, is done: the keyboard drives the board, and `:w` saves it. Building
-the "area of a circle" example from an empty board takes 62 keys (see the
-[quick start](#quick-start)).
+- **Modes:** Normal, Insert (inside a text or math block), block-Normal (Vim's Normal mode inside a block), Visual (select objects) and Command (`:`)
+- **Canvas cursor** moved with `hjkl` and counts (`5l`), or onto objects with `w`, `b` and `HJKL`. New objects appear at the cursor.
+- **Objects:** text block, math block, circle or ellipse, rectangle, line, arrow
+- **Commands:** `:circle r=3`, `:rect 4 2`, `:arrow 3 0`, `:text`, `:math`
+- **Math** in [Typst](https://typst.app) syntax: `A = pi r^2`, `sum_(i=1)^n i`
+- **Editing:** delete, yank and put, undo and redo, `.` to repeat, counts everywhere, Vim editing inside text and math blocks
+- **Moving:** take an object with `x` (or `dd`) and put it with `p` below another or `P` above it, as in Vim; on a grid point, `p` puts it at the cursor
+- **Sizes:** text and math from 0.25 to 16 times the default size, with `<C-a>` and `<C-x>`, `:size 2`, or `size=2` in the file; math is drawn to match the height of the text beside it
+- **Jump labels:** `s` puts a one- or two-character label on every other object in view; type one to jump there, or `ds` and a label to delete a far object without moving
+- **Symbol search:** `:sym integral` finds a math symbol by its Typst name, with the best matches shown as you type (fuzzy matching: a name matches when it holds the query's letters in order, not necessarily side by side)
+- **Placing:** put objects or a new block below or above another, clear of the rest (`p`, `P`, `o`, `O`, and `:text` or `:math` with the cursor on an object)
+- **Files:** plain-text `.lawh` boards that diff cleanly in git, saved atomically with `:w`
+- **Export:** `:export board.pdf` draws the board into an SVG, PNG or PDF file, or only a Visual selection; `lawh export board.lawh board.png` does it without a window. Board text in a PDF can be searched and copied
+- **Config:** key maps (`:nnoremap` and family) and settings (`:set`) in a `lawhrc`
+- **Mouse:** pan, zoom and click to select. Everything else from the keyboard.
 
-Milestone 3 is done: sizes for text and math, jump labels to reach any object in view in two or
-three keys, and `:sym` to put in a math symbol by name.
+Next: a visual design pass over the canvas, the status line and the jump labels.
 
-Milestone 4 is done: export to SVG, PNG and PDF, from the window with `:export` or without one
-with `lawh export`.
+Out of scope for now: freehand drawing, collaboration, a document view, right-to-left text,
+images, plugins.
 
-## What works
+## Install
 
-- [x] **Modes:** Normal, Insert (inside a text or math block), block-Normal (Vim's Normal mode inside a block), Visual (select objects) and Command (`:`)
-- [x] **Canvas cursor** moved with `hjkl` and counts (`5l`), or onto objects with `w`, `b` and `HJKL`. New objects appear at the cursor.
-- [x] **Objects:** text block, math block, circle or ellipse, rectangle, line, arrow
-- [x] **Commands:** `:circle r=3`, `:rect 4 2`, `:arrow 3 0`, `:text`, `:math`
-- [x] **Math** in [Typst](https://typst.app) syntax: `A = pi r^2`, `sum_(i=1)^n i`
-- [x] **Editing:** delete, yank and put, undo and redo, `.` to repeat, counts everywhere, Vim editing inside text and math blocks
-- [x] **Sizes:** text and math from 0.25 to 16 times the default size, with `<C-a>` and `<C-x>`, `:size 2`, or `size=2` in the file; math is drawn to match the height of the text beside it
-- [x] **Jump labels:** `s` puts a one- or two-character label on every other object in view; type one to jump there, or `ds` and a label to delete a far object without moving
-- [x] **Symbol search:** `:sym integral` finds a math symbol by its Typst name, with the best matches shown as you type (fuzzy matching: a name matches when it holds the query's letters in order, not necessarily side by side)
-- [x] **Placing:** put objects or a new block below or above another, clear of the rest (`p`, `P`, `o`, `O`, and `:text` or `:math` with the cursor on an object)
-- [x] **Files:** plain-text `.lawh` boards that diff cleanly in git, saved atomically with `:w`
-- [x] **Export:** `:export board.pdf` draws the board into an SVG, PNG or PDF file, or only a Visual selection; `lawh export board.lawh board.png` does it without a window. Board text in a PDF can be searched and copied
-- [x] **Config:** key maps (`:nnoremap` and family) and settings (`:set`) in a `lawhrc`
-- [x] **Mouse:** pan, zoom and click to select. Everything else from the keyboard.
+### Download a release
 
-## Planned for v1
+Each [release](https://github.com/y0sif/lawh/releases) has an archive for each platform:
 
-- [ ] **Moving things:** move a selection with `hjkl`, place one object beside another (next). Moving already works by taking an object with `x` and putting it with `p`
-- [ ] **Visual design pass:** the look of the canvas, the status line and the labels, before the repository goes public
+| Platform | Archive |
+|---|---|
+| Linux x86_64 | `lawh-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `lawh-vX.Y.Z-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS Apple silicon | `lawh-vX.Y.Z-aarch64-apple-darwin.tar.gz` |
+| macOS Intel | `lawh-vX.Y.Z-x86_64-apple-darwin.tar.gz` |
+| Windows x86_64 | `lawh-vX.Y.Z-x86_64-pc-windows-msvc.zip` |
 
-Not in v1: freehand drawing, collaboration, a document view, right-to-left text, images, plugins.
+Each holds the `lawh` binary, this README, `LICENSE`, `THIRD-PARTY-LICENSES.txt` and the licences
+of the two bundled fonts. `SHA256SUMS`, next to the archives, lists their checksums
+(`sha256sum -c SHA256SUMS --ignore-missing` checks the one you downloaded). Put `lawh` somewhere
+on your `PATH`.
+
+**Linux** needs no extra packages: lawh loads the X11 or Wayland libraries your desktop already
+has when it starts.
+
+**macOS and Windows** warn the first time you open lawh, because the builds aren't code-signed:
+
+- **macOS 15 and later:** open lawh once and let macOS block it, then go to System Settings,
+  Privacy & Security, and click "Open Anyway". Control-click, Open no longer skips the check
+  since macOS 15 ([Apple, 2024-08-06](https://developer.apple.com/news/?id=saqachfa), checked
+  2026-10-25). Or remove
+  the download's quarantine flag in a terminal: `xattr -d com.apple.quarantine lawh`.
+- **Windows:** when SmartScreen says "Windows protected your PC", click "More info", then "Run
+  anyway". On Windows 11, Smart App Control blocks unsigned apps, and it can only be turned off
+  as a whole, not for one app
+  ([Microsoft](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003),
+  checked 2026-10-25).
+
+### With cargo
+
+```bash
+cargo install --git https://github.com/y0sif/lawh lawh --locked
+```
+
+Needs Rust 1.95 or newer and a C compiler, which some dependencies' build scripts use (`psm`,
+through Typst). It compiles every dependency, Typst included, so expect minutes, not seconds (see
+the cold build time below).
+
+### From source
+
+```bash
+git clone https://github.com/y0sif/lawh
+cd lawh
+cargo run -p lawh -- examples/area.lawh
+```
+
+Needs Rust 1.95 or newer. No system packages are needed to build on Linux: the X11 and Wayland
+libraries are loaded when lawh starts. A cold debug build takes several minutes: 479 s on the
+maintainer's laptop on 2026-10-11, before export added more crates (measured, see
+[docs/research/m1-measurements.md](docs/research/m1-measurements.md#dev-profile)).
+
+## Command line
+
+```text
+lawh [file.lawh]
+lawh export [--scale N] [--transparent] <board.lawh> <out.svg|png|pdf>
+```
+
+`lawh board.lawh` opens the board in a window; a file that doesn't exist yet opens as an empty
+board that `:w` creates. `lawh` alone opens an unnamed board.
+
+`lawh export` draws a board into an SVG, PNG or PDF file without a window, the format taken from
+the extension. It reads no lawhrc, so a board exports the same on every machine.
+
+| Option | Does |
+|---|---|
+| `--scale N` | A PNG's scale, from 0.25 to 8 (default 2), as `:set pngscale` |
+| `--transparent` | No paper behind the board, as `:set exportbg=none` |
+| `-h`, `--help` | Print the help |
+| `-V`, `--version` | Print the version |
+
+| Exit | When |
+|---|---|
+| 0 | The file is written |
+| 1 | Nothing is written: the board can't be read, the export stopped at a cap, the file is the board itself, or the file can't be written |
+| 2 | The arguments are wrong |
+
+Details, and the message each case prints: [docs/keys.md](docs/keys.md#exporting-without-a-window).
+
+## Quick start
+
+Open a new board (the file is created when you write it):
+
+```bash
+lawh circle.lawh
+```
+
+Then type these 62 keys, each `<...>` being one key, with no lawhrc installed (the sample one
+moves with `jkl;`):
+
+```text
+5kiArea of a circle<Esc>5j:ci 3<CR>:li 3 0<CR>lkir<Esc>4lj:ma A = pi r^2<CR>:w<CR>
+```
+
+| Keys | Does |
+|---|---|
+| `5k` | Move the cursor 5 grid units up |
+| `iArea of a circle<Esc>` | Type the title in a new text block |
+| `5j` | Back down to the origin |
+| `:ci 3<CR>` | A circle of radius 3 around the cursor |
+| `:li 3 0<CR>` | The radius: a line from the circle's centre, 3 units right |
+| `lk` | One unit right and one up |
+| `ir<Esc>` | The label `r` |
+| `4lj` | Four units right, one down |
+| `:ma A = pi r^2<CR>` | The formula, rendered with Typst |
+| `:w<CR>` | Write `circle.lawh` |
+
+`circle.lawh` now holds the same board as `examples/area.lawh` (a test types these keys and checks
+it: `crates/lawh-core/tests/acceptance.rs`). `:q` quits.
+
+To share it as a picture or a document, type `:exp circle.png<CR>` (or `.svg`, `.pdf`) on the
+board, or export it from a shell without opening a window:
+
+```bash
+lawh export circle.lawh circle.pdf
+```
+
+### Key maps and settings
+
+lawh reads `lawhrc` from its config directory at start: `:set` and mapping commands, one a line.
+To try the sample, which moves with `jkl;` instead of `hjkl`:
+
+```bash
+mkdir -p ~/.config/lawh
+cp examples/lawhrc ~/.config/lawh/lawhrc
+```
+
+That path is for Linux and macOS; Windows and the file's format are in
+[docs/keys.md](docs/keys.md#lawhrc).
+
+## Controls
+
+The essentials. Every key and command: [docs/keys.md](docs/keys.md).
+
+| Keys | Does |
+|---|---|
+| `h` `j` `k` `l` | Move the cursor one grid unit; with a count, `5l` |
+| `w` `b`, `H` `J` `K` `L` | Jump to the next or previous object, or the nearest one left, down, up or right |
+| `s` then a label | Jump to any object in view by the label shown on it |
+| `:circle r=3`, `:rect 4 2`, `:line 3 0`, `:arrow 3 0` | Draw at the cursor |
+| `:text Hello`, `:math A = pi r^2` | Text or math at the cursor |
+| `i` `a` `o` | Type a new text block, or into the current text or math block |
+| `<CR>` | Edit the current text or math block in Vim's Normal mode |
+| `<C-a>` `<C-x>` | Make the current text or math block larger or smaller |
+| `:sym integral` | Put in a math symbol by name; `<C-k>` while typing in a block |
+| `dd` `x` `yy` `p` `P` | Delete, yank, put below or above; `x` then `p` moves an object |
+| `v` | Select objects with a rectangle |
+| `u` `<C-r>` `.` | Undo, redo, repeat the last change |
+| `:w` `:q` `:wq` `:q!` | Write, quit |
+| `:export board.pdf` | Export the board (or, from Visual mode, the selection) to SVG, PNG or PDF |
+| Mouse | Drag (left or middle button) to pan, scroll to zoom, click to select |
+
+`RUST_LOG=info` prints how long the first frame took.
 
 ## The file format
 
@@ -120,96 +275,6 @@ The `:` commands use the same names, so `:circle r=3` reads like the line it cre
 `lawh-core` has no rendering or windowing code, so the Vim engine is tested as plain functions:
 keys in, board out. See [docs/architecture.md](docs/architecture.md).
 
-## Platforms
-
-Linux first. Builds for macOS and Windows ship from the same code. They aren't code-signed, so
-macOS Gatekeeper and Windows SmartScreen will warn the first time you open lawh.
-
-## Build from source
-
-```bash
-git clone https://github.com/y0sif/lawh
-cd lawh
-cargo run -p lawh -- examples/area.lawh
-```
-
-Needs Rust 1.95 or newer. No system packages are needed to build on Linux: the X11 and Wayland
-libraries are loaded when lawh starts.
-
-## Quick start
-
-Open a new board (the file is created when you write it):
-
-```bash
-cargo run -p lawh -- circle.lawh
-```
-
-Then type these 62 keys, each `<...>` being one key, with no lawhrc installed (the sample one
-moves with `jkl;`):
-
-```text
-5kiArea of a circle<Esc>5j:ci 3<CR>:li 3 0<CR>lkir<Esc>4lj:ma A = pi r^2<CR>:w<CR>
-```
-
-| Keys | Does |
-|---|---|
-| `5k` | Move the cursor 5 grid units up |
-| `iArea of a circle<Esc>` | Type the title in a new text block |
-| `5j` | Back down to the origin |
-| `:ci 3<CR>` | A circle of radius 3 around the cursor |
-| `:li 3 0<CR>` | The radius: a line from the circle's centre, 3 units right |
-| `lk` | One unit right and one up |
-| `ir<Esc>` | The label `r` |
-| `4lj` | Four units right, one down |
-| `:ma A = pi r^2<CR>` | The formula, rendered with Typst |
-| `:w<CR>` | Write `circle.lawh` |
-
-`circle.lawh` now holds the same board as `examples/area.lawh`. `:q` quits.
-
-To share it as a picture or a document, type `:exp circle.png<CR>` (or `.svg`, `.pdf`) on the
-board, or export it from a shell without opening a window:
-
-```bash
-cargo run -p lawh -- export circle.lawh circle.pdf
-```
-
-### Key maps and settings
-
-lawh reads `lawhrc` from its config directory at start: `:set` and mapping commands, one a line.
-To try the sample, which moves with `jkl;` instead of `hjkl`:
-
-```bash
-mkdir -p ~/.config/lawh
-cp examples/lawhrc ~/.config/lawh/lawhrc
-```
-
-That path is for Linux and macOS; Windows and the file's format are in
-[docs/keys.md](docs/keys.md#lawhrc).
-
-## Controls
-
-The essentials. Every key and command: [docs/keys.md](docs/keys.md).
-
-| Keys | Does |
-|---|---|
-| `h` `j` `k` `l` | Move the cursor one grid unit; with a count, `5l` |
-| `w` `b`, `H` `J` `K` `L` | Jump to the next or previous object, or the nearest one left, down, up or right |
-| `s` then a label | Jump to any object in view by the label shown on it |
-| `:circle r=3`, `:rect 4 2`, `:line 3 0`, `:arrow 3 0` | Draw at the cursor |
-| `:text Hello`, `:math A = pi r^2` | Text or math at the cursor |
-| `i` `a` `o` | Type a new text block, or into the current text or math block |
-| `<CR>` | Edit the current text or math block in Vim's Normal mode |
-| `<C-a>` `<C-x>` | Make the current text or math block larger or smaller |
-| `:sym integral` | Put in a math symbol by name; `<C-k>` while typing in a block |
-| `dd` `yy` `p` `P` | Delete, yank, put below or above |
-| `v` | Select objects with a rectangle |
-| `u` `<C-r>` `.` | Undo, redo, repeat the last change |
-| `:w` `:q` `:wq` `:q!` | Write, quit |
-| `:export board.pdf` | Export the board (or, from Visual mode, the selection) to SVG, PNG or PDF |
-| Mouse | Drag (left or middle button) to pan, scroll to zoom, click to select |
-
-`RUST_LOG=info` prints how long the first frame took.
-
 ## Project structure
 
 ```text
@@ -220,8 +285,10 @@ lawh/
 │   ├── lawh-render/   # drawing, the editing overlay, and export to SVG, PNG and PDF
 │   └── lawh/          # the app: window, keys, mouse, saving, lawh export
 ├── examples/          # a sample board and a sample lawhrc
-├── assets/fonts/      # bundled fonts
-├── contrib/           # (empty for now)
+├── demo/              # the README demo: its key script and render.sh
+├── assets/fonts/      # bundled fonts and their licences
+├── assets/licenses/   # notices for data compiled into the binary
+├── about.toml         # cargo-about settings for THIRD-PARTY-LICENSES.txt
 └── docs/              # architecture, keys, testing, tech stack, comparison, FAQ
 ```
 
@@ -229,25 +296,29 @@ lawh/
 
 | | lawh | Excalidraw | tldraw | AFFiNE | qboard |
 |---|---|---|---|---|---|
-| Vim grammar on the canvas | Yes | No | No | No | Partial: keys for tools |
-| Make and size shapes without a drag | Yes | No | No | No | No |
-| Math | Typst | Add-on only | SDK example only | Yes | LaTeX |
+| Vim grammar on the canvas | Yes | No | No | No | No (Vim-style keys for tools) |
+| Shapes made and sized from the keyboard | Yes | No | No | No | No |
+| Math | Typst | Not built in | SDK example only | LaTeX block | LaTeX |
 | Plain-text files | Yes | JSON | JSON | No | JSON |
 | Runs as | Native app | Web | Web / SDK | Web / desktop | Web |
-| License | MIT | MIT | Source-available | Open source | MIT |
+| License | MIT | MIT | Source-available | MIT, except the backend | MIT |
 
-More in [docs/comparison.md](docs/comparison.md) and [docs/faq.md](docs/faq.md).
+Sources for each cell, and more tools, in [docs/comparison.md](docs/comparison.md); see also
+[docs/faq.md](docs/faq.md).
 
 ## Development
 
 ```bash
 cargo test -p lawh-core                        # fast loop: board model, file format, Vim engine
+cargo test --workspace                         # everything, as CI runs it
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+`demo/render.sh` renders the demo above from the app's own frames (needs ffmpeg; see
+[demo/README.md](demo/README.md)). See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE). The release archives also carry the bundled fonts' licences (OFL-1.1) and
+`THIRD-PARTY-LICENSES.txt` for the Rust crates and data compiled into the binary.

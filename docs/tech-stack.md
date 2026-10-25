@@ -43,6 +43,7 @@ here and must pass `cargo deny check` (see [deny.toml](../deny.toml)).
 | Reading PDFs back | `hayro` (no default features) | 0.7.1 (pinned `=`) | Apache-2.0 OR MIT | render | Reads exported PDFs (pages, fonts, the text of their glyphs) and renders them to compare with the PNG export. Pinned to the hayro Typst already compiles (through `typst-svg`), with the same features, so nothing new is built. |
 | Drawing SVGs | `resvg` (no default features) | 0.47.0 (pinned `=`) | Apache-2.0 OR MIT | render | An independent rasterizer: draws exported SVGs to compare with the PNG export. Pinned to the `usvg` 0.47 Typst already compiles, so usvg isn't built twice; without its default features it draws no text and loads no fonts. It brings `tiny-skia` 0.12.0 (BSD-3-Clause) and `rgb` 0.8.53 (MIT). |
 | Checking SVGs | `roxmltree` | 0.21.1 (pinned `=`) | MIT OR Apache-2.0 | render | Parses exported SVGs to check their structure: only the elements lawh writes, every reference inside the file. The version usvg already uses: no new crate. |
+| Demo frames | `png` | 0.18.1 | MIT OR Apache-2.0 | app | Writes the README demo's frames (`app::demo`, an ignored test, see [testing.md](testing.md#the-readme-demo)). The same crate lawh-render uses for PNG export, so nothing new is built. |
 | Test oracle | `kdl` (`span`; no default features) | 6.7.1 | Apache-2.0 | core | The reference KDL v2 parser. Differential tests check that lawh's own parser reads flat KDL as kdl does, and that the writer's numbers and escapes read back in kdl. Not in the app: as a reader it took up to 2 s and 459 MB on a hostile 1 MiB file ([research/m1-measurements.md](research/m1-measurements.md)). |
 
 kdl 6.7 needs Rust 1.95, which sets the workspace's `rust-version`. The highest among the
@@ -55,6 +56,8 @@ dependencies the app builds is 1.92, for Typst 0.15 and krilla 0.8.
 | `cargo-deny` | CI (`EmbarkStudios/cargo-deny-action@v2`), or `cargo deny check` | Blocks GPL-family licences, unknown sources and known advisories. |
 | `cargo-insta` | Local | `cargo insta review` accepts or rejects changed snapshots. |
 | `actionlint` | Local, `uvx --from actionlint-py actionlint` | Lints the GitHub workflows. |
+| `cargo-about` 0.9.2 (MIT OR Apache-2.0) | CI's `licence-file` job and `release.yml`, installed with `taiki-e/install-action@v2`; locally `cargo install cargo-about --version 0.9.2 --locked` | Writes `THIRD-PARTY-LICENSES.txt` for each release archive from `about.toml` and `about.hbs`. A tool, not a dependency: nothing of it is in the binary. |
+| `ffmpeg` 7 or later | Local, `demo/render.sh` only | Frames the README demo and makes its GIF and mp4 (tested with 9.0.2). Not a dependency. |
 
 ## Bundled fonts
 
@@ -89,10 +92,16 @@ Advisories ignored in `deny.toml`, and why:
 | RUSTSEC-2026-0195 | quick-xml 0.38 | Denial of service: unbounded memory for namespace declarations | Same path, same reason. |
 | RUSTSEC-2026-0192 | ttf-parser | Unmaintained | Typst's own font type: `Font::ttf()` returns a `ttf_parser::Face`, so reading glyph outlines needs it directly. Revisit when Typst moves off it. |
 
-**To do before the first public release:** ship third-party licence notices for the Rust crates
-compiled into the binary (for example generated with `cargo-about`) in each release archive, and
-note krilla's sRGB profile (CC0), which every PDF export embeds. Today the archives carry lawh's
-`LICENSE`, the README and the two font licences only.
+**Licence notices.** Each release archive carries `THIRD-PARTY-LICENSES.txt` next to lawh's
+`LICENSE`, the README and the two font licences. `release.yml` makes it per target: cargo-about's
+list of every crate compiled in, with its licence text and copyright lines (`about.toml`,
+`about.hbs`; `nucleo-matcher`'s MPL-2.0 with where its source is), then
+`assets/licenses/EMBEDDED-NOTICES.txt`, the NOTICE files and embedded data no Rust licence tool
+reports (Typst's and typst-assets' NOTICEs, hayagriva's and citationberg's citation styles,
+subsetter, krilla and hayro, two-face's syntax definitions, hypher's hyphenation patterns), with
+the CC0 ICC profiles krilla compiles in (the sRGB one is in every PDF export) listed there as
+needing no notice. CI's `licence-file` job generates it for every pull request (see
+[testing.md](testing.md#the-licence-file)).
 
 ## Planned
 
@@ -130,4 +139,4 @@ app, but changes to its own files would have to stay MPL.
 | System fonts (parley's `system` feature) | Needs fontconfig, makes boards look different per machine, and lets a board probe what is installed. |
 | LaTeX via `mitex` | Needs a LaTeX → Typst conversion step, and its crates.io copy is from 2024. Typst syntax directly is simpler. |
 | KaTeX / MathJax | JavaScript. Would need an embedded JS engine in a native app. |
-| Building on Excalidraw, tldraw, AFFiNE or Obsidian | See [research/audit.md](research/audit.md): licence, packaging or math blockers. |
+| Building on Excalidraw, tldraw, AFFiNE or Obsidian | tldraw needs a licence key in production, the Obsidian Excalidraw plugin is AGPL-3.0, AFFiNE's editor (BlockSuite) has had no npm release since 2025-07-01, and Excalidraw has no math element. Sources in [faq.md](faq.md#why-not-build-it-as-a-plugin-for-excalidraw-or-obsidian). |

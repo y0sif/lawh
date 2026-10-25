@@ -1,9 +1,15 @@
 /target
 **/*.rs.bk
 
-# Maintainer-only brand and design notes, never committed
+# Maintainer-only notes, kept on disk, never committed
+/CLAUDE.md
 docs/BRAND.md
 docs/DESIGN.md
+docs/landscape.md
+docs/research/audit.md
+docs/research/trial.md
+docs/research/kdl-spike.md
+docs/handoff-*.md
 
 # Local environment and exports
 .env

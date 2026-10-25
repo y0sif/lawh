@@ -26,6 +26,7 @@ exported PDFs). See [tech-stack.md](tech-stack.md).
 | Worker process (Linux only) | The memory cap holds, a timed-out worker is killed, dropping the engine ends the worker, also mid-compile (killed and reaped before the drop returns) | `lawh-math/tests/worker_process.rs`, `lawh/tests/worker_process.rs` |
 | App | The command line and load errors (no window is opened); the app binary as its own math worker, its logs on stderr only; key translation, the status line and title, atomic writes and write batches, the same-file check after a write (links, hard links a write replaced), the lawhrc reader, the mapping timer, pan, zoom and following the cursor; the view jump labels go on (the window above the status bar, as it is when `s` runs); the engine keeps every drawable symbol; exports from the window (the `exporting` status line, paths, the board's own file refused, effects and keys in the engine's order, a click or a close running waiting exports first) | `lawh/tests/cli.rs`, `math_worker.rs`; unit tests in `lawh/src/*.rs` |
 | `lawh export` | The built binary, run in a directory under `target/tmp`: every format, a second run replacing the file, `--scale` and `--transparent`, a failed formula's one stderr line, a missing board, the board itself as the file, failures that write nothing, every usage error with exit 2, a board named `export`, the help; an export stopped by the math wait leaving no worker behind (it takes 10 s) | `lawh/tests/export.rs` |
+| The README demo | A demo script's parser and its errors, the key display, and a small script drawn twice giving the same frames, timeline and `demo.json`; the demo itself is an ignored test (see [The README demo](#the-readme-demo)) | `lawh/src/app/demo.rs` |
 
 ### Differential tests
 
@@ -211,8 +212,8 @@ whether it was measured or derived ([research/m1-measurements.md](research/m1-me
 ### In CI
 
 `bench.yml` runs the calibrations and benches in release on GitHub's Linux runner. It runs only
-when triggered by hand (`gh workflow run bench.yml`, `workflow_dispatch`), because the repo is
-private and Actions minutes are limited. `calibrate_text_memory` has its own step, so it doesn't
+when triggered by hand (`gh workflow run bench.yml`, `workflow_dispatch`), since its numbers are
+there to be read. `calibrate_text_memory` has its own step, so it doesn't
 run after the other calibrations in one process. Every step runs even when an earlier one fails.
 The limits were measured on the maintainer's laptop, so a slower or noisier runner can fail them.
 
@@ -225,11 +226,41 @@ The export calibrations run in the Calibrations step with the frame budget's, si
 start with `calibrate`. The export measurements (`measure_exports`, `measure_svg_exports`,
 `measure_pdf_exports`, `measure_png_peak`) are not in `bench.yml`: run them by hand.
 
-`ci.yml` runs `cargo test --workspace`, which skips everything above. It does run the regression
+`ci.yml` runs `cargo clippy` and `cargo test --workspace` on Linux, macOS and Windows for every
+push to `main` and every pull request; the tests skip everything above. It does run the regression
 tests in `engine_cost.rs` and lawh-render's `measure_cost.rs`, in debug: each worst case must
 stop within a generous bound (5 s in debug) and say why. It also runs `lawh/tests/export.rs`,
 whose math-wait test takes 10 s: six formulas that each run past the 2 s timeout, so the 10 s
 wait ends on any machine.
+
+## The licence file
+
+The release archives carry `THIRD-PARTY-LICENSES.txt`, made by cargo-about 0.9.2 from
+`about.toml` and `about.hbs`, with `assets/licenses/EMBEDDED-NOTICES.txt` appended. `ci.yml`'s
+`licence-file` job generates it for all five release targets at once
+(`cargo about generate --locked --fail about.hbs`) on every push to `main` and pull request, and
+fails when a crate's licence can't be read or a clarification in `about.toml` no longer matches
+its file (cargo-about only warns about that, so the job looks for "failed to validate" in its
+log). A dependency bump shows a licence problem there rather than on a release tag. `release.yml`
+runs the same per target, then a smoke test of each binary it can run: `lawh --version`, and
+`lawh export examples/area.lawh` to an SVG, which compiles the formula in the math worker.
+
+## The README demo
+
+`assets/demo.gif` is made from the app's own frames: `demo/render.sh` runs an ignored test,
+`app::demo::render_demo` (`crates/lawh/src/app/demo.rs`), which types `demo/area.demo` into an
+`App` with no window, draws each frame with the code `App::redraw` uses (board, overlay, status
+line), and writes PNG frames and their timing to `demo/out/`; ffmpeg then frames them and makes
+the GIF and an mp4. The run is deterministic: time comes from the script, not the clock, math
+compiles in the test's process and every formula is ready before each frame, the view is fixed
+and no lawhrc is read, so two runs give byte-identical frames (the test
+`a_script_renders_the_same_frames_each_time` checks it on a small script). Script format and
+outputs: [demo/README.md](../demo/README.md).
+
+```bash
+demo/render.sh                 # needs ffmpeg 7 or later
+SKIP_FRAMES=1 demo/render.sh   # reframe the last frames without typing the script again
+```
 
 ## The Vim engine: keys in, board out
 
@@ -318,17 +349,17 @@ the key count: 62 keys, counting each `<...>` as one, make `examples/area.lawh` 
 |---|---|---|---|
 | File format (`lawh-core`) | Read, write, errors, caps | Snapshots of every error, round-trip property tests, differential tests against kdl | Done |
 | Math (`lawh-math`) | Typst snippets compile, the sandbox and the worker hold | Layout snapshots, sandbox and worker tests | Done |
-| Rendering (`lawh-render`) | Pixels, the frame budget, the overlay, exports | Golden PNGs, behaviour tests, comparisons with resvg and hayro, calibrations and benches | Drawing done (milestone 1); the overlay built (milestone 2); sizes, jump labels, `:sym` rows and the text fallback (characters Inter lacks drawn from Libertinus Math) built (milestone 3); the shared draw list, the palette and export to SVG, PNG and PDF built (milestone 4) |
-| App (`lawh`) | Command line, worker mode, keys, writes, exports, lawhrc | Process tests without a window, the built binary for `lawh export`, unit tests | Command line and worker mode done (milestone 1); keys, writes and lawhrc done (milestone 2); the view for labels, the symbol list and the same-file check built (milestone 3); exports from the window and `lawh export` built (milestone 4) |
-| Engine (`lawh-core`) | Modes, counts, operators, motions, text in blocks, sizes, jump labels, `:sym`, `:export`, undo, `.` repeat, key maps, the cost of a key | Key script → `insta` snapshot of the board, mode and cursor; undo and label property tests; cost regressions | Done (milestone 2); sizes, jump labels and `:sym` built (milestone 3); `:export` and blocks placed below an object built (milestone 4) |
-| `:` commands (`lawh-core`) | Parsing and errors | Table tests: input → command or error message | Done (milestone 2); `:si`, `:sym` and `++size=` built (milestone 3); `:exp` and `:w` refusing an export's name built (milestone 4) |
-| Acceptance (`lawh-core/tests/`) | The "area of a circle" benchmark built from keys only | One key script produces `examples/area.lawh` in 62 keys, asserted | Done (milestone 2), unchanged in milestones 3 and 4 |
-| Window | Input, presenting frames | No automated GUI tests in v1. A manual checklist on Linux (Wayland and X11) before any release, to be written. | Manual |
+| Rendering (`lawh-render`) | Pixels, the frame budget, the overlay (sizes, jump labels, `:sym` rows, the text fallback to Libertinus Math), the shared draw list, the palette, exports | Golden PNGs, behaviour tests, comparisons with resvg and hayro, calibrations and benches | Done |
+| App (`lawh`) | Command line, worker mode, keys, writes and the same-file check, the view for labels, the symbol list, exports from the window and `lawh export`, lawhrc | Process tests without a window, the built binary for `lawh export`, unit tests | Done |
+| Engine (`lawh-core`) | Modes, counts, operators, motions, text in blocks, sizes, jump labels, `:sym`, `:export`, blocks placed below an object, undo, `.` repeat, key maps, the cost of a key | Key script → `insta` snapshot of the board, mode and cursor; undo and label property tests; cost regressions | Done |
+| `:` commands (`lawh-core`) | Parsing and errors, `:si`, `:sym`, `++size=`, `:exp` and `:w` refusing an export's name | Table tests: input → command or error message | Done |
+| Acceptance (`lawh-core/tests/`) | The "area of a circle" benchmark built from keys only | One key script produces `examples/area.lawh` in 62 keys, asserted | Done |
+| Window | Input, presenting frames | No automated GUI tests: tried by hand before a release. The frame the window shows is composed by code the demo also runs without a window ([The README demo](#the-readme-demo)) | Manual |
 
 ## Later
 
 - **Fuzzing:** `cargo-fuzz` targets for the `.lawh` reader and the `:` command parser, since boards
-  come from other people (see [SECURITY.md](../SECURITY.md)). Milestone 2's review ran a
+  come from other people (see the [threat model](architecture.md#threat-model)). Milestone 2's review ran a
   4,000-script random key fuzz by hand (no panic; numbers in
   [research/m2-measurements.md](research/m2-measurements.md)); it isn't in the repo.
 

@@ -2,7 +2,7 @@
 //! can draw, and lists the symbols Typst math knows by name ([`symbols`]),
 //! for `:sym`.
 //!
-//! Typst runs in a sandbox (see `SECURITY.md`): the only file it can see is
+//! Typst runs in a sandbox (see `docs/architecture.md`): the only file it can see is
 //! the formula itself, fonts come from [`fonts`], there is no clock and no
 //! package download, and `plugin` (WebAssembly), `cite` and `bibliography`
 //! (CSL parsing), `image` (image decoding), `read` with the data loaders

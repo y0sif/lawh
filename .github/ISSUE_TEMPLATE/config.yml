@@ -2,4 +2,4 @@ blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
     url: https://github.com/y0sif/lawh/security/advisories/new
-    about: Please report security issues privately, not as public issues.
+    about: Report it privately through GitHub's private vulnerability reporting, not as a public issue.

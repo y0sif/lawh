@@ -3,7 +3,7 @@
 //! The engine reads typed characters, so the app takes winit's logical key: the character the
 //! keyboard layout makes, with Shift, `AltGr` and Option already applied. That keeps Vim keys on
 //! the typed character on every layout (`:` is `:` whether it is Shift+`;` or a key of its
-//! own), as `CLAUDE.md` asks. Only Ctrl and Cmd make chords:
+//! own), as the portability rules in `docs/architecture.md` ask. Only Ctrl and Cmd make chords:
 //!
 //! - Linux never reports `AltGr` as Alt, Windows reports `AltGr` as Ctrl+Alt, and macOS Option
 //!   types characters. So Alt with a character, and Ctrl+Alt with one, are the typed character,
@@ -13,8 +13,8 @@
 //!
 //! The one key the app takes before the engine is Cmd+Q on macOS ([`is_close_request`]); every
 //! other chord goes to the engine, Super+Q elsewhere included. When app shortcuts come, they go
-//! through one modifier setting (Ctrl, or Cmd on macOS) as `CLAUDE.md` says, and are taken before
-//! the engine sees the key.
+//! through one modifier setting (Ctrl, or Cmd on macOS), as the same rules say, and are taken
+//! before the engine sees the key.
 //!
 //! The caller drops key releases and synthetic presses (the keys winit reports as held when the
 //! window gains focus); repeats are kept, so a held `j` keeps moving.
