@@ -74,7 +74,12 @@ of the two bundled fonts. `SHA256SUMS`, next to the archives, lists their checks
 on your `PATH`.
 
 **Linux** needs no extra packages: lawh loads the X11 or Wayland libraries your desktop already
-has when it starts.
+has when it starts. The Linux archives are built on Ubuntu 24.04, whose glibc is 2.39
+([Launchpad](https://launchpad.net/ubuntu/noble/+source/glibc), checked 2026-10-25), so glibc
+2.39 or newer is enough; the oldest glibc each build needs is printed in the summary of the
+release workflow run that built it.
+
+**Windows** needs no Visual C++ Redistributable: the C runtime is linked into `lawh.exe`.
 
 **macOS and Windows** warn the first time you open lawh, because the builds aren't code-signed:
 
@@ -83,9 +88,13 @@ has when it starts.
   since macOS 15 ([Apple, 2024-08-06](https://developer.apple.com/news/?id=saqachfa), checked
   2026-10-25). Or remove
   the download's quarantine flag in a terminal: `xattr -d com.apple.quarantine lawh`.
-- **Windows:** when SmartScreen says "Windows protected your PC", click "More info", then "Run
-  anyway". On Windows 11, Smart App Control blocks unsigned apps, and it can only be turned off
-  as a whole, not for one app
+- **Windows:** for an unsigned app, SmartScreen says "Windows protected your PC" and you must
+  choose "Run anyway" before it runs; an organisation's policy can block it entirely
+  ([Microsoft Learn](https://learn.microsoft.com/en-us/windows/apps/package-and-deploy/smartscreen-reputation),
+  checked 2026-10-25). "Run anyway" shows after you click "More info"
+  ([Microsoft, 2013](https://learn.microsoft.com/en-us/archive/blogs/vsnetsetup/windows-smartscreen-prevented-an-unrecognized-app-from-running-running-this-app-might-put-your-pc-at-risk)).
+  On Windows 11, Smart App Control blocks unsigned apps, and it can only be turned off as a
+  whole, not for one app
   ([Microsoft](https://support.microsoft.com/en-us/topic/what-is-smart-app-control-285ea03d-fa88-4d56-882e-6698afdb7003),
   checked 2026-10-25).
 

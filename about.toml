@@ -115,3 +115,37 @@ checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
 path = "license-apache-2.0"
 license = "Apache-2.0"
 checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+# objc2's framework crates are "Zlib OR Apache-2.0 OR MIT" and ship no licence file, nor did
+# objc2's repository when 0.3.2 was published (commit 7b1abfd, 2025-10-04): cargo-about would pick
+# MIT and print its template, whose copyright line is a placeholder, and these crates list no
+# authors. lawh takes them under Apache-2.0 instead, whose terms need no copyright line, with the
+# text objc2 added to its repository later (commit ee9a7ad, 2026-03-18; it ends "Copyright 2026
+# Mads Marquart"). cargo-about fetches it from raw.githubusercontent.com when it runs; a failed
+# fetch is the same "failed to validate" warning as above, so CI and release.yml fail on it.
+# Keyed by name, so a clarification covers every version: objc2-quartz-core 0.2.2, MIT only, is in
+# Cargo.lock but in no release target's graph (`cargo tree -e normal --target all -i
+# objc2-quartz-core@0.2.2` prints nothing). If it ever is, this entry must go.
+[objc2-core-foundation.clarify]
+license = "Apache-2.0"
+override-git-commit = "ee9a7ada2131f5944b8750428e265c15632f2a19"
+
+[[objc2-core-foundation.clarify.git]]
+path = "LICENSE-APACHE.txt"
+checksum = "0c9a5f6fe28e27015e12506ffe58c9e007cead169af9670ec15c1df0d14e4f2a"
+
+[objc2-core-graphics.clarify]
+license = "Apache-2.0"
+override-git-commit = "ee9a7ada2131f5944b8750428e265c15632f2a19"
+
+[[objc2-core-graphics.clarify.git]]
+path = "LICENSE-APACHE.txt"
+checksum = "0c9a5f6fe28e27015e12506ffe58c9e007cead169af9670ec15c1df0d14e4f2a"
+
+[objc2-quartz-core.clarify]
+license = "Apache-2.0"
+override-git-commit = "ee9a7ada2131f5944b8750428e265c15632f2a19"
+
+[[objc2-quartz-core.clarify.git]]
+path = "LICENSE-APACHE.txt"
+checksum = "0c9a5f6fe28e27015e12506ffe58c9e007cead169af9670ec15c1df0d14e4f2a"

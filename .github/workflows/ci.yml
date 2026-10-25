@@ -1,8 +1,8 @@
 name: CI
 
-# Pushes to main and pull requests run the checks on Linux, macOS and Windows. Standard GitHub
-# runners are free for public repositories. The release workflow calls this one first
-# (workflow_call), so a tag only builds archives from a commit that passes.
+# Pushes to main and pull requests run the checks on Linux (x86_64 and arm64), macOS and Windows.
+# Standard GitHub runners are free for public repositories. The release workflow calls this one
+# first (workflow_call), so a tag only builds archives from a commit that passes.
 
 on:
   push:
@@ -37,13 +37,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-24.04-arm: the arm64 Linux archive's platform, tested on every pull request.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     env:
       # Full debug info for every test binary filled the Linux runner's disk during
       # `cargo test` (PR #2). Line tables keep file and line numbers in backtraces. Set on
-      # macOS and Windows too, so their test binaries are smaller as well and the three
-      # platforms build the same profile.
+      # every runner, so all test binaries are smaller and every platform builds the same
+      # profile.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v7
@@ -70,9 +71,10 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
         with:
           tool: cargo-about@0.9.2
+          fallback: none
       # Every target in about.toml at once.
       - name: Generate
         run: |

@@ -763,7 +763,11 @@ mod tests {
                 .unwrap();
             assert_eq!(plan.failed, 0);
             assert!(matches!(plan.objects[0].look, Look::Math(_)));
-            let missing = std::env::temp_dir().join("lawh-no-such-math-worker");
+            // The worker's program sits in a directory that doesn't exist, so nothing can ever
+            // be started in its place.
+            let dir = std::env::temp_dir().join(format!("lawh-no-such-dir-{}", std::process::id()));
+            assert!(!dir.exists(), "{} exists", dir.display());
+            let missing = dir.join("worker");
             renderer.math = MathEngine::with_worker(lawh_math::WorkerCommand::new(missing));
             let options = ExportOptions {
                 format,

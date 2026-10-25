@@ -1,10 +1,10 @@
 name: Release
 
 # Push a tag like v0.1.0 to build lawh for Linux, macOS and Windows and attach the archives to a
-# draft GitHub Release: publish the draft by hand once a download has been tried. The tag must
-# match lawh's version in Cargo.toml without its "v": tag v0.1.0-rc.1 needs version
-# "0.1.0-rc.1". A tag with a hyphen becomes a pre-release. Builds are not code-signed: macOS
-# Gatekeeper and Windows SmartScreen warn on first launch.
+# draft GitHub Release: publish the draft by hand once a download has been tried. The tag is
+# lawh's version in Cargo.toml with a "v", alone (v0.1.0) or with a suffix after a hyphen
+# (v0.1.0-rc.1, for version 0.1.0). A tag with a hyphen becomes a pre-release. Builds are not
+# code-signed: macOS Gatekeeper and Windows SmartScreen warn on first launch.
 
 on:
   push:
@@ -23,17 +23,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      # v{version} or v{version}-{suffix}, the suffix made of what a SemVer pre-release may hold.
       - name: Compare the tag with lawh's version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
           version="$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "lawh") | .version')"
           if [[ -z "$version" ]]; then
             echo "::error::cargo metadata lists no lawh package"
             exit 1
           fi
-          if [[ "$tag" != "$version" ]]; then
-            echo "::error::tag $GITHUB_REF_NAME doesn't match lawh's version $version (Cargo.toml)"
+          tag="${GITHUB_REF_NAME#v}"
+          suffix="${tag#"$version"}"
+          if [[ "$GITHUB_REF_NAME" != v* || "$tag" == "$suffix" ]] \
+            || [[ -n "$suffix" && ! "$suffix" =~ ^-[0-9A-Za-z.-]+$ ]]; then
+            echo "::error::tag $GITHUB_REF_NAME is neither v$version nor v$version-<suffix> (lawh's version in Cargo.toml)"
             exit 1
           fi
           echo "Tag $GITHUB_REF_NAME matches lawh $version"
@@ -43,20 +46,64 @@ jobs:
     needs: version
     uses: ./.github/workflows/ci.yml
 
+  # The third-party licence file of each archive, for every target at once: cargo-about reads
+  # Cargo.lock and compiles nothing, so one Linux runner does all five. (cargo-about 0.9.2 has no
+  # x86_64 macOS binary, so the Intel build couldn't install it without compiling it.)
+  licences:
+    name: Third-party licences
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: cargo-about@0.9.2
+          fallback: none
+      # cargo-about lists the crates built for each target; the embedded notices cover what it
+      # can't see (see the file's header). The targets are the build matrix's: a build whose
+      # file is missing fails when it packages.
+      - name: One file a target
+        run: |
+          mkdir licences
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu \
+            aarch64-apple-darwin x86_64-apple-darwin x86_64-pc-windows-msvc; do
+            log="$RUNNER_TEMP/about-$target.log"
+            out="licences/THIRD-PARTY-LICENSES-$target.txt"
+            status=0
+            cargo about generate --locked --fail --target "$target" about.hbs -o "$out" 2> "$log" || status=$?
+            cat "$log"
+            if grep -q 'failed to validate' "$log"; then
+              echo "::error::a clarification in about.toml no longer matches its file: update its checksum"
+              exit 1
+            fi
+            if [[ "$status" != 0 ]]; then exit "$status"; fi
+            printf '\n\n' >> "$out"
+            cat assets/licenses/EMBEDDED-NOTICES.txt >> "$out"
+          done
+      - uses: actions/upload-artifact@v7
+        with:
+          name: third-party-licences
+          path: licences/
+          if-no-files-found: error
+
   build:
     name: Build (${{ matrix.target }})
-    needs: ci
+    needs: [ci, licences]
     strategy:
       fail-fast: false
       matrix:
+        # Each target on its own kind of runner, so every binary is run below. Linux on a pinned
+        # Ubuntu: its glibc sets the oldest glibc the binary runs on, and ubuntu-latest moves to
+        # 26.04 in November 2026 (actions/runner-images#14748). Not 22.04: deprecated since
+        # 2026-09-17, retired 2027-04-17 (actions/runner-images#14254). macos-15-intel is the
+        # last x86_64 macOS runner, offered until August 2027 (actions/runner-images#13045).
         include:
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, smoke: true }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, smoke: true }
-          - { os: macos-latest, target: aarch64-apple-darwin, smoke: true }
-          # Cross-compiled on the arm64 runner. GitHub's macOS arm64 images don't list Rosetta,
-          # so this binary isn't run here.
-          - { os: macos-latest, target: x86_64-apple-darwin, smoke: false }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc, smoke: true }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.target }}
@@ -68,16 +115,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-about@0.9.2
-      - run: cargo build --release --locked -p lawh --target "$TARGET"
+      # Windows: the C runtime is linked into lawh.exe (+crt-static), so it runs without the
+      # Visual C++ Redistributable. Only this build: CI and local builds keep the default.
+      - name: Build
         shell: bash
+        run: |
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            export RUSTFLAGS="-C target-feature=+crt-static"
+          fi
+          cargo build --release --locked -p lawh --target "$TARGET"
+      # dumpbin comes with the MSVC tools that linked the exe; vswhere, which Visual Studio
+      # installs at a fixed path, finds it. MSYS_NO_PATHCONV keeps Git Bash from turning
+      # dumpbin's /OPTIONS into paths.
+      - name: No C runtime DLL
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          vswhere="/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          found="$("$vswhere" -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | tr -d '\r' | head -n 1)"
+          if [[ -z "$found" ]]; then
+            echo "::error::vswhere found no dumpbin.exe"
+            exit 1
+          fi
+          dumpbin="$(cygpath -u "$found")"
+          deps="$(MSYS_NO_PATHCONV=1 "$dumpbin" /NOLOGO /DEPENDENTS "target/$TARGET/release/lawh.exe" | tr -d '\r')"
+          echo "$deps"
+          if ! grep -qi 'kernel32\.dll' <<< "$deps"; then
+            echo "::error::dumpbin listed no DLLs for lawh.exe"
+            exit 1
+          fi
+          if grep -Eqi 'vcruntime|msvcp|ucrtbase|api-ms-win-crt' <<< "$deps"; then
+            echo "::error::lawh.exe imports the C runtime: +crt-static didn't apply"
+            exit 1
+          fi
       # The built binary starts, and exports a board with a formula: the export compiles it in
       # the math worker, which is this binary started again. No display needed. A clean export
       # prints nothing; a formula that fails prints "... formula(s) failed" and still exits 0.
       - name: Smoke test
-        if: matrix.smoke
         shell: bash
         run: |
           bin="target/$TARGET/release/lawh"
@@ -101,28 +175,19 @@ jobs:
             exit 1
           fi
           echo "area.svg: $(wc -c < "$out") bytes"
+      # The newest glibc symbol version the binary needs. Weak references (objdump's second
+      # column "w") are left out: std looks them up and falls back when they're missing, and the
+      # loader doesn't require their versions (readelf -V marks those "Flags: WEAK").
       - name: glibc floor
         if: runner.os == 'Linux'
         run: |
-          floor="$(objdump -T "target/$TARGET/release/lawh" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+          floor="$(objdump -T "target/$TARGET/release/lawh" | awk '$2 != "w"' | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
           echo "lawh for $TARGET needs ${floor:?no GLIBC symbol versions found} or newer"
           echo "- \`$TARGET\`: needs glibc ${floor#GLIBC_} or newer" >> "$GITHUB_STEP_SUMMARY"
-      # cargo-about lists the crates built for this target; the embedded notices cover what it
-      # can't see (see the file's header).
-      - name: Third-party licences
-        shell: bash
-        run: |
-          log="$RUNNER_TEMP/about.log"
-          status=0
-          cargo about generate --locked --fail --target "$TARGET" about.hbs -o THIRD-PARTY-LICENSES.txt 2> "$log" || status=$?
-          cat "$log"
-          if grep -q 'failed to validate' "$log"; then
-            echo "::error::a clarification in about.toml no longer matches its file: update its checksum"
-            exit 1
-          fi
-          if [[ "$status" != 0 ]]; then exit "$status"; fi
-          printf '\n\n' >> THIRD-PARTY-LICENSES.txt
-          cat assets/licenses/EMBEDDED-NOTICES.txt >> THIRD-PARTY-LICENSES.txt
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licences
+          path: licences
       - name: Package
         shell: bash
         run: |
@@ -133,7 +198,8 @@ jobs:
           else
             cp "target/$TARGET/release/lawh" "dist/$name/"
           fi
-          cp README.md LICENSE THIRD-PARTY-LICENSES.txt "dist/$name/"
+          cp README.md LICENSE "dist/$name/"
+          cp "licences/THIRD-PARTY-LICENSES-$TARGET.txt" "dist/$name/THIRD-PARTY-LICENSES.txt"
           # The binary embeds the bundled fonts; OFL-1.1 requires their licences alongside.
           cp assets/fonts/Inter-OFL.txt assets/fonts/Libertinus-OFL.txt "dist/$name/"
           cd dist
@@ -163,7 +229,7 @@ jobs:
           merge-multiple: true
       - name: Checksums
         run: cd dist && sha256sum -- * > SHA256SUMS
-      - uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: dist/*
           draft: true

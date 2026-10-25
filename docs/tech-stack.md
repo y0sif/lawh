@@ -56,7 +56,7 @@ dependencies the app builds is 1.92, for Typst 0.15 and krilla 0.8.
 | `cargo-deny` | CI (`EmbarkStudios/cargo-deny-action@v2`), or `cargo deny check` | Blocks GPL-family licences, unknown sources and known advisories. |
 | `cargo-insta` | Local | `cargo insta review` accepts or rejects changed snapshots. |
 | `actionlint` | Local, `uvx --from actionlint-py actionlint` | Lints the GitHub workflows. |
-| `cargo-about` 0.9.2 (MIT OR Apache-2.0) | CI's `licence-file` job and `release.yml`, installed with `taiki-e/install-action@v2`; locally `cargo install cargo-about --version 0.9.2 --locked` | Writes `THIRD-PARTY-LICENSES.txt` for each release archive from `about.toml` and `about.hbs`. A tool, not a dependency: nothing of it is in the binary. |
+| `cargo-about` 0.9.2 (MIT OR Apache-2.0) | CI's `licence-file` job and `release.yml`, installed with `taiki-e/install-action` (v2.87.31, pinned by commit); locally `cargo install cargo-about --version 0.9.2 --locked` | Writes `THIRD-PARTY-LICENSES.txt` for each release archive from `about.toml` and `about.hbs`. A tool, not a dependency: nothing of it is in the binary. |
 | `ffmpeg` 7 or later | Local, `demo/render.sh` only | Frames the README demo and makes its GIF and mp4 (tested with 9.0.2). Not a dependency. |
 
 ## Bundled fonts

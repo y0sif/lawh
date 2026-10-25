@@ -10,6 +10,21 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 OUT=demo/out
+
+# ffmpeg 7 or later: older ones lack `-/filter_complex` (a filter graph read from a file) and
+# drawtext's `y_align`.
+if ! command -v ffmpeg > /dev/null; then
+  echo "render.sh: ffmpeg not found; it needs ffmpeg 7 or later on PATH" >&2
+  exit 1
+fi
+FFMPEG_VERSION=$(ffmpeg -version | sed -n '1s/^ffmpeg version \([^ ]*\).*/\1/p')
+FFMPEG_MAJOR=$(printf '%s' "$FFMPEG_VERSION" | sed -n 's/^n\{0,1\}\([0-9][0-9]*\)\..*/\1/p')
+if [ -z "$FFMPEG_MAJOR" ]; then
+  echo "render.sh: can't read ffmpeg's version (\"$FFMPEG_VERSION\"); going on, but it needs 7 or later" >&2
+elif [ "$FFMPEG_MAJOR" -lt 7 ]; then
+  echo "render.sh: ffmpeg $FFMPEG_VERSION is too old; it needs ffmpeg 7 or later" >&2
+  exit 1
+fi
 SCRIPT=${DEMO_SCRIPT:-demo/area.demo}
 FONT=assets/fonts/Inter-Regular.ttf
 FPS=30       # mp4 frame rate
@@ -17,10 +32,18 @@ GIF_FPS=15   # the GIF is decimated to keep it small
 
 # 1. The frames, timeline.ffconcat, demo.json and keys.tsv, from the app's frame composition
 #    (crates/lawh/src/app/demo.rs).
+#    The last run's outputs go first, so a test that didn't run can't leave them to be used.
 if [ -z "${SKIP_FRAMES:-}" ]; then
+  rm -f "$OUT/demo.json" "$OUT/timeline.ffconcat" "$OUT/keys.tsv"
   LAWH_DEMO_SCRIPT="$SCRIPT" LAWH_DEMO_OUT="$OUT" nice -n 19 \
     cargo test -p lawh --bin lawh --release --quiet -- --ignored --exact app::demo::render_demo
 fi
+for made in demo.json timeline.ffconcat keys.tsv; do
+  if [ ! -f "$OUT/$made" ]; then
+    echo "render.sh: $OUT/$made is missing: the driver (app::demo::render_demo) didn't write it" >&2
+    exit 1
+  fi
+done
 
 secs() { printf '%d.%03d' $(($1 / 1000)) $(($1 % 1000)); }
 # demo.json is written one field a line, so sed reads it without a JSON tool.
@@ -107,11 +130,13 @@ INPUTS=(-f concat -safe 0 -i "$OUT/timeline.ffconcat"
 # 4. The mp4 and the GIF (keybr-tui's settings: 128 colours, no dither, only changed rectangles).
 ffmpeg -loglevel error -y "${INPUTS[@]}" -/filter_complex "$FILTERS" -map '[out]' \
   -c:v libx264 -crf 18 -preset slow -pix_fmt yuv420p -movflags +faststart "$OUT/lawh-demo.mp4"
-mkdir -p assets
 GIF_FILTERS="$OUT/filters-gif.txt"
 sed 's/\[out\]$/,fps='"$GIF_FPS"',split[g1][g2];[g1]palettegen=max_colors=128:stats_mode=diff[p];[g2][p]paletteuse=dither=none:diff_mode=rectangle[out]/' \
   "$FILTERS" > "$GIF_FILTERS"
-ffmpeg -loglevel error -y "${INPUTS[@]}" -/filter_complex "$GIF_FILTERS" -map '[out]' assets/demo.gif
+# Encoded in demo/out first: the tracked assets/demo.gif changes only once the GIF is whole.
+ffmpeg -loglevel error -y "${INPUTS[@]}" -/filter_complex "$GIF_FILTERS" -map '[out]' "$OUT/demo.gif"
+mkdir -p assets
+mv "$OUT/demo.gif" assets/demo.gif
 
 echo "frames at scale $SCALE; wrote:"
 ls -la "$OUT/lawh-demo.mp4" assets/demo.gif
