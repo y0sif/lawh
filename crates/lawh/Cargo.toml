@@ -28,5 +28,9 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 winit.workspace = true
 
+[dev-dependencies]
+# The README demo writes the app's frames as PNG (`src/app/demo.rs`).
+png.workspace = true
+
 [lints]
 workspace = true

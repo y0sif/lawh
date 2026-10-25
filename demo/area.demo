@@ -1,0 +1,103 @@
+# The README demo: the "area of a circle" board (examples/area.lawh) built from an empty board
+# with the README quick start's keys, then jump labels, `:sym` and `:export`.
+# Format: demo/README.md. Render: demo/render.sh.
+
+# 1000x566 logical pixels at scale factor 2: frames of 2000x1132, averaged down to 1000x566 by
+# render.sh. The view holds the whole final board, so it never follows the cursor (the driver
+# fails if it would).
+window 1000 566 2
+view 3.25 -0.9 1.3333
+file area.lawh
+
+pace 85
+wait 1000
+
+scene Type text where the cursor is
+keys 5k
+wait 350
+keys i
+wait 250
+keys Area of a circle
+wait 400
+keys <Esc>
+wait 900
+
+scene Draw shapes with : commands
+keys 5j
+wait 350
+keys :ci 3
+wait 350
+keys <CR>
+wait 600
+keys :li 3 0
+wait 350
+keys <CR>
+wait 600
+keys lk
+wait 250
+keys ir
+wait 300
+keys <Esc>
+wait 900
+
+scene Write math in Typst syntax
+keys 4lj
+wait 350
+keys :ma A = pi r^2
+wait 500
+keys <CR>
+wait 1300
+
+scene Jump to any object with s, then make the title bigger
+keys s
+wait 1200
+# `f` labels the title here (LAWH_DEMO_TRACE=1 shows each label).
+keys f
+wait 500
+keys <C-a>
+wait 300
+keys <C-a>
+wait 1000
+
+scene Find math symbols by name
+keys s
+wait 900
+# From the title, `f` labels the formula.
+keys f
+wait 500
+keys o
+wait 250
+keys r = 3<Space>
+wait 300
+keys <C-k>
+wait 450
+pace 140
+keys arr
+wait 800
+keys .r.d
+wait 700
+pace 380
+keys <Tab><Tab>
+wait 600
+pace 85
+keys <CR>
+wait 400
+keys <Space>A<Space>
+keys <C-k>
+wait 300
+pace 140
+keys appr
+wait 600
+pace 85
+keys <CR>
+wait 300
+keys <Space>28.3
+wait 350
+keys <Esc>
+wait 1200
+
+scene Export to SVG, PNG or PDF
+keys :exp area.pdf
+wait 450
+keys <CR>
+wait 2500

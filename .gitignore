@@ -8,6 +8,7 @@ docs/DESIGN.md
 # Local environment and exports
 .env
 /out/
+demo/out/
 
 # Editors and OS
 *.swp

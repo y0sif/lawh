@@ -682,44 +682,21 @@ impl App {
         }
 
         let scale_factor = gfx.window.scale_factor();
-        let vp = if let Some(vp) = self.viewport.as_mut() {
-            vp.width = width;
-            vp.height = height;
-            vp.scale_factor = scale_factor;
-            *vp
-        } else {
-            let bounds = self.renderer.board_bounds(self.engine.board());
-            let bar = status_bar_height_px(scale_factor);
-            let vp = view::opening(bounds, width, height, scale_factor, bar);
-            tracing::debug!(?vp, "fitted the board to the window");
-            *self.viewport.insert(vp)
-        };
+        let vp = frame_view(
+            &mut self.viewport,
+            &self.engine,
+            &mut self.renderer,
+            (width, height, scale_factor),
+        );
 
         let render_start = Instant::now();
-        let status = status_line(
+        let pixels = compose_frame(
             &self.engine,
+            &mut self.renderer,
             self.message.as_deref(),
             self.suspended.as_ref(),
+            &vp,
         );
-        let visual = self.engine.visual_rect(&mut self.renderer);
-        let text_cursor = self.engine.text_cursor();
-        let overlay = Overlay {
-            cursor: OverlayCursor::from(self.engine.cursor()),
-            selection: self.engine.selection(),
-            visual,
-            caret: text_cursor.as_ref().map(Caret::from),
-            status: StatusLine {
-                left: &status.left,
-                right: &status.right,
-                error: status.error,
-            },
-            command_line: self.engine.command_line(),
-            labels: self.engine.jump_labels(),
-            completions: self.engine.completions(),
-        };
-        let pixels = self
-            .renderer
-            .render_with(self.engine.board(), &vp, &overlay);
         let render_time = render_start.elapsed();
 
         let mut buffer = gfx
@@ -926,6 +903,64 @@ fn status_line(
     status
 }
 
+/// The view a frame of `width` by `height` physical pixels at `scale_factor` is drawn through:
+/// the user's (`viewport`), resized to the window, or until there is one, the opening view that
+/// fits the board ([`view::opening`]), which then becomes the user's.
+fn frame_view(
+    viewport: &mut Option<Viewport>,
+    engine: &Engine,
+    renderer: &mut Renderer,
+    (width, height, scale_factor): (u16, u16, f64),
+) -> Viewport {
+    if let Some(vp) = viewport.as_mut() {
+        vp.width = width;
+        vp.height = height;
+        vp.scale_factor = scale_factor;
+        *vp
+    } else {
+        let bounds = renderer.board_bounds(engine.board());
+        let bar = status_bar_height_px(scale_factor);
+        let vp = view::opening(bounds, width, height, scale_factor, bar);
+        tracing::debug!(?vp, "fitted the board to the window");
+        *viewport.insert(vp)
+    }
+}
+
+/// Draws a frame through `vp` as the window shows it: the board, and over it the engine's
+/// cursor, selection, Visual rectangle, caret, command line, jump labels and `:sym` rows, and
+/// the status line ([`status_line`] of the engine, the app's `message` and the export waiting
+/// for its frame). Premultiplied RGBA8, as [`Renderer::render_with`] returns it.
+///
+/// [`App::redraw`] presents it; the README demo draws its frames with it too (`app/demo.rs`).
+/// A function of the app's fields, not a method, so the window's surface can stay borrowed
+/// while the frame is drawn.
+fn compose_frame<'r>(
+    engine: &Engine,
+    renderer: &'r mut Renderer,
+    message: Option<&str>,
+    suspended: Option<&Suspended>,
+    vp: &Viewport,
+) -> &'r [u8] {
+    let status = status_line(engine, message, suspended);
+    let visual = engine.visual_rect(renderer);
+    let text_cursor = engine.text_cursor();
+    let overlay = Overlay {
+        cursor: OverlayCursor::from(engine.cursor()),
+        selection: engine.selection(),
+        visual,
+        caret: text_cursor.as_ref().map(Caret::from),
+        status: StatusLine {
+            left: &status.left,
+            right: &status.right,
+            error: status.error,
+        },
+        command_line: engine.command_line(),
+        labels: engine.jump_labels(),
+        completions: engine.completions(),
+    };
+    renderer.render_with(engine.board(), vp, &overlay)
+}
+
 /// What the view keeps in sight after a key: the caret in a text block, else the current
 /// object, else the cursor's grid point (all in grid units).
 fn focus(engine: &Engine, renderer: &mut Renderer) -> Rect {
@@ -1101,6 +1136,9 @@ fn write_board(target: &Path, contents: &[u8]) -> io::Result<()> {
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
+
+#[cfg(test)]
+mod demo;
 
 #[cfg(test)]
 mod tests {

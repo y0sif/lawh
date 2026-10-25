@@ -1633,6 +1633,7 @@ dependencies = [
  "lawh-core",
  "lawh-math",
  "lawh-render",
+ "png",
  "softbuffer",
  "tracing",
  "tracing-subscriber",
