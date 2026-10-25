@@ -7,6 +7,7 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Duration;
 
@@ -59,6 +60,54 @@ const MAX_SPAWN_FAILURES: u32 = 3;
 /// worker's output ended.
 type FromWorker = Result<Vec<u8>, String>;
 
+/// Why a stopped backend compiles nothing.
+const STOPPED: &str = "the math engine shut down";
+
+/// Stops a [`ProcessBackend`] from another thread ([`Stop::stop`]): the
+/// wait for its worker's answer, or for a new worker's handshake, ends at
+/// once, the worker is killed and reaped on the backend's thread, and no
+/// worker is started again. So the engine can shut down without waiting for a
+/// compile to finish.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Stop(Arc<Mutex<StopState>>);
+
+#[derive(Debug, Default)]
+struct StopState {
+    stopped: bool,
+    /// Wakes the backend's wait on the running worker's output.
+    wake: Option<mpsc::Sender<FromWorker>>,
+}
+
+impl Stop {
+    /// Stops the backend; nothing to do if it already is.
+    pub(crate) fn stop(&self) {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        state.stopped = true;
+        if let Some(wake) = state.wake.take() {
+            // The worker may be gone already, with nothing waiting.
+            let _ = wake.send(Err(STOPPED.to_owned()));
+        }
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .stopped
+    }
+
+    /// Lets [`Stop::stop`] wake a wait on the output `wake` sends to; `false`
+    /// when the backend is stopped already.
+    fn arm(&self, wake: mpsc::Sender<FromWorker>) -> bool {
+        let mut state = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.stopped {
+            return false;
+        }
+        state.wake = Some(wake);
+        true
+    }
+}
+
 /// Compiles formulas in a worker process, one at a time. The worker is
 /// started on first use and after every kill.
 pub(crate) struct ProcessBackend {
@@ -66,6 +115,7 @@ pub(crate) struct ProcessBackend {
     timeout: Duration,
     worker: Option<Worker>,
     spawn_failures: u32,
+    stop: Stop,
 }
 
 impl ProcessBackend {
@@ -75,10 +125,19 @@ impl ProcessBackend {
             timeout,
             worker: None,
             spawn_failures: 0,
+            stop: Stop::default(),
         }
     }
 
+    /// What stops this backend from another thread.
+    pub(crate) fn stop_handle(&self) -> Stop {
+        self.stop.clone()
+    }
+
     pub(crate) fn compile(&mut self, src: &str) -> Outcome {
+        if self.stop.is_stopped() {
+            return Err(MathError::Unavailable(STOPPED.to_owned()));
+        }
         let Some(request) = protocol::encode_request(src, self.timeout) else {
             return Err(MathError::Compile("the formula is too long".to_owned()));
         };
@@ -110,6 +169,10 @@ impl ProcessBackend {
                     MathError::Crashed
                 }
             },
+            Ok(Err(_)) if self.stop.is_stopped() => {
+                tracing::debug!("math worker killed: the engine shut down");
+                MathError::Unavailable(STOPPED.to_owned())
+            }
             Ok(Err(err)) => {
                 tracing::warn!(%err, "math worker died");
                 MathError::Crashed
@@ -127,6 +190,9 @@ impl ProcessBackend {
 
     /// The running worker, started if needed.
     fn worker(&mut self) -> Result<&mut Worker, MathError> {
+        if self.stop.is_stopped() {
+            return Err(MathError::Unavailable(STOPPED.to_owned()));
+        }
         if self.worker.as_mut().is_some_and(Worker::has_exited) {
             tracing::debug!("math worker exited while idle");
             self.worker = None;
@@ -137,11 +203,15 @@ impl ProcessBackend {
                 .max(1);
             let mut last_error = String::new();
             for _ in 0..attempts {
-                match Worker::spawn(&self.command) {
+                match Worker::spawn(&self.command, &self.stop) {
                     Ok(worker) => {
                         self.spawn_failures = 0;
                         self.worker = Some(worker);
                         break;
+                    }
+                    Err(_) if self.stop.is_stopped() => {
+                        tracing::debug!("math worker not started: the engine shut down");
+                        return Err(MathError::Unavailable(STOPPED.to_owned()));
                     }
                     Err(err) => {
                         self.spawn_failures = self.spawn_failures.saturating_add(1);
@@ -174,7 +244,8 @@ struct Worker {
 }
 
 impl Worker {
-    fn spawn(command: &WorkerCommand) -> Result<Self, String> {
+    /// Starts a worker and waits for its handshake, which `stop` can end.
+    fn spawn(command: &WorkerCommand, stop: &Stop) -> Result<Self, String> {
         let mut child = Command::new(&command.program)
             .args(&command.args)
             // One Typst thread, not one per core: a runaway compile keeps at
@@ -195,11 +266,16 @@ impl Worker {
             return Err("the math worker has no stdin or stdout".to_owned());
         };
         let (tx, output) = mpsc::channel();
+        let armed = stop.arm(tx.clone());
         let worker = Self {
             child,
             stdin,
             output,
         };
+        if !armed {
+            // Dropping it kills and reaps it.
+            return Err(STOPPED.to_owned());
+        }
         thread::Builder::new()
             .name("lawh-math-reader".to_owned())
             .spawn(move || read_worker(stdout, &tx))

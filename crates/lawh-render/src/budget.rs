@@ -46,8 +46,9 @@ pub(crate) const OUTLINE_BUDGET_NS: f64 = 3e6;
 /// mode) are always drawn in full, and their estimated cost comes out of this first.
 pub(crate) const HIGHLIGHT_BUDGET_NS: f64 = 3e6;
 
-/// What an export may spend drawing objects. Exports don't need to be interactive, so this is
-/// far above anything a real board needs, but a hostile board still can't make one take minutes.
+/// What an export may spend drawing objects, and for a PNG its image and encoding it (charged
+/// first, at their worst: `export/png.rs`). Exports don't need to be interactive, so this is far
+/// above anything a real board needs, but a hostile board still can't make one take minutes.
 pub(crate) const EXPORT_BUDGET_NS: f64 = 2e9;
 
 /// Objects whose bounds are smaller than this on screen, in physical pixels, aren't drawn, and

@@ -153,6 +153,32 @@ fn dropping_the_engine_ends_the_worker() {
     }
 }
 
+/// Dropping the engine while its worker compiles kills the worker then, not when the compile
+/// would have ended, and reaps it before the drop returns: a program that drops its engine and
+/// exits leaves no worker running, nor one writing to its stderr afterwards.
+#[test]
+fn dropping_the_engine_mid_compile_kills_and_reaps_the_worker_at_once() {
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+    // About ten seconds of compiling, well within this timeout.
+    let engine = engine().with_timeout(Duration::from_secs(60));
+    engine.layout_blocking("x").unwrap();
+    let pid = worker_pid().expect("a running worker");
+    let slow = "#for i in range(30000) { for j in range(3000) { } } x";
+    let deadline = Instant::now() + Duration::from_millis(200);
+    assert_eq!(engine.layout_until(slow, deadline), Err(MathError::Timeout));
+    // The worker is still at it.
+    assert!(Path::new(&format!("/proc/{pid}")).exists());
+    let started = Instant::now();
+    drop(engine);
+    let took = started.elapsed();
+    println!("dropped in {:.1} ms", took.as_secs_f64() * 1e3);
+    // A kill and a wait: milliseconds; a busy machine can pause a thread for a while.
+    assert!(took < Duration::from_millis(1500), "{took:?}");
+    // Killed and reaped: not even a zombie is left.
+    assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    assert_eq!(worker_pid(), None);
+}
+
 #[test]
 fn a_timed_out_worker_is_killed_not_left_spinning() {
     let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);

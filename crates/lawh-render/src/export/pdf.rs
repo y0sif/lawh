@@ -73,10 +73,11 @@ const MIN_PAGE_PT: f64 = 3.0;
 const PDF_TOLERANCE_PT: f64 = 0.01;
 
 /// The export budget's weights for PDF, in estimated nanoseconds of release work, measured with
-/// `calibrate_pdf` below (Linux `x86_64`, this laptop, load average 0.5 to 1.6, 2026-10-25) and
-/// set high: every board it writes takes 0.30 to 1.14 times its estimate (500 circles a million
-/// units across the closest). Each includes what krilla does with the piece later: compressing
-/// its content, and the file's work at the end.
+/// `calibrate_pdf` below (Linux `x86_64`, this laptop, load average 0.5 to 1.6, 2026-10-25;
+/// [`PDF_NS_PER_GLYPH_DEF`] refitted at load 1.1 to 1.4 the same day) and set high: every board
+/// it writes takes 0.30 to 1.13 times its estimate (500 circles a million units across the
+/// closest, 80,000 math glyphs each in its own colour 0.92). Each includes what krilla does with
+/// the piece later: compressing its content, and the file's work at the end.
 ///
 /// The file: the document, the page, the colour profile, writing the objects at the end. A file
 /// with one stroke took 0.05 ms in all.
@@ -107,9 +108,12 @@ const PDF_NS_PER_GLYPH: f64 = 300.0;
 /// 22,500 glyphs of one formula took 0.89 us each with their 44 bytes.
 const PDF_NS_PER_GLYPH_USE: f64 = 500.0;
 /// Each math glyph defined as a form `XObject`, past its segments and bytes: its outline read from
-/// the font, its stream's bounds, its object written. Every glyph of Libertinus Math defined and
-/// drawn once took 40 us each (27.8 segments, 627 bytes), of Inter 45 us (29.8, 858).
-const PDF_NS_PER_GLYPH_DEF: f64 = 12_000.0;
+/// the font, its stream (made, compressed and written on its own), its bounds, its object and
+/// its entry in the page's resources. Every glyph of Libertinus Math defined and drawn once took
+/// 43 us each (27.8 segments, 627 bytes), of Inter 43 us (29.8, 858); 80,000 dots each in its
+/// own colour, a form each of a few segments, 29.5 us each, about 19 us of it this part (the
+/// cost review's `col4`, which an older weight of 12 us put at 0.83 of its time).
+const PDF_NS_PER_GLYPH_DEF: f64 = 20_000.0;
 /// Each byte of content written (as `PDF_BYTES_*` estimate them): formatting it, compressing it,
 /// and copying it into the file at the end. Numbers that repeat each other's digits compress
 /// slowest: 500 circles a million units across, 12 curves each, took 29 us a circle.
@@ -1123,6 +1127,7 @@ mod tests {
     }
 
     /// Boards that each stress one part of writing a PDF.
+    #[expect(clippy::too_many_lines, reason = "one board after another")]
     fn calibration_boards() -> Vec<(&'static str, Board)> {
         let board = |src: String| lawh_core::from_lawh(&format!("lawh version=1\n{src}")).unwrap();
         let many = |each: &dyn Fn(usize) -> String| (0..MAX_OBJECTS).map(each).collect::<String>();
@@ -1199,6 +1204,22 @@ mod tests {
                         (i / 10) * 3,
                         i % 256
                     )
+                })),
+            ),
+            (
+                // Every math glyph its own form: 4 formulas of 20,000 dots, each dot its own
+                // colour (the cost review's `col4`).
+                "80,000 dots in distinct colours",
+                board((0..4).fold(String::new(), |mut src, i| {
+                    writeln!(
+                        src,
+                        "math id=m{i} x=0 y={} size=1 \"#for i in range(20000) {{ text(fill: \
+                         rgb(calc.rem(i, 256), calc.rem(calc.quo(i, 256) + {}, 256), {i}))[.] }}\"",
+                        i * 3,
+                        i * 79
+                    )
+                    .unwrap();
+                    src
                 })),
             ),
             (

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::compile::{Outcome, compile, outcome_name};
 use crate::layout::approx_bytes;
-use crate::process::{ProcessBackend, WorkerCommand};
+use crate::process::{ProcessBackend, Stop, WorkerCommand};
 use crate::{MathError, MathLayout, MathSummary};
 
 /// How long one compile may take by default.
@@ -32,6 +32,13 @@ pub const MAX_WORKERS: usize = 4;
 /// What [`MathEngine::layout_blocking`] waits for beyond the timeout: killing
 /// a stuck worker and starting a new one.
 const BLOCKING_MARGIN: Duration = Duration::from_secs(1);
+
+/// Longest a worker-mode engine waits, as it is dropped, for its queue thread
+/// to kill and reap the worker. Stopping ends the queue thread's wait for the
+/// worker at once, so this takes milliseconds (a kill and a `wait`); the
+/// bound only keeps a thread stuck elsewhere from holding up the caller. Past
+/// it the thread is left to finish on its own, as an in-process engine's is.
+const MAX_SHUTDOWN_WAIT: Duration = Duration::from_secs(1);
 
 /// Most memory the layouts one engine caches may take, in bytes, estimated
 /// from their glyph and path element counts and source lengths. Least
@@ -201,11 +208,41 @@ impl Default for MathEngine {
 }
 
 impl Drop for MathEngine {
+    /// Stops the queue thread. In worker mode the worker is killed now, even in
+    /// the middle of a compile, and reaped before this returns (within
+    /// [`MAX_SHUTDOWN_WAIT`]), so a program that drops its engine before it
+    /// exits leaves no worker behind, nor one writing to its stderr later. In
+    /// process mode the queue thread finishes its current compile, then stops.
     fn drop(&mut self) {
-        // The queue thread finishes its current compile, then stops and kills
-        // the worker.
-        self.shared.lock().shutdown = true;
+        let (stop, queue) = {
+            let mut state = self.shared.lock();
+            state.shutdown = true;
+            (state.stop.take(), state.queue_handle.take())
+        };
         self.shared.changed.notify_all();
+        let (Some(stop), Some(queue)) = (stop, queue) else {
+            return;
+        };
+        stop.stop();
+        let deadline = Instant::now() + MAX_SHUTDOWN_WAIT;
+        let mut state = self.shared.lock();
+        while state.queue_thread {
+            let Some(left) = deadline.checked_duration_since(Instant::now()) else {
+                tracing::warn!("the math queue thread did not stop in time");
+                return;
+            };
+            state = self
+                .shared
+                .changed
+                .wait_timeout(state, left)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+        drop(state);
+        // It has dropped the worker, killed and reaped; only returning is left.
+        if queue.join().is_err() {
+            tracing::warn!("the math queue thread panicked");
+        }
     }
 }
 
@@ -425,17 +462,22 @@ impl MathEngine {
         if state.queue_thread {
             return Ok(());
         }
-        let backend = match &self.mode {
-            Mode::InProcess => Backend::InProcess {
-                timeout: self.timeout,
-                threads: Arc::clone(&self.threads),
-            },
+        let (backend, stop) = match &self.mode {
+            Mode::InProcess => (
+                Backend::InProcess {
+                    timeout: self.timeout,
+                    threads: Arc::clone(&self.threads),
+                },
+                None,
+            ),
             Mode::Worker(command) => {
-                Backend::Process(ProcessBackend::new(command.clone(), self.timeout))
+                let backend = ProcessBackend::new(command.clone(), self.timeout);
+                let stop = backend.stop_handle();
+                (Backend::Process(backend), Some(stop))
             }
         };
         let shared = Arc::clone(&self.shared);
-        thread::Builder::new()
+        let queue = thread::Builder::new()
             .name("lawh-math-queue".to_owned())
             .spawn(move || run_queue(&shared, backend))
             .map_err(|err| {
@@ -443,6 +485,8 @@ impl MathEngine {
             })?;
         // The thread can't look at the state before this lock is released.
         state.queue_thread = true;
+        state.queue_handle = Some(queue);
+        state.stop = stop;
         Ok(())
     }
 }
@@ -507,6 +551,10 @@ struct State {
     /// The formula the queue thread is compiling, and since when.
     current: Option<(String, Instant)>,
     queue_thread: bool,
+    /// The queue thread last started, to join when the engine is dropped.
+    queue_handle: Option<thread::JoinHandle<()>>,
+    /// What stops its worker, in worker mode.
+    stop: Option<Stop>,
     shutdown: bool,
 }
 
@@ -525,6 +573,8 @@ impl State {
             queued: HashSet::new(),
             current: None,
             queue_thread: false,
+            queue_handle: None,
+            stop: None,
             shutdown: false,
         }
     }
@@ -774,15 +824,19 @@ impl Backend {
 }
 
 /// The queue thread: compiles queued formulas one at a time until the engine
-/// is dropped, then drops the backend, which kills the worker.
-fn run_queue(shared: &Shared, mut backend: Backend) {
+/// is dropped, then drops the backend, which kills and reaps the worker,
+/// before it marks itself stopped (the engine's drop waits for that).
+fn run_queue(shared: &Shared, backend: Backend) {
     let _guard = QueueGuard(shared);
+    // Declared after the guard, so dropped before it, by panic too.
+    let mut backend = backend;
     while let Some(src) = shared.next_job() {
         let started = Instant::now();
         let outcome = backend.compile(&src);
         log_compile(&outcome, started.elapsed(), src.len());
         shared.finish(&src, outcome);
     }
+    drop(backend);
 }
 
 /// Marks the queue thread stopped when it ends, even by panic, so the next

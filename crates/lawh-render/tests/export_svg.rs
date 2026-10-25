@@ -20,8 +20,8 @@ use lawh_core::{
     Shape,
 };
 use lawh_render::{
-    EXPORT_STROKE_UNITS, ExportError, ExportLimits, Exported, MAX_EXPORT_BYTES, Palette, Renderer,
-    Viewport,
+    EXPORT_STROKE_UNITS, ExportError, ExportLimits, Exported, MAX_EXPORT_BYTES, MAX_EXPORT_SIDE_PX,
+    Palette, Renderer, Viewport,
 };
 
 /// Most a pixel inside a shape, a glyph or the paper (its 3 x 3 neighbourhood the same colour
@@ -209,6 +209,21 @@ fn check_structure(svg: &str) -> (usize, usize) {
         assert!(defined.contains(&format!("g{i}")), "g{i}");
     }
     (uses, paths)
+}
+
+/// The `width` and `height` of an SVG's root, and its `viewBox`'s.
+fn sizes(svg: &str) -> ((f64, f64), (f64, f64)) {
+    let doc = roxmltree::Document::parse(svg).unwrap();
+    let root = doc.root_element();
+    let get = |name| root.attribute(name).unwrap().parse::<f64>().unwrap();
+    let view: Vec<f64> = root
+        .attribute("viewBox")
+        .unwrap()
+        .split(' ')
+        .map(|v| v.parse().unwrap())
+        .collect();
+    assert_eq!(view[..2], [0.0, 0.0]);
+    ((get("width"), get("height")), (view[2], view[3]))
 }
 
 /// The `width` and `height` of an SVG's root, which its `viewBox` matches.
@@ -494,16 +509,30 @@ fn the_board_at_the_limits_exports_within_its_caps() {
     let board = common::limits_board();
     let exported = export(&board);
     assert!(exported.bytes.len() < MAX_EXPORT_BYTES);
-    assert_eq!(exported.report, ExportReport::default());
+    assert_eq!(exported.report.failed_formulas, 0);
     let svg = text(&exported);
     check_structure(svg);
-    let (width, height) = nominal_size(svg);
-    // From x = -1e6 to the second ellipse's right at 2e6, at 40 px a unit, with the margin;
-    // from y = -1e6 to the many-line text's foot, past 1e6.
-    assert!(width > 3e6 * 40.0 && width < 3.1e6 * 40.0, "{width}");
-    assert!(height > 2e6 * 40.0, "{height}");
+    let ((width, height), (view_width, view_height)) = sizes(svg);
+    // Drawn at 40 px a unit, from x = -1e6 to the second ellipse's right at 2e6 with the
+    // margin, and from y = -1e6 to the many-line text's foot, past 1e6...
+    assert!(
+        view_width > 3e6 * 40.0 && view_width < 3.1e6 * 40.0,
+        "{view_width}"
+    );
+    assert!(view_height > 2e6 * 40.0, "{view_height}");
+    // ...and shown within the side cap, the shape kept.
+    let shrunk = exported.report.shrunk.unwrap();
+    assert!(
+        (shrunk - f64::from(MAX_EXPORT_SIDE_PX) / view_width).abs() < 1e-12,
+        "{shrunk}"
+    );
+    assert!(
+        (width - f64::from(MAX_EXPORT_SIDE_PX)).abs() < 1e-9,
+        "{width}"
+    );
+    assert!((height - view_height * shrunk).abs() < 0.01, "{height}");
     // resvg reads it, and draws the start of the long text (at x = -1,000,000, y = 0) at full
-    // size, 40,000,000 pixels down the file. (It leaves out paths millions of pixels across,
+    // size, 40,000,000 pixels down the drawing. (It leaves out paths millions of pixels across,
     // such as the shapes here: tiny-skia's own limit.)
     let tree =
         resvg::usvg::Tree::from_data(&exported.bytes, &resvg::usvg::Options::default()).unwrap();
@@ -512,13 +541,18 @@ fn the_board_at_the_limits_exports_within_its_caps() {
     let top = (1_000_000.0 + 1.0 + EXPORT_STROKE_UNITS / 2.0) * 40.0;
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "pixels of the file, inside f32's range"
+        reason = "pixels of the drawing and a scale, inside f32's range"
     )]
-    let (x, y) = ((start - 20.0) as f32, (top - 20.0) as f32);
+    let (x, y, unshrink) = (
+        (start - 20.0) as f32,
+        (top - 20.0) as f32,
+        (1.0 / shrunk) as f32,
+    );
     let mut pixmap = resvg::tiny_skia::Pixmap::new(400, 80).unwrap();
+    // The file's size scaled back to the drawing's, then moved to the text.
     resvg::render(
         &tree,
-        resvg::tiny_skia::Transform::from_translate(-x, -y),
+        resvg::tiny_skia::Transform::from_scale(unshrink, unshrink).post_translate(-x, -y),
         &mut pixmap.as_mut(),
     );
     let ink = pixmap
@@ -527,6 +561,55 @@ fn the_board_at_the_limits_exports_within_its_caps() {
         .filter(|px| px.alpha() > 200 && px.red() < 100)
         .count();
     assert!(ink > 200, "{ink} pixels of ink");
+}
+
+/// A board wider than the side cap at 40 px a unit keeps its drawing (the `viewBox`, in those
+/// pixels) and shrinks its `width` and `height` to the cap, shape kept, which `ExportReport`
+/// says; one within it is its own size.
+#[test]
+fn a_size_past_the_side_cap_shrinks_and_keeps_its_drawing() {
+    // Two circles two million units apart: 80,000,162 pixels across at full size.
+    let board = common::board(
+        "lawh version=1\n\
+         circle id=c1 x=-1000000 y=0 r=1\n\
+         circle id=c2 x=1000000 y=0 r=1\n",
+    );
+    let exported = export(&board);
+    let svg = text(&exported);
+    check_structure(svg);
+    let ((width, height), (view_width, view_height)) = sizes(svg);
+    assert_eq!(view_width, 80_000_162.0);
+    assert_eq!(view_height, 162.0);
+    let shrunk = exported.report.shrunk.unwrap();
+    assert!((shrunk - 16_384.0 / 80_000_162.0).abs() < 1e-15, "{shrunk}");
+    assert_eq!(width, 16_384.0);
+    // 162 pixels shrunk to 0.03, kept at a pixel: the drawing is centred in it.
+    assert_eq!(height, 1.0);
+    assert!(svg.contains(" width=\"16384\" height=\"1\" viewBox=\"0 0 80000162 162\""));
+    // Both circles are there, at their places in the drawing.
+    assert_eq!(svg.matches("<path ").count(), 2);
+    // The cap through the seam: a frame of 12.05 units, 482 pixels, shown at 100.
+    let small = common::board("lawh version=1\ncircle id=c1 x=0 y=0 r=5\n");
+    let limits = ExportLimits {
+        max_side_px: 100,
+        ..ExportLimits::DEFAULT
+    };
+    let capped = export_with(&small, &limits).unwrap();
+    let ((width, height), view) = sizes(text(&capped));
+    assert_eq!(view, (482.0, 482.0));
+    assert_eq!((width, height), (100.0, 100.0));
+    assert!((capped.report.shrunk.unwrap() - 100.0 / 482.0).abs() < 1e-12);
+    // Within the cap: no shrink, and the same drawing as with the cap.
+    let full = export(&small);
+    assert_eq!(full.report, ExportReport::default());
+    assert_eq!(nominal_size(text(&full)), (482.0, 482.0));
+    let header_end = |bytes: &[u8]| bytes.iter().position(|&b| b == b'>').unwrap();
+    let rest = |bytes: &[u8]| {
+        let svg = std::str::from_utf8(bytes).unwrap();
+        let root = svg.find("<svg").unwrap();
+        svg[root + header_end(&bytes[root..])..].to_owned()
+    };
+    assert_eq!(rest(&full.bytes), rest(&capped.bytes));
 }
 
 /// 250 texts of 160 characters: lawh-core's 40,000 characters a board.

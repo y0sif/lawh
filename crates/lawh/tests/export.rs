@@ -9,9 +9,12 @@
 #![cfg(test)]
 
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
 
 const AREA: &str = include_str!("../../../examples/area.lawh");
 
@@ -278,6 +281,57 @@ fn failures_exit_1_and_write_nothing() {
         dir.listing(),
         ["area.lawh", "bad.lawh", "empty.lawh", "huge.lawh", "sub"]
     );
+}
+
+/// An export the math wait stops while a formula is still compiling kills and reaps the math
+/// worker before `lawh export` exits: stderr, which the worker shares, closes with the exit and
+/// holds only the error, no line from a worker left writing to it after the shell is back.
+/// Takes the math wait, 10 s.
+#[test]
+fn an_export_stopped_by_the_math_wait_leaves_no_worker_behind() {
+    let dir = Dir::new("math-wait");
+    // Formulas of a second or so each (under the 2 s timeout): the wait ends during one.
+    let mut board = String::from("lawh version=1\n");
+    for i in 1..=12 {
+        writeln!(
+            board,
+            "math id=m{i} x=0 y={} \"#{{ let x = {i}; for i in range(6500000) {{ x += i }}; x }}\"",
+            i * 3
+        )
+        .unwrap();
+    }
+    dir.write("slow.lawh", &board);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_lawh"))
+        .args(["export", "slow.lawh", "out.png"])
+        .current_dir(&dir.0)
+        .env_remove("WAYLAND_DISPLAY")
+        .env_remove("DISPLAY")
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = child.stderr.take().unwrap();
+    // Read until every holder of the pipe has closed it: the app, and any worker.
+    let reader = std::thread::spawn(move || {
+        let mut text = String::new();
+        err.read_to_string(&mut text).unwrap();
+        (text, Instant::now())
+    });
+    let status = child.wait().unwrap();
+    let exited = Instant::now();
+    let (text, closed) = reader.join().unwrap();
+    assert_eq!(status.code(), Some(1), "{text}");
+    assert_eq!(
+        text,
+        "lawh: cannot export \"out.png\": export stopped: math took over 10 s to compile\n"
+    );
+    let late = closed.saturating_duration_since(exited);
+    assert!(
+        late < Duration::from_millis(500),
+        "stderr closed {late:?} after the exit"
+    );
+    assert_eq!(dir.listing(), ["slow.lawh"]);
 }
 
 #[test]

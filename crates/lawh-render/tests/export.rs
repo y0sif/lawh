@@ -560,8 +560,9 @@ fn the_math_wait_ends_on_time() {
 #[test]
 fn the_budget_stops_an_export() {
     let board = common::area_board();
-    // The area board at the default scale costs a few ms; its image alone 0.6 ns a pixel.
-    for budget_ns in [0.0, 1e5, 2e5] {
+    // The area board at the default scale (970 x 802) draws in a few ms, but its image is
+    // charged first: 0.6 ns a pixel, and encoding it at its worst, 100 ns a byte (233 ms).
+    for budget_ns in [0.0, 1e5, 2e5, 2e8] {
         let limits = ExportLimits {
             budget_ns,
             ..ExportLimits::DEFAULT
@@ -573,12 +574,13 @@ fn the_budget_stops_an_export() {
         );
     }
     let limits = ExportLimits {
-        budget_ns: 1e8,
+        budget_ns: 3e8,
         ..ExportLimits::DEFAULT
     };
     assert!(export_with(&board, &limits).is_ok());
     // 500 circles one inside the other, filling a 2,000 x 2,000 image with outlines: about
-    // 85 ms estimated, over the 30 ms given here, which the image alone (2.4 ms) is not.
+    // 85 ms of drawing estimated, over the 40 ms the 120 ms given here leave once the image and
+    // its encoding (fdeflate's worst, 6.5 ns a byte: 2.4 and 78 ms) are paid.
     let mut src = String::from("lawh version=1\n");
     for i in 0..500 {
         let r = 10 + i;
@@ -586,11 +588,17 @@ fn the_budget_stops_an_export() {
     }
     let piled = common::board(&src);
     let limits = ExportLimits {
-        budget_ns: 3e7,
+        budget_ns: 1.2e8,
         max_pixels: 4_000_000,
         ..ExportLimits::DEFAULT
     };
     assert_eq!(export_with(&piled, &limits), Err(ExportError::OverBudget));
+    // With room for its drawing, it is written.
+    let limits = ExportLimits {
+        budget_ns: 3e8,
+        ..limits
+    };
+    assert!(export_with(&piled, &limits).is_ok());
     assert_eq!(
         ExportError::OverBudget.to_string(),
         "export stopped: drawing it costs too much"

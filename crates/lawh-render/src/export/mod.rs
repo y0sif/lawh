@@ -11,8 +11,8 @@
 //! page, board text as real text in embedded font subsets, math as paths).
 //!
 //! An export is bounded however hostile the board: the formulas' compiles by
-//! [`EXPORT_MATH_WAIT`] together, the drawing (or writing) by the export budget
-//! (`EXPORT_BUDGET_NS` of estimated work, as the window's frames are), a PNG's size by
+//! [`EXPORT_MATH_WAIT`] together, the drawing (or writing) and a PNG's encoding by the export
+//! budget (`EXPORT_BUDGET_NS` of estimated work, as the window's frames are), a PNG's size by
 //! [`MAX_EXPORT_PIXELS`] and [`MAX_EXPORT_SIDE_PX`] and a PDF page's by [`MAX_PDF_PAGE_PT`] (both
 //! shrink to fit), and the file by [`MAX_EXPORT_BYTES`]. Past a cap that stops it, it returns an
 //! [`ExportError`] and no bytes. Nothing is written to disk here.
@@ -20,7 +20,7 @@
 //! Memory: a first pass compiles each formula and keeps only its box, then objects are drawn one
 //! at a time, so an export holds one formula's layout at once, not every formula's (the math
 //! engine caches some, within its own limit). A PNG's image is moved into the encoder, never
-//! copied.
+//! copied, and its file streamed through the byte cap.
 
 mod pdf;
 mod png;
@@ -53,9 +53,11 @@ use crate::{BASE_PX_PER_UNIT, Renderer, draw};
 pub const EXPORT_MATH_WAIT: Duration = Duration::from_secs(10);
 
 /// Most pixels a PNG export may have, 8,000 x 8,000; past it the scale shrinks to fit. Its image
-/// takes 4 bytes a pixel while it is drawn, 256 MB at the cap, and encoding an 8,000 x 8,000
-/// image with the default compression took 455 to 637 ms (measured in release on this laptop,
-/// `docs/handoff-m4-research.md`, R2). Drawing into it is budgeted like any frame.
+/// takes 4 bytes a pixel while it is drawn, 256 MB at the cap, and what `vello_cpu` keeps of the
+/// paths drawn into it comes on top until it renders (the most measured: 394 MB in all for two
+/// scribbles of 2,000 lines across it, in release). Drawing into it and encoding it are charged
+/// to the export's budget: encoding an image this size with fdeflate takes about a second at
+/// worst and is charged 1.25 s (1.66 s with transparency, `png.rs`).
 pub const MAX_EXPORT_PIXELS: u64 = 64_000_000;
 
 /// Most pixels a side of a PNG export may have; past it the scale shrinks to fit. A common
@@ -64,16 +66,17 @@ pub const MAX_EXPORT_PIXELS: u64 = 64_000_000;
 pub const MAX_EXPORT_SIDE_PX: u32 = 16_384;
 
 /// Largest file an export may make, in bytes (64 MiB), counted while it is written: past it the
-/// export stops and returns nothing. A PNG at the pixel caps takes a few megabytes (0.27 to
-/// 4.8 MB at 8,000 x 8,000 with the default compression, measured in release on this laptop,
-/// R2), so only a hostile image gets near it. An SVG takes about 35 bytes a glyph drawn: a board
-/// at lawh-core's 40,000 characters of text is 1.2 MB, and only math near lawh-math's glyph
-/// caps reaches this (500 formulas of 22,500 glyphs stopped here after 110 ms, measured in
-/// release). krilla builds a PDF in memory, so a PDF counts the content it draws, uncompressed
-/// and estimated a little high, as it goes (44 to 63 bytes a math glyph, 8.5 a glyph of text),
-/// and its finished file once more, fonts included: the 40,000 characters take 0.35 MB of
-/// content and a 12 KB file, and the 500 formulas stopped here after 1.1 s with 154 MB of memory
-/// at the peak (measured in release).
+/// export stops and returns nothing. A PNG streams its compressed data through the cap, so it
+/// stops within a chunk of it: a board's PNG at the pixel caps takes a few megabytes (the area
+/// board at `pngscale` 8 is 0.32 MB), and only hostile images get near it (two scribbles of
+/// 2,000 lines across the image: 65 MB; noise stops here after 0.35 s, measured in release). An
+/// SVG takes about 35 bytes a glyph drawn: a board at lawh-core's 40,000 characters of text is
+/// 1.2 MB, and only math near lawh-math's glyph caps reaches this (500 formulas of 22,500 glyphs
+/// stopped here after 110 ms, measured in release). krilla builds a PDF in memory, so a PDF
+/// counts the content it draws, uncompressed and estimated a little high, as it goes (44 to 63
+/// bytes a math glyph, 8.5 a glyph of text), and its finished file once more, fonts included:
+/// the 40,000 characters take 0.35 MB of content and a 12 KB file, and the 500 formulas stopped
+/// here after 1.1 s with 154 MB of memory at the peak (measured in release).
 pub const MAX_EXPORT_BYTES: usize = 64 * 1024 * 1024;
 
 /// Longest side a PDF export's page may have, in pt (200 inches); past it the scale shrinks to
@@ -223,10 +226,7 @@ impl Renderer {
         let mut plan = self.plan_export(board, selection, &limits, &mut budget)?;
         let (bytes, shrunk) = match options.format {
             ExportFormat::Png => png::export(self, board, &mut plan, *options, &limits, budget)?,
-            ExportFormat::Svg => (
-                svg::export(self, board, &mut plan, *options, &limits, budget)?,
-                None,
-            ),
+            ExportFormat::Svg => svg::export(self, board, &mut plan, *options, &limits, budget)?,
             ExportFormat::Pdf => pdf::export(self, board, &mut plan, *options, &limits, budget)?,
         };
         tracing::debug!(

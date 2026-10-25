@@ -14,9 +14,13 @@
 //!
 //! The nominal size is [`BASE_PX_PER_UNIT`] (40) pixels a unit, in whole pixels with the frame
 //! centred as a PNG at scale 1 has it (`png.rs`), so the two match pixel for pixel; coordinates
-//! are those pixels from the image's corner, so numbers stay small. Numbers have a fixed
-//! precision ([`COORD_DECIMALS`], [`SCALE_DECIMALS`]) and ids follow the draw list's order, so a
-//! board gives the same bytes every time.
+//! are those pixels from the image's corner, so numbers stay small. They are the `viewBox`; the
+//! `width` and `height` are the same unless a side passes [`super::MAX_EXPORT_SIDE_PX`], when
+//! both shrink to fit it (`ExportReport::shrunk`): the drawing is unchanged and scales to the
+//! smaller size, which viewers and converters can open (`rsvg-convert` and `ImageMagick` refuse
+//! an SVG 80,000,000 pixels wide). Numbers have a fixed precision ([`COORD_DECIMALS`],
+//! [`SCALE_DECIMALS`]) and ids follow the draw list's order, so a board gives the same bytes
+//! every time.
 //!
 //! Bounded as every export is: each byte counts against the byte cap as it is written (the
 //! export stops as soon as the file passes it), and each element is charged to the export's
@@ -93,7 +97,8 @@ const SVG_NS_PER_GLYPH: f64 = 150.0;
 /// a glyph: about half what their segments alone are estimated at.
 const SVG_NS_PER_GLYPH_DEF: f64 = 1_000.0;
 
-/// Draws `plan` into an SVG file and returns its bytes.
+/// Draws `plan` into an SVG file and returns its bytes, with the factor its `width` and
+/// `height` shrank by to fit [`super::MAX_EXPORT_SIDE_PX`], if they did.
 pub(super) fn export(
     renderer: &mut Renderer,
     board: &Board,
@@ -101,8 +106,17 @@ pub(super) fn export(
     options: ExportOptions,
     limits: &ExportLimits,
     budget: Budget,
-) -> Result<Vec<u8>, ExportError> {
-    write(renderer, board, plan, options, limits, budget).map(|(bytes, _)| bytes)
+) -> Result<(Vec<u8>, Option<f64>), ExportError> {
+    write(renderer, board, plan, options, limits, budget)
+        .map(|written| (written.bytes, written.shrunk))
+}
+
+/// What [`write`] made: the file, the factor its size shrank by, and the budget as it was left.
+struct Written {
+    bytes: Vec<u8>,
+    shrunk: Option<f64>,
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the calibration"))]
+    budget: Budget,
 }
 
 /// [`export`], and the budget as it was left.
@@ -113,7 +127,7 @@ fn write(
     options: ExportOptions,
     limits: &ExportLimits,
     budget: Budget,
-) -> Result<(Vec<u8>, Budget), ExportError> {
+) -> Result<Written, ExportError> {
     let frame = plan.frame;
     if !(frame.is_finite() && frame.width() > 0.0 && frame.height() > 0.0) {
         return Err(ExportError::Empty);
@@ -130,8 +144,11 @@ fn write(
     );
     let to_px =
         Affine::translate(room) * Affine::scale(px) * Affine::translate((-frame.x0, -frame.y0));
+    // Its size on a page, within the side cap; the drawing keeps its pixels (the `viewBox`).
+    let fit = (f64::from(limits.max_side_px) / width.max(height)).min(1.0);
+    let shrunk = (fit < 1.0).then_some(fit);
     let mut target = SvgTarget::new(limits.max_bytes, to_px, budget);
-    target.header(width, height)?;
+    target.header(width, height, fit)?;
     if options.background == ExportBackground::Paper {
         target.paper(
             width,
@@ -141,7 +158,11 @@ fn write(
     }
     renderer.draw_export(board, plan, &mut target)?;
     target.out.str("</svg>\n")?;
-    Ok((target.out.bytes, target.budget))
+    Ok(Written {
+        bytes: target.out.bytes,
+        shrunk,
+        budget: target.budget,
+    })
 }
 
 /// What an SVG is written with: the file so far, the board-to-pixel transform, the export's
@@ -177,8 +198,10 @@ impl SvgTarget {
         self.spend(SVG_NS_PER_ELEMENT + SVG_NS_PER_SEGMENT * path.elements().len() as f64)
     }
 
-    /// The XML declaration and the `<svg>` element, `width` x `height` pixels.
-    fn header(&mut self, width: f64, height: f64) -> Result<(), ExportError> {
+    /// The XML declaration and the `<svg>` element: a `viewBox` of `width` x `height` pixels,
+    /// shown at `fit` times that size, each side at least a pixel (as a PNG's are: `ImageMagick`
+    /// refuses a side under one).
+    fn header(&mut self, width: f64, height: f64, fit: f64) -> Result<(), ExportError> {
         self.spend(SVG_NS_PER_ELEMENT)?;
         self.out.str(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -188,9 +211,9 @@ impl SvgTarget {
         self.out
             .start()
             .str(" width=\"")
-            .num::<0>(width)
+            .num::<COORD_DECIMALS>((width * fit).max(1.0))
             .str("\" height=\"")
-            .num::<0>(height)
+            .num::<COORD_DECIMALS>((height * fit).max(1.0))
             .str("\" viewBox=\"0 0 ")
             .num::<0>(width)
             .str(" ")
@@ -1080,7 +1103,7 @@ mod tests {
                 )
                 .unwrap()
             };
-            let (bytes, budget) = write_once(renderer);
+            let Written { bytes, budget, .. } = write_once(renderer);
             let estimate_ms = budget.spent / 1e6;
             let mut took_ms = f64::INFINITY;
             for _ in 0..3 {

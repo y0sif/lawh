@@ -62,7 +62,12 @@ pub fn export_to(
 pub fn run(args: &ExportArgs) -> anyhow::Result<Option<String>> {
     let board = files::read_existing(&args.board)?;
     let mut renderer = Renderer::with_math(crate::math_engine()?);
-    export_file(args, &board, &mut renderer)
+    let result = export_file(args, &board, &mut renderer);
+    // Dropping the math engine kills and reaps its worker, even one still compiling a formula
+    // the math wait gave up on, so the process tree is gone when `lawh export` exits: nothing
+    // writes to its stderr after the shell is back.
+    drop(renderer);
+    result
 }
 
 /// The export of `board`, read from `args.board`, to `args.out` with `renderer`. Refused when
