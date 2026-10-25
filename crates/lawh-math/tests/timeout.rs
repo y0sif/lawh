@@ -34,16 +34,24 @@ fn endless_loop_times_out_and_is_cached() {
     assert!(second < DEFAULT_TIMEOUT / 2, "cache hit took {second:?}");
 }
 
-/// How long each stuck compile below should run: far longer than the
-/// `MAX_WORKERS` 20 ms timeouts it must outlast, far shorter than the test's
-/// 120 s deadline.
-const STUCK_FOR: Duration = Duration::from_secs(3);
+/// The engine's timeout in the test below. Long enough for a trivial formula
+/// to compile while every core is busy: at 20 ms, CI's Windows runner timed
+/// `y` out for real (run 40219261659), and a real timeout is cached, so it
+/// never compiled. Short enough that `MAX_WORKERS` of them (2 s) pass well
+/// within [`STUCK_FOR`].
+const TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Outer loop count for a formula that runs about [`STUCK_FOR`] on this
-/// machine. A fixed loop doesn't work: 1500 x 1500 iterations outlasted the
-/// timeouts on CI's Linux runners but finished first on its macOS arm64 one
-/// (CI run 40217935423). So time 1000 x 1000 iterations here and scale.
-fn stuck_rows() -> u64 {
+/// How long each stuck compile below should run: five times the
+/// `MAX_WORKERS` timeouts it must outlast (2 s), and far shorter than the
+/// test's 120 s deadline. The scaling is rough: aiming at 6 s, two runs here
+/// took 3.4 s and 6.3 s in all, so the margin covers a calibration off by 2x.
+const STUCK_FOR: Duration = Duration::from_secs(10);
+
+/// Side of a square loop that runs about [`STUCK_FOR`] on this machine. A
+/// fixed loop doesn't work: 1500 x 1500 iterations outlasted the timeouts on
+/// CI's Linux runners but finished first on its macOS arm64 one (CI run
+/// 40217935423). So time 1000 x 1000 iterations here and scale.
+fn stuck_side() -> u64 {
     let engine = MathEngine::new().with_timeout(Duration::from_secs(60));
     // A first compile pays one-time costs (fonts, the library); keep them out
     // of the timing.
@@ -53,29 +61,29 @@ fn stuck_rows() -> u64 {
         .layout("#for i in range(1000) { for j in range(1000) { } } z")
         .unwrap();
     let measured = started.elapsed().max(Duration::from_millis(1));
-    let rows = 1000.0 * STUCK_FOR.as_secs_f64() / measured.as_secs_f64();
-    // Bounds: at least the calibration itself, and at most 100x it, so a
-    // calibration that ran unusually fast can't make the formulas outlast the
-    // deadline if the machine slows down afterwards. Measured here (Linux
-    // x86_64, test profile): 106 to 128 ms for 1000 x 1000, so about 25,000
-    // rows.
+    let side = 1000.0 * (STUCK_FOR.as_secs_f64() / measured.as_secs_f64()).sqrt();
+    // Bounds: at least the calibration itself, and at most 1000x its
+    // iterations, so a calibration that ran unusually fast can't make the
+    // formulas outlast the deadline if the machine slows down afterwards.
+    // Measured here (Linux x86_64, test profile): 106 to 128 ms for
+    // 1000 x 1000.
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "clamped to 1000..=100000 first"
+        reason = "clamped to 1000..=31623 first"
     )]
-    let rows = rows.clamp(1000.0, 100_000.0) as u64;
-    rows
+    let side = side.clamp(1000.0, 31_623.0) as u64;
+    side
 }
 
 #[test]
 fn stuck_compiles_are_capped_and_the_refusal_is_not_cached() {
-    let rows = stuck_rows();
-    let engine = MathEngine::new().with_timeout(Duration::from_millis(20));
+    let side = stuck_side();
+    let engine = MathEngine::new().with_timeout(TIMEOUT);
     // Each runs about STUCK_FOR, far longer than the timeout, then finishes
     // on its own.
     for k in 0..MAX_WORKERS {
-        let slow = format!("#for i in range({rows}) {{ for j in range(1000) {{ }} }} x_{k}");
+        let slow = format!("#for i in range({side}) {{ for j in range({side}) {{ }} }} x_{k}");
         assert_eq!(engine.layout(&slow), Err(MathError::Timeout));
     }
 
