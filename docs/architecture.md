@@ -5,7 +5,7 @@ draws text, Typst math, circles, ellipses, rectangles, lines and arrows, with mo
 Milestone 2 (the Vim engine) is built and merged: keys move the cursor, make and edit objects,
 select, undo and repeat, `:w` saves, and key maps and settings load from a lawhrc. Milestone 3 is
 built and merged: sizes for text and math, jump labels (`s` puts a short label on every object in view; typing one jumps there), and `:sym`
-to put in a symbol by name. Milestone 4 is built and being tested: export to SVG, PNG and PDF
+to put in a symbol by name. Milestone 4 is built and merged: export to SVG, PNG and PDF
 (`:export` in the window, `lawh export` without one), from a draw list the window shares. Moving
 things and the rest come later. Sections marked **planned** describe design not built yet;
 **open** marks decisions still to make. Measured numbers are in

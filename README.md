@@ -33,8 +33,8 @@ the "area of a circle" example from an empty board takes 62 keys (see the
 Milestone 3 is done: sizes for text and math, jump labels to reach any object in view in two or
 three keys, and `:sym` to put in a math symbol by name.
 
-Milestone 4 is built and being tested: export to SVG, PNG and PDF, from the window with `:export`
-or without one with `lawh export`.
+Milestone 4 is done: export to SVG, PNG and PDF, from the window with `:export` or without one
+with `lawh export`.
 
 ## What works
 

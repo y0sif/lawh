@@ -7,10 +7,11 @@ Milestone 1 ("see a board") is done: `lawh file.lawh` draws a board, with mouse 
 Milestone 2 (the Vim engine) is done and merged: keys, editing, selection, saving, key maps and
 `lawhrc`. Milestone 3 is done and merged: text and math sizes (`<C-a>`/`<C-x>`, `:si`, `size=` in
 files), jump labels on `s`, `:sym` symbol search (`<C-k>` in Insert mode) and `W B E` in blocks.
-Milestone 4 is built on `feat/m4-export`, pending y0sif's test: export to SVG, PNG and PDF
+Milestone 4 is done and merged: export to SVG, PNG and PDF
 (`:exp[ort]`, the Visual selection too, `:set pngscale` and `exportbg`, `lawh export` without a
 window) from a draw list the window shares, every colour in one `Palette`, and `:te`/`:ma`/`:sym`
-on an object placing the block below it. Keys are listed in `docs/keys.md`.
+on an object placing the block below it. Milestone 5 (moving things) is next. Keys are listed in
+`docs/keys.md`.
 
 ## Workspace
 
