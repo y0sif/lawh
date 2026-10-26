@@ -1,6 +1,6 @@
 # Architecture
 
-lawh 0.1.0: `lawh file.lawh` reads a board, opens a window and draws text, Typst math, circles,
+lawh 0.1: `lawh file.lawh` reads a board, opens a window and draws text, Typst math, circles,
 ellipses, rectangles, lines and arrows, with mouse pan and zoom. The Vim engine drives it: keys
 move the cursor, make, edit and select objects, move them (take with `x`, put with `p`), undo
 and repeat, `:w` saves, and key maps and settings load from a lawhrc. Text and math have sizes,

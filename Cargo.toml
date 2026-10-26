@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 # kdl 6.7, a dev-dependency (the test oracle for lawh-core's parser), needs 1.95. The highest
 # among the dependencies the app builds is Typst 0.15 at 1.92.
@@ -17,9 +17,9 @@ homepage = "https://github.com/y0sif/lawh"
 publish = false
 
 [workspace.dependencies]
-lawh-core = { path = "crates/lawh-core", version = "0.1.0" }
-lawh-math = { path = "crates/lawh-math", version = "0.1.0" }
-lawh-render = { path = "crates/lawh-render", version = "0.1.0" }
+lawh-core = { path = "crates/lawh-core", version = "0.1.1" }
+lawh-math = { path = "crates/lawh-math", version = "0.1.1" }
+lawh-render = { path = "crates/lawh-render", version = "0.1.1" }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 kdl = { version = "6.7.1", default-features = false, features = ["span"] }

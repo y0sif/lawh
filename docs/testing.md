@@ -244,10 +244,13 @@ The release archives carry `THIRD-PARTY-LICENSES.txt`, made by cargo-about 0.9.2
 fails when a crate's licence can't be read or a clarification in `about.toml` no longer matches
 its file (cargo-about only warns about that, so the job looks for "failed to validate" in its
 log). A dependency bump shows a licence problem there rather than on a release tag. `release.yml`
-runs the same for each target, then builds every target on a runner of its own kind and
-smoke-tests each binary: `lawh --version`, and `lawh export examples/area.lawh` to an SVG, which
-compiles the formula in the math worker. On Windows it also checks, with `dumpbin /DEPENDENTS`,
-that `lawh.exe` imports no C runtime DLL.
+runs the same for each target, then builds every target on a runner of its own kind (Linux in an
+Ubuntu 22.04 container) and smoke-tests each binary: `lawh --version`, and
+`lawh export examples/area.lawh` to an SVG, which compiles the formula in the math worker. Either
+printing anything besides the version fails the build: that is how a loader warning shows, like
+lawh 0.1.0's "weak version `GLIBC_2.39' not found" on glibc older than 2.39. On Linux it also
+fails a binary that asks for a glibc symbol newer than 2.35, weak references included, and on
+Windows it checks, with `dumpbin /DEPENDENTS`, that `lawh.exe` imports no C runtime DLL.
 
 ## The README demo
 

@@ -1626,7 +1626,7 @@ dependencies = [
 
 [[package]]
 name = "lawh"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "etcetera",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "lawh-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "insta",
  "kdl",
@@ -1655,7 +1655,7 @@ dependencies = [
 
 [[package]]
 name = "lawh-math"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "codex",
  "insta",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "lawh-render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bytemuck",
  "hayro",

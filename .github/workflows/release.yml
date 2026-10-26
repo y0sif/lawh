@@ -97,29 +97,49 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each target on its own kind of runner, so every binary is run below. Linux on a pinned
-        # Ubuntu: its glibc sets the oldest glibc the binary runs on, and ubuntu-latest moves to
-        # 26.04 in November 2026 (actions/runner-images#14748). Not 22.04: deprecated since
-        # 2026-09-17, retired 2027-04-17 (actions/runner-images#14254). macos-15-intel is the
-        # last x86_64 macOS runner, offered until August 2027 (actions/runner-images#13045).
+        # Each target on its own kind of runner, so every binary is run below. Linux builds in an
+        # Ubuntu 22.04 container: its glibc, 2.35, is the oldest the binary runs on. Built
+        # against a newer glibc, Rust's std asks for its optional functions by that glibc's
+        # version (pidfd_spawnp, GLIBC_2.39 on Ubuntu 24.04), and an older glibc's loader then
+        # prints "weak version `GLIBC_2.39' not found" at every start (lawh 0.1.0). An image
+        # doesn't retire with a runner: ubuntu-22.04 runners are deprecated since 2026-09-17,
+        # retired 2027-04-17 (actions/runner-images#14254). macos-15-intel is the last x86_64
+        # macOS runner, offered until August 2027 (actions/runner-images#13045).
         include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            container: ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956 # 22.04, as of 2026-10-26
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            container: ubuntu:22.04@sha256:0a9887931b0e38af2e3487ed39e29436b0535c4f3f52e57745baaf79d1898956 # 22.04, as of 2026-10-26
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: macos-15-intel, target: x86_64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
+    # Empty for macOS and Windows, which build on the runner itself.
+    container: ${{ matrix.container }}
     env:
       TARGET: ${{ matrix.target }}
     steps:
+      # The container has no compiler, curl or git: rustup needs curl, some build scripts compile
+      # C (psm, through Typst), and actions/checkout uses git.
+      - name: Container packages
+        if: matrix.container
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git build-essential
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master branch as of 2026-10-16
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+      # The key tells container builds apart: build scripts compiled on the runner's newer glibc
+      # wouldn't run in the container.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          key: ${{ matrix.target }}
+          key: ${{ matrix.target }}-${{ matrix.container && 'ubuntu-22.04' || 'runner' }}
       # Windows: the C runtime is linked into lawh.exe (+crt-static), so it runs without the
       # Visual C++ Redistributable. Only this build: CI and local builds keep the default.
       - name: Build
@@ -154,8 +174,10 @@ jobs:
             exit 1
           fi
       # The built binary starts, and exports a board with a formula: the export compiles it in
-      # the math worker, which is this binary started again. No display needed. A clean export
-      # prints nothing; a formula that fails prints "... formula(s) failed" and still exits 0.
+      # the math worker, which is this binary started again. No display needed. A clean start
+      # and a clean export print nothing else, so any other output fails: a formula that fails
+      # ("... formula(s) failed", exit 0), a warning, or the loader's "weak version ... not
+      # found" (run here on the oldest glibc the Linux builds support).
       - name: Smoke test
         shell: bash
         run: |
@@ -163,16 +185,21 @@ jobs:
           if [[ "$TARGET" == *windows* ]]; then bin="$bin.exe"; fi
           tmp="$RUNNER_TEMP"
           if command -v cygpath > /dev/null; then tmp="$(cygpath -m "$tmp")"; fi
-          "$bin" --version
+          "$bin" --version 2> "$tmp/stderr.txt"
+          if [[ -s "$tmp/stderr.txt" ]]; then
+            cat "$tmp/stderr.txt"
+            echo "::error::lawh --version printed to stderr"
+            exit 1
+          fi
           out="$tmp/area.svg"
           if ! note="$("$bin" export examples/area.lawh "$out" 2>&1)"; then
             echo "$note"
             echo "::error::lawh export failed"
             exit 1
           fi
-          if [[ -n "$note" ]]; then echo "$note"; fi
-          if [[ "$note" == *failed* ]]; then
-            echo "::error::lawh export reported a formula that failed"
+          if [[ -n "$note" ]]; then
+            echo "$note"
+            echo "::error::lawh export printed something: a clean export prints nothing"
             exit 1
           fi
           if [[ ! -s "$out" ]]; then
@@ -180,15 +207,24 @@ jobs:
             exit 1
           fi
           echo "area.svg: $(wc -c < "$out") bytes"
-      # The newest glibc symbol version the binary needs. Weak references (objdump's second
-      # column "w") are left out: std looks them up and falls back when they're missing, and the
-      # loader doesn't require their versions (readelf -V marks those "Flags: WEAK").
+      # The newest glibc symbol version the binary asks for, weak references included: std
+      # falls back when a weak one is missing, but the loader warns about its version at every
+      # start. Newer than GLIBC_FLOOR (Ubuntu 22.04's, the floor the README states) fails.
       - name: glibc floor
         if: runner.os == 'Linux'
+        shell: bash
+        env:
+          GLIBC_FLOOR: "2.35"
         run: |
-          floor="$(objdump -T "target/$TARGET/release/lawh" | awk '$2 != "w"' | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
-          echo "lawh for $TARGET needs ${floor:?no GLIBC symbol versions found} or newer"
-          echo "- \`$TARGET\`: needs glibc ${floor#GLIBC_} or newer" >> "$GITHUB_STEP_SUMMARY"
+          floor="$(objdump -T "target/$TARGET/release/lawh" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1)"
+          floor="${floor:?no GLIBC symbol versions found}"
+          floor="${floor#GLIBC_}"
+          echo "lawh for $TARGET needs glibc $floor or newer"
+          echo "- \`$TARGET\`: needs glibc $floor or newer" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$(printf '%s\n' "$floor" "$GLIBC_FLOOR" | sort -V | tail -n 1)" != "$GLIBC_FLOOR" ]]; then
+            echo "::error::lawh needs glibc $floor, newer than $GLIBC_FLOOR"
+            exit 1
+          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: third-party-licences
