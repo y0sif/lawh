@@ -56,6 +56,23 @@ images, plugins.
 
 ## Install
 
+### Arch Linux
+
+```bash
+yay -S lawh-bin
+```
+
+[`lawh-bin`](https://aur.archlinux.org/packages/lawh-bin) on the AUR installs the release binary
+for x86_64 or arm64.
+
+### Homebrew (macOS and Linux)
+
+```bash
+brew install y0sif/tap/lawh
+```
+
+The formula installs the release binary from [y0sif/homebrew-tap](https://github.com/y0sif/homebrew-tap).
+
 ### Download a release
 
 Each [release](https://github.com/y0sif/lawh/releases) has an archive for each platform:
